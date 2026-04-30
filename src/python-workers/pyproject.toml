@@ -1,0 +1,20 @@
+[project]
+name = "dexter-workers"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "kokoro>=0.9.0",      # PyPI package "kokoro"; verify name if kokoro-82M ships as kokoro-onnx
+    "numpy>=1.26",
+    "scipy>=1.13",        # resample TTS output 24kHz → 16kHz
+    "playwright>=1.40",   # Phase 14 browser automation (chromium headless)
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"    # Phase 14: enables async def tests without explicit @pytest.mark.asyncio
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=0.23",   # Phase 14: async test runner for browser_worker.py tests
+]

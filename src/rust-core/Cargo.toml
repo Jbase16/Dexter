@@ -1,0 +1,46 @@
+[package]
+name    = "dexter-core"
+version = "0.1.0"
+edition = "2021"
+# Phase 38: with `dexter-cli` added as a second binary, Cargo refuses to guess
+# which one `cargo run` (no --bin) should execute. `default-run` declares that
+# the daemon is THE canonical binary — `make run` and ad-hoc `cargo run` invocations
+# keep working without `--bin dexter-core`. Utility binaries (dexter-cli, future
+# debug tools) are still buildable via `cargo build --bin <name>`.
+default-run = "dexter-core"
+
+[dependencies]
+tokio        = { version = "1",    features = ["full"] }
+tonic        = { version = "0.12", features = ["transport"] }
+prost        = "0.13"
+tokio-stream = { version = "0.1",  features = ["net", "sync"] }
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow       = "1"
+serde        = { version = "1",    features = ["derive"] }   # Config struct deserialization
+toml         = "0.8"                                          # TOML config file format
+dirs         = "5"                                            # home_dir() resolution
+uuid         = { version = "1",    features = ["v4"] }        # Proper trace/session IDs
+# Ollama HTTP client. default-features=false avoids OpenSSL/Security framework linkage
+# (all Ollama traffic is localhost HTTP, TLS is never used). rustls-tls included to
+# satisfy reqwest's internal TLS feature gate without pulling in system TLS libraries.
+reqwest      = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"   # StreamExt for reqwest's Bytes stream (.next().await)
+serde_json   = "1"     # NDJSON line parsing: serde_json::from_str per line in generate_stream
+serde_yaml   = "0.9"   # PersonalityLayer: parses config/personality/default.yaml profile
+chrono       = { version = "0.4", features = ["serde"] }  # ISO8601 timestamps in SessionStateManager
+rusqlite     = { version = "0.32", features = ["bundled"] } # SQLite for VectorStore; bundled avoids system SQLite dep
+scraper      = "0.22"                                        # HTML5 parsing for WebRetriever text extraction
+base64       = "0.22"                                        # PNG → base64 encoding for Ollama vision API (Phase 20)
+regex        = "1"                                           # Implicit fact extraction patterns in memory/extractor.rs (Phase 22)
+# Phase 38: dexter-cli (src/bin/dexter-cli.rs) needs the same UDS-over-gRPC
+# connector pattern as the integration tests. Promoted from dev-dependencies
+# so the binary can be built via `cargo build --bin dexter-cli` (release-mode).
+tower      = "0.4"                                      # service_fn UDS connector for tonic Channel
+hyper-util = { version = "0.1", features = ["tokio"] }  # TokioIo adapter: tokio AsyncRead/Write → hyper rt::io::Read/Write
+
+[dev-dependencies]
+tempfile   = "3"                                        # Named temp files for personality YAML parse-error tests
+
+[build-dependencies]
+tonic-build = "0.12"

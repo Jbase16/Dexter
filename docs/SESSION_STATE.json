@@ -1,0 +1,597 @@
+{
+  "schema_version": "2.0",
+  "session_id": "2026-03-19-session-024",
+  "session_start": "2026-03-19T00:00:00Z",
+  "session_end": null,
+  "build_phase": {
+    "current": "Phase 34 complete \u2014 Phase 35 next",
+    "completed_phases": [
+      "Phase 1 Feasibility Spike \u2014 ALL 9 CRITERIA PASS",
+      "Phase 2 Foundation \u2014 ALL 9 CRITERIA PASS",
+      "Phase 3 IPC Contract Finalization \u2014 ALL 7 CRITERIA PASS",
+      "Phase 4 Rust InferenceEngine \u2014 ALL 6 CRITERIA PASS",
+      "Phase 5 Rust ModelRouter + PersonalityLayer \u2014 ALL 6 CRITERIA PASS",
+      "Phase 6 Rust Orchestrator + Session State \u2014 ALL 4 AUTOMATED CRITERIA PASS",
+      "Phase 7 Context Observer \u2014 79 TESTS PASS, Swift EventBridge compiles clean",
+      "Phase 8 Action Engine \u2014 119 TESTS PASS, 0 WARNINGS",
+      "Phase 9 Retrieval Pipeline \u2014 138 TESTS PASS, 0 WARNINGS",
+      "Phase 10 Voice Worker Bridge \u2014 159 TESTS PASS, 0 WARNINGS",
+      "Phase 11 Swift Shell Foundation \u2014 swift build clean, 0 warnings from project code",
+      "Phase 12 Swift Entity + Core Bridge \u2014 swift build clean, 0 warnings from project code",
+      "Phase 13 End-to-End Voice \u2014 159 TESTS PASS, swift build clean, 0 warnings from project code",
+      "Phase 14 Browser Automation Worker \u2014 168 RUST TESTS PASS, 19 PYTHON TESTS PASS, 0 WARNINGS",
+      "Phase 15 Integration + Hardening \u2014 178 RUST TESTS PASS, 19 PYTHON TESTS PASS, 0 WARNINGS",
+      "Phase 16 Context-Aware Inference + Hotkey Activation \u2014 180 RUST TESTS PASS, 19 PYTHON TESTS PASS, 0 WARNINGS",
+      "Phase 17 Proactive Context-Triggered Observations \u2014 193 RUST TESTS PASS, 19 PYTHON TESTS PASS, 0 WARNINGS",
+      "Phase 18 Configurable Hotkey + Proactive Exclusions + Proactive IDLE Timing + Regular-Response SPEAKING\u2192IDLE Timing Fix \u2014 204 RUST TESTS PASS, 19 PYTHON TESTS PASS, swift build clean, 0 warnings from project code",
+      "Phase 19 Hallucination Guard: Live Retrieval Activation \u2014 214 RUST TESTS PASS, 19 PYTHON TESTS PASS, swift build clean, 0 warnings from project code",
+      "Phase 20 Vision Integration: Screen Capture + llama3.2-vision queries \u2014 224 RUST TESTS PASS, 19 PYTHON TESTS PASS, swift build clean, 0 warnings from project code",
+      "Phase 21 Cross-Session Memory: Operator Fact Storage and Contextual Recall \u2014 239 RUST TESTS PASS, 19 PYTHON TESTS PASS, swift build clean, 0 warnings",
+      "Phase 22 Retrieval Pipeline Hardening: contamination fix + local-first retrieval + implicit fact extraction \u2014 251 RUST TESTS PASS, 19 PYTHON TESTS PASS, 0 warnings",
+      "Phase 23 Voice Pipeline Quality \u2014 persistent STT worker, TRANSCRIPT_DONE sentinel, action feedback TTS, stuck-LISTENING fix, browser action guidance \u2014 251 RUST TESTS PASS, 20 PYTHON TESTS PASS, swift build clean, 0 warnings from project code",
+      "Phase 24c VadHint + STT Fast Path + VoiceCapture override \u2014 267 RUST TESTS PASS, swift build clean, 0 errors, 0 warnings from project code",
+      "Phase 25 Conversation HUD \u2014 floating NSPanel with streaming text, voice transcript display, typed input, auto-dismiss \u2014 swift build clean, 0 errors, 0 warnings from project code",
+      "Phase 27 Voice Barge-In \u2014 background generation spawn, Arc<AtomicBool> cancel token, isSpeaking VAD gate, lazy AudioPlayer re-arm, LISTENING IDLE-suppression race fix \u2014 267 RUST TESTS PASS, swift build clean, 0 errors, 0 warnings from project code",
+      "Phase 28 Clipboard Context Integration \u2014 NSPasteboard.changeCount polling, SYSTEM_EVENT_TYPE_CLIPBOARD_CHANGED = 9, ContextObserver.clipboard_text + clipboard_summary(), [Clipboard: ...] injected between [Context:] and [Memory:] in prepare_messages_for_inference \u2014 276 RUST TESTS PASS, swift build clean, 0 errors, 0 warnings from project code",
+      "Phase 29 HUD Conversation History \u2014 HUDHistoryView (scrollable accumulated NSAttributedString), toggle button (clock SF Symbol, \u03b1=0.4/1.0), upward window expansion, historyDivider direct ref, pendingTurnOperatorText for proactive (observation) labelling, currentResponseText getter, autoresizingMask [.width] fix for textArea, orderOut DispatchQueue.main fix \u2014 swift build clean, 0 errors, 0 warnings from project code",
+      "Phase 30 Shell Context Integration \u2014 config/shell_integration.zsh (preexec/precmd hooks, python3 JSON encoding, nc -U fire-and-forget), InternalEvent::ShellCommand, run_shell_listener() (UnixListener per-connection tasks), parse_shell_payload() (extracted for testability), handle_shell_command() in orchestrator, [Shell: $ cmd \u2192 exit N in cwd] injected between [Clipboard:] and [Memory:] with SHELL_CONTEXT_MAX_AGE_SECS=300 expiry gate \u2014 285 RUST TESTS PASS, 0 warnings from project code",
+      "Phase 31 Startup Reliability + Browser Workflow Fix \u2014 warm_up_fast_model() returns JoinHandle, server.rs awaits it then calls send_startup_greeting() ('Ready.' TTS + SPEAKING\u2192IDLE), tx_reader_clone for fallback IDLE send; browser_worker.py handle_extract rewritten to return 'Title \u2192 URL' pairs via query_selector_all+get_attribute(href) (inner_text no longer used for links); personality prompt: apple_script vs browser:* separation documented, age-verification click guidance added, 'Title \u2192 URL' extract format documented \u2014 285 RUST TESTS PASS (no new tests), swift build clean",
+      "Phase 32 Action Parsing Fix \u2014 root cause: qwen3 stops generation after JSON `}` without emitting `</dexter:action>` (EOS token fires at end of JSON object); fix: extract_action_block fallback path parses `response[content_start..].trim()` as JSON when close tag absent (serde_json rejects truncated/malformed JSON, accepts clean `{...}`); personality YAML: close tag moved to same line as JSON example; interceptor bypass retained (guards against future [UNCERTAIN:] inside block); 293 RUST TESTS PASS, swift build clean",
+      "Phase 33 Download Reliability + Generation Cancellation Fix \u2014 (1) tilde expansion: expand_home() applied to all shell args and file paths in executor.rs (Command::new never calls a shell so ~/ is literal without this); (2) binary file_read: tokio::fs::read + String::from_utf8 check returns helpful error message instead of cryptic UTF-8 panic for .webm/.mp4 etc; (3) JoinHandle abort: CoreOrchestrator.generation_handle: Option<JoinHandle<()>> stored on spawn, handle.abort() called on barge-in and text-during-THINKING cancellation (drops reqwest stream, closes Ollama HTTP connection, stops server-side generation immediately vs 162s wall timeout); (4) mp4 forced: --merge-output-format mp4 added to all yt-dlp templates; (5) adult content: PornHub browser workflow documented (li.pcVideoListItem .title a selector tested and working, 37 results); ytsearch1: correctly marked as YouTube-only (no explicit content) \u2014 293 RUST TESTS PASS, 0 warnings, swift build clean",
+      "Phase 34 Modality Simplification (Push-to-Talk + Voice Mode) \u2014 (1) proto: TextInput.from_voice field added (bool field 2); (2) Rust: voice_mode: bool added to CoreOrchestrator, make_tts_channel gated on voice_mode (text input \u2192 text-only output, hotkey input \u2192 TTS enabled), handle_text_input(from_voice: bool) sets voice_mode before noise gate; (3) VoiceCapture.swift: isSpeaking, setSpeaking(_:), onSpeechStart removed entirely (no barge-in in push-to-talk model); (4) DexterClient.swift: capture.onSpeechStart closure removed, capture.setSpeaking() call removed, $0.fromVoice = true added to voice transcript TextInput echo; (5) pre-roll buffer completed: 6-frame circular buffer seeded on VAD rising edge, adaptive calibration cap fixed; (6) AudioPlayer: checkFinalCallback clears stale sequenceQueue on pendingBufferCount==0 (fixes stuck-queue after barge-in); (7) orchestrator: LISTENING suppression removed from AudioPlaybackComplete handler (always send IDLE), keep_alive_override pinning fixed in run_generation_background + generate_and_stream; (8) proto regenerated (Swift + Rust) \u2014 293 RUST TESTS PASS, swift build clean, 0 errors, 0 warnings from project code"
+    ],
+    "completed_components": [
+      "Makefile (setup/proto/run-core/run-swift/wait-for-core/run/test/help/clean targets)",
+      "src/shared/proto/dexter.proto (Ping + Session + StreamAudio \u2014 full Phase 3 schema, field tags final)",
+      "src/rust-core/Cargo.toml + build.rs (chrono dep added in Phase 6)",
+      "src/swift/Package.swift (grpc-swift 2.x, grpc-swift-nio-transport, grpc-swift-protobuf)",
+      "src/swift/Sources/Dexter/main.swift (explicit NSApplication.run, setvbuf stdout unbuffering)",
+      "src/swift/Sources/Dexter/App.swift",
+      "src/swift/Sources/Dexter/FloatingWindow.swift + PassthroughView",
+      "src/swift/Sources/Dexter/Bridge/DexterClient.swift (actor, grpc-swift 2.x API, authority fix, UUID trace IDs, CONNECTED event, textResponse/actionRequest/audioResponse cases)",
+      "src/swift/Sources/Dexter/Bridge/generated/dexter.pb.swift (protoc-gen-swift 1.35.1)",
+      "src/swift/Sources/Dexter/Bridge/generated/dexter.grpc.swift (protoc-gen-grpc-swift-2 2.2.0)",
+      "src/rust-core/src/constants.rs (SOCKET_PATH, SOCKET_TIMEOUT_SECS, CORE_VERSION, DEXTER_STATE_DIR, DEXTER_CONFIG_FILENAME, PERSONALITY_CONFIG_PATH, SESSION_STATE_SCHEMA_VERSION, SESSION_FILENAME_PREFIX, SESSION_LATEST_SYMLINK)",
+      "src/rust-core/src/config.rs (DexterConfig, CoreConfig, ModelConfig+Clone, LoggingConfig, BehaviorConfig \u2014 TOML-deserializable with per-field defaults, unit tests; Phase 17 added BehaviorConfig with proactive_enabled/interval/startup_grace)",
+      "src/rust-core/src/logging.rs (logging::init \u2014 JSON/pretty/auto via std::io::IsTerminal, RUST_LOG override)",
+      "config/personality/default.yaml (Phase 5 PersonalityLayer input \u2014 tone, anti-patterns, LoRA adapter path)",
+      "scripts/setup.sh (tool checker for rustc/cargo/swift/python/protoc/protoc-gen-swift/protoc-gen-grpc-swift-2/ollama)",
+      "src/rust-core/src/inference/error.rs (InferenceError: OllamaUnavailable/ModelNotFound/StreamInterrupted/RequestTimeout/ApiError/SerializationError; From<reqwest::Error>; From<serde_json::Error>; From<InferenceError> for tonic::Status; 7 unit tests)",
+      "src/rust-core/src/inference/models.rs (ModelId enum: Fast/Primary/Heavy/Code/Vision/Embed; ollama_name()/tier_name()/unload_after_use(); ModelInfo struct; 4 unit tests)",
+      "src/rust-core/src/inference/engine.rs (InferenceEngine: generate_stream()/embed()/list_available_models()/ensure_model_available()/unload_model()/pull_model(); NDJSON streaming decoder with inactivity timeout; 6 integration tests: AC-2 through AC-7)",
+      "src/rust-core/src/inference/mod.rs (module root with pub re-exports)",
+      "Makefile: test-inference target (cargo test -- --ignored)",
+      "src/rust-core/src/personality/layer.rs (PersonalityProfile/ResponseStyle serde structs; PersonalityError; PersonalityLayer::load/load_or_default/with_defaults/build_system_prompt/apply_to_messages; 11 unit tests)",
+      "src/rust-core/src/personality/mod.rs (module root with pub re-exports)",
+      "src/rust-core/src/inference/router.rs (Category enum; Complexity 0-3; RoutingDecision; ModelRouter::route with 2-stage keyword+complexity routing; ConversationContext with turn-pair truncation; 16 unit tests)",
+      "src/rust-core/src/session/mod.rs (Phase 6 \u2014 module root re-exporting SessionStateManager)",
+      "src/rust-core/src/session/state.rs (Phase 6 \u2014 SessionStateManager: new/push_turn/history/persist/load_latest; HistoryEntry, SessionState, BuildPhaseInfo, ModelConfigSnapshot, EnvironmentInfo; symlink management via symlink_metadata(); ISO8601 timestamps via chrono; 7 unit tests)",
+      "src/rust-core/src/orchestrator.rs (Phase 6\u201317 \u2014 CoreOrchestrator: per-session coordinator; handle_event/handle_text_input/handle_system_event/handle_ui_action/handle_action_approval/shutdown; full inference pipeline: routing\u2192personality\u2192context\u2192retrieval\u2192generate_stream; collect_generation()/do_proactive_response() added Phase 17; OrchestratorError; many unit tests)",
+      "src/rust-core/src/ipc/server.rs (Phase 6 \u2014 CoreService{cfg: Arc<DexterConfig>}; serve(socket_path, cfg); session() with reader+hold-open oneshot pattern + orchestrator dispatch; 2 unit tests + 1 ignored integration test)",
+      "src/rust-core/src/main.rs (Phase 6 \u2014 Arc<DexterConfig>, session bootstrap log, inference+personality startup checks, tokio::select! graceful shutdown)",
+      "src/shared/proto/dexter.proto (Phase 7 \u2014 added SYSTEM_EVENT_TYPE_AX_ELEMENT_CHANGED=5, SYSTEM_EVENT_TYPE_SCREEN_UNLOCKED=6 with inline payload documentation)",
+      "src/rust-core/src/constants.rs (Phase 7 \u2014 AX_VALUE_PREVIEW_MAX_CHARS: usize = 200, CONTEXT_DEBOUNCE_MS: u64 = 150)",
+      "src/rust-core/src/context_observer.rs (Phase 7 \u2014 ContextObserver, ContextSnapshot, AxElementInfo; update_from_app_focused/update_from_element_changed/set_screen_locked/snapshot/context_summary; compute_hash with DefaultHasher; 10 unit tests; privacy filter for sensitive elements; 200-char truncation guard)",
+      "src/rust-core/src/orchestrator.rs (Phase 7 \u2014 context_observer: ContextObserver field; exhaustive handle_system_event matching all 6 variants; 2 new ContextObserver integration tests; make_orchestrator() updated)",
+      "src/swift/Sources/Dexter/Bridge/EventBridge.swift (Phase 7 \u2014 @unchecked Sendable class; NSWorkspace.didActivateApplicationNotification + DistributedNotificationCenter screen lock/unlock; AXObserverCreate C callback; queryFocusedElement with AXSecureTextField privacy filter; 150ms DispatchWorkItem debounce; sendSystemEvent JSON serialization)",
+      "src/swift/Sources/Dexter/Bridge/DexterClient.swift (Phase 7 \u2014 EventBridge lifecycle: let bridge = EventBridge { Task { await self?.send(event) } }; bridge.start(); defer bridge.stop())",
+      "src/rust-core/src/constants.rs (Phase 8 \u2014 AUDIT_LOG_FILENAME, ACTION_DEFAULT_TIMEOUT_SECS, ACTION_BLOCK_OPEN, ACTION_BLOCK_CLOSE, AUDIT_OUTPUT_PREVIEW_CHARS)",
+      "src/rust-core/src/action/audit.rs (Phase 8 \u2014 AuditLog: append-only JSONL; AuditEntry<'a> serde Serialize struct; preview() truncator; AuditEntryBuilder Phase 9+ convenience; 5 unit tests)",
+      "src/rust-core/src/action/policy.rs (Phase 8 \u2014 PolicyEngine::classify() with SAFE/CAUTIOUS/DESTRUCTIVE; SHELL_DESTRUCTIVE_CMDS/SHELL_SAFE_CMDS/SYSTEM_PATH_PREFIXES arrays; apply_override() upward-only rule; 15 unit tests)",
+      "src/rust-core/src/action/executor.rs (Phase 8 \u2014 execute_shell/execute_file_read/execute_file_write/execute_applescript; ExecutionResult struct; never shell=true; 8 unit tests)",
+      "src/rust-core/src/action/engine.rs (Phase 8 \u2014 ActionSpec serde internally-tagged enum; ActionOutcome enum; ActionEngine: submit/resolve/drain_pending_on_shutdown/execute_and_log; spec_to_audit_json redacts FileWrite.content; 7 unit tests)",
+      "src/rust-core/src/action/mod.rs (Phase 8 \u2014 module root with pub re-exports: ActionEngine/ActionOutcome/ActionSpec/PolicyEngine/AuditLog)",
+      "src/rust-core/src/main.rs (Phase 8 \u2014 added mod action)",
+      "src/rust-core/src/orchestrator.rs (Phase 8 \u2014 action_engine: ActionEngine field; shutdown(mut self) calls drain_pending_on_shutdown; handle_text_input: post-generation extract_action_block + ALERT state for pending DESTRUCTIVE; full handle_action_approval; send_action_request helper; extract_action_block standalone fn; 7 new tests)",
+      "config/personality/default.yaml (Phase 8 \u2014 action block format instructions in system_prompt_prefix: 4 action types, rules for args array + rationale + one block max + never credentials)",
+      "src/rust-core/Cargo.toml (Phase 9 \u2014 added rusqlite = { version = \"0.32\", features = [\"bundled\"] } + scraper = \"0.22\")",
+      "src/rust-core/src/constants.rs (Phase 9 \u2014 MEMORY_DB_FILENAME, RETRIEVAL_EMBED_DIM, RETRIEVAL_MAX_MEMORY_HITS, RETRIEVAL_WEB_TIMEOUT_SECS, RETRIEVAL_MAX_CONTENT_CHARS, RETRIEVAL_ACKNOWLEDGMENT, UNCERTAINTY_MARKER)",
+      "src/rust-core/src/retrieval/store.rs (Phase 9 \u2014 VectorStore: rusqlite::Connection wrapped in Mutex<> for Sync; CREATE TABLE memory + index; insert() INSERT OR IGNORE; search() loads all rows + cosine_similarity in Rust; cosine_similarity/embedding_to_blob/blob_to_embedding helpers; 7 unit tests)",
+      "src/rust-core/src/retrieval/web.rs (Phase 9 \u2014 WebRetriever: reqwest Client with timeout + User-Agent header; fetch() GET + extract_text(); extract_body() priority: article > main > body; filter_noise_descendants() strips script/style/nav/footer/header; normalize_whitespace(); truncate_to_chars(); 4 unit tests)",
+      "src/rust-core/src/retrieval/pipeline.rs (Phase 9 \u2014 RetrievalPipeline: detect_pre_trigger()/detect_post_trigger() pure fns; retrieve() embed+search+DDG web fetch; format_for_injection(); store_conversation_turn(); fetch_ddg() + try_parse_ddg_json() + cache_web_result() DuckDuckGo instant-answer API; new_degraded() in-memory fallback; 6 unit tests)",
+      "src/rust-core/src/retrieval/mod.rs (Phase 9 \u2014 module root with pub re-exports for RetrievalPipeline, MemoryEntry, VectorStore, FetchResult, WebRetriever)",
+      "src/rust-core/src/main.rs (Phase 9 \u2014 added mod retrieval)",
+      "src/rust-core/src/orchestrator.rs (Phase 9 \u2014 retrieval: RetrievalPipeline field; RetrievalSetup OrchestratorError variant; new() with new_degraded() fallback; generate_and_stream() private helper extracting streaming loop; handle_text_input() pre-retrieval hook + context injection at index 1 + post-retrieval uncertainty check + memory accumulation; make_orchestrator() updated; 2 new tests)",
+      "src/python-workers/pyproject.toml (Phase 10 \u2014 dexter-workers package; deps: faster-whisper>=1.1.0, kokoro>=0.9.0, numpy>=1.26, scipy>=1.13)",
+      "src/python-workers/workers/protocol.py (Phase 10 \u2014 10 MSG_* constants 0x01-0x0A; send_frame/read_frame binary framing; write_handshake JSON line; EOF \u2192 (None, None))",
+      "src/python-workers/workers/stt_worker.py (Phase 10 \u2014 WhisperModel('base.en'); HEALTH_PING/AUDIO_CHUNK/AUDIO_END/SHUTDOWN handlers; PCM int16 \u2192 float32 normalization; TRANSCRIPT frame output)",
+      "src/python-workers/workers/tts_worker.py (Phase 10 \u2014 KPipeline(lang_code='a'); TEXT_INPUT handler; kokoro synthesis \u2192 resample_poly 24k\u219216k \u2192 int16 PCM; TTS_AUDIO frames + TTS_DONE)",
+      "src/python-workers/tests/test_protocol.py (Phase 10 \u2014 6 tests: roundtrip, zero payload, EOF, truncated header, handshake JSON, constants unique/in-range)",
+      "src/python-workers/tests/test_stt_worker.py (Phase 10 \u2014 4 tests using unittest.mock.patch('faster_whisper.WhisperModel') + BytesIO)",
+      "src/python-workers/tests/test_tts_worker.py (Phase 10 \u2014 4 tests using mock KPipeline; includes resample_to_16k dtype verification)",
+      "src/rust-core/src/constants.rs (Phase 10 \u2014 VOICE_STT_WORKER_PATH, VOICE_TTS_WORKER_PATH, VOICE_PYTHON_EXE, VOICE_WORKER_HEALTH_INTERVAL_SECS, VOICE_WORKER_HEALTH_TIMEOUT_SECS, VOICE_WORKER_RESTART_MAX_ATTEMPTS, VOICE_WORKER_RESTART_BACKOFF_SECS, TTS_SENTENCE_MIN_CHARS, STT_WHISPER_MODEL, TTS_KOKORO_VOICE, VOICE_PROTOCOL_VERSION)",
+      "src/rust-core/src/voice/protocol.rs (Phase 10 \u2014 HEADER_SIZE=5; msg submodule with 10 constants; WorkerType enum {Stt,Tts}; WorkerHandshake struct; parse_handshake(); async write_frame/read_frame; 5 unit tests)",
+      "src/rust-core/src/voice/sentence.rs (Phase 10 \u2014 SentenceSplitter: push() \u2192 Vec<String>, flush() \u2192 Option<String>; boundaries: '. '/'! '/'? '/'\n\n' with TTS_SENTENCE_MIN_CHARS guard; 7 unit tests)",
+      "src/rust-core/src/voice/worker_client.rs (Phase 10 \u2014 WorkerClient: spawn/health_check/write_frame/read_frame/shutdown; WorkerError 5-variant enum with Display+Error; 3 unit tests)",
+      "src/rust-core/src/voice/coordinator.rs (Phase 10 \u2014 VoiceCoordinator: Arc<Mutex<Option<WorkerClient>>> + Arc<AtomicBool>; new_degraded/start_tts/is_tts_available/tts_arc/health_check_and_restart/shutdown; 4 unit tests)",
+      "src/rust-core/src/voice/mod.rs (Phase 10 \u2014 module root; re-exports VoiceCoordinator, WorkerType, WorkerClient, WorkerError)",
+      "src/rust-core/src/main.rs (Phase 10 \u2014 added mod voice)",
+      "src/rust-core/src/ipc/server.rs (Phase 10 \u2014 stream_audio() real implementation: spawn WorkerClient(Stt) per call, forward AUDIO_CHUNK/AUDIO_END frames, read TRANSCRIPT frames, yield TranscriptChunk; renamed test to stream_audio_returns_ok_stream_when_worker_unavailable; added orchestrator.start_voice().await in reader task)",
+      "src/rust-core/src/orchestrator.rs (Phase 10 \u2014 voice: VoiceCoordinator field; VoiceSetup OrchestratorError variant; start_voice() public async; shutdown() calls voice.shutdown().await; generate_and_stream() extended with tts_tx: Option<UnboundedSender<String>> param + SentenceSplitter loop; handle_text_input() spawns TTS synthesis task with Arc<Mutex<Option<WorkerClient>>>; follow-up passes None; 2 new tests)",
+      "Makefile (Phase 10 \u2014 setup-python and test-python targets)",
+      "src/swift/Sources/Dexter/FloatingWindow.swift (Phase 11 \u2014 position persistence: frameDefaultsKey/saveDebounceMs constants; saveDebounceItem: DispatchWorkItem?; loadOrDefaultFrame() validates saved frame center against NSScreen.screens; defaultFrame() 200\u00d7400pt horizontal center 80pt above visibleFrame.minY; ensureOnScreen() public method for live screen changes; extension FloatingWindow: NSWindowDelegate with windowDidMove/scheduleSaveFrame 250ms debounce/persistFrameNow NSStringFromRect; init() now uses loadOrDefaultFrame() and sets delegate = self)",
+      "src/swift/Sources/Dexter/App.swift (Phase 11 \u2014 selector-based NSApplication.didChangeScreenParametersNotification observer calling @MainActor screenParametersDidChange() \u2192 floatingWindow?.ensureOnScreen(); applicationWillTerminate synchronous flush via floatingWindow?.persistFrameNow())",
+      "src/swift/Sources/Dexter/Entity/EntityState.swift (Phase 12 \u2014 enum idle/listening/thinking/speaking/alert/focused; init(from: Dexter_V1_EntityState); shaderValue: Int32)",
+      "src/swift/Sources/Dexter/Entity/EntityRenderer.swift (Phase 12 \u2014 protocol EntityRenderer: setup(device:)/resize(drawableSize:)/render(in:state:time:))",
+      "src/swift/Sources/Dexter/Entity/GeometricRenderer.swift (Phase 12 \u2014 Metal SDF disc renderer; inline MSL shaderSource via makeLibrary(source:options:); Uniforms SIMD2<Float>+Float+Int32; premultiplied alpha blend pipeline; per-state animation table: idle/listening/thinking/speaking/alert/focused; setFragmentBytes inline (no MTLBuffer per frame))",
+      "src/swift/Sources/Dexter/Entity/AnimatedEntity.swift (Phase 12 \u2014 MTKView subclass; entityState: EntityState; circle SDF hitTest radius = 0.55\u00d7min(w,h)/2; isOpaque override \u2192 false; isPaused=false/enableSetNeedsDisplay=false/60fps; MTKViewDelegate extension)",
+      "src/swift/Sources/Dexter/FloatingWindow.swift (Phase 12 \u2014 replaced connectionIndicator: ConnectionIndicator with animatedEntity: AnimatedEntity; buildContentView rewritten to add AnimatedEntity with autoresizingMask)",
+      "src/swift/Sources/Dexter/Bridge/DexterClient.swift (Phase 12 \u2014 removed connectionIndicator state calls; onResponse captures [continuation, window, sessionID]; EntityStateChange \u2192 EntityState(from:) \u2192 window.animatedEntity.entityState via MainActor.run; ActionRequest SAFE guard + withCheckedContinuation+Task{@MainActor} NSAlert sheet + ActionApproval send)",
+      "src/swift/Sources/Dexter/Voice/AudioPlayer.swift (AVAudioEngine streaming PCM, serial queue, barge-in stop)",
+      "src/swift/Sources/Dexter/Voice/VoiceCapture.swift (AVCaptureSession VAD, onUtteranceComplete, onSpeechStart)",
+      "src/swift/Sources/Dexter/Info.plist (LSUIElement + NSMicrophoneUsageDescription)",
+      "src/rust-core/src/orchestrator.rs voice_health_check() method (Phase 13)",
+      "src/rust-core/src/ipc/server.rs tokio::select! health-check timer (Phase 13)",
+      "src/rust-core/src/browser/mod.rs + coordinator.rs (BrowserCoordinator, lifecycle mirrors VoiceCoordinator)",
+      "src/rust-core/src/action/engine.rs \u2014 BrowserActionKind enum + ActionSpec::Browser variant",
+      "src/rust-core/src/action/policy.rs \u2014 classify_browser() with SAFE/CAUTIOUS/DESTRUCTIVE table",
+      "src/rust-core/src/action/executor.rs \u2014 execute_browser() + build_browser_frame()",
+      "src/python-workers/workers/browser_worker.py (Playwright async worker, 5 handlers)",
+      "src/python-workers/tests/test_browser_worker.py (5 tests: handshake + 4 handler unit tests)",
+      "src/rust-core/src/system/mod.rs (new)",
+      "src/rust-core/src/system/memory.rs (new \u2014 vm_stat parser, MemorySnapshot, MemorySampleError, warn_if_low_for_heavy)",
+      "src/rust-core/src/voice/coordinator.rs (permanently_degraded bool + is_permanently_degraded() + log-spam fix)",
+      "src/rust-core/src/browser/coordinator.rs (is_permanently_degraded())",
+      "src/rust-core/src/action/engine.rs (is_browser_permanently_degraded() delegation)",
+      "src/rust-core/src/orchestrator.rs (voice_degraded_notified, browser_degraded_notified, send_text_response_to_ui, memory warning on HEAVY)",
+      "scripts/permissions.sh (TCC permission checker for Accessibility + Microphone)",
+      "Makefile (smoke, test-e2e, check-permissions, setup comment, .PHONY)",
+      "constants.rs (#[allow(dead_code)] cleaned from VOICE_WORKER_RESTART_* and HEALTH_INTERVAL_SECS)",
+      "src/rust-core/src/context_observer.rs (Phase 16 \u2014 removed #[allow(dead_code)] from context_summary() and AxElementInfo)",
+      "src/rust-core/src/orchestrator.rs (Phase 16 \u2014 context injection step 4b, retrieval step 4c, HotkeyActivated arm, debug! import)",
+      "src/shared/proto/dexter.proto (Phase 16 \u2014 SYSTEM_EVENT_TYPE_HOTKEY_ACTIVATED = 7)",
+      "src/swift/Sources/Dexter/Bridge/EventBridge.swift (Phase 16 \u2014 hotkeyTapCallback, CGEvent.tapCreate/tapEnable, startHotkeyTap/stopHotkeyTap)",
+      "docs/PHASE_16_SPEC.md (Phase 16 spec)",
+      "src/rust-core/src/proactive/mod.rs (Phase 17 \u2014 module root re-exporting ProactiveEngine)",
+      "src/rust-core/src/proactive/engine.rs (Phase 17 \u2014 ProactiveEngine: should_fire/record_fire/build_proactive_prompt/is_silent_response; BehaviorConfig integration; 10 unit tests)",
+      "src/rust-core/src/config.rs (Phase 17 \u2014 BehaviorConfig added: proactive_enabled/proactive_interval_secs/proactive_startup_grace_secs with per-field serde defaults; DexterConfig.behavior field; 2 new tests)",
+      "src/rust-core/src/orchestrator.rs (Phase 17 \u2014 proactive_engine field; collect_generation() non-streaming path; do_proactive_response() with [SILENT] check; AppFocused trigger in handle_system_event)",
+      "docs/PHASE_17_SPEC.md (Phase 17 spec)"
+    ],
+    "phase_1_criteria": {
+      "1_make_proto": "PASS \u2014 dexter.pb.swift and dexter.grpc.swift generated clean, cargo build clean",
+      "2_run_core_first": "PASS \u2014 binds UDS, logs startup, stays running",
+      "3_run_core_duplicate": "PASS \u2014 second instance detects live socket and exits with clear error",
+      "4_stale_socket_cleanup": "PASS \u2014 stale socket detected by connect attempt (not file existence), removed on restart",
+      "5_green_disc": "PASS \u2014 ConnectionIndicator turns green within ~3s; console prints Ping OK + Entity state \u2192 idle",
+      "6_spaces": "PASS \u2014 window visible on every Mission Control space",
+      "7_fullscreen": "PASS \u2014 window appears over fullscreen app (brief flicker during transition, acceptable)",
+      "8_expose": "PASS \u2014 window stationary during Expos\u00e9; absent from Cmd+Tab",
+      "9_click_through": "PASS \u2014 transparent region passes clicks to app below; disc receives drag events"
+    },
+    "phase_2_criteria": {
+      "1_cargo_build_clean": "PASS \u2014 zero warnings, zero errors",
+      "2_make_test_all_pass": "PASS \u2014 5/5 unit tests in config.rs pass",
+      "3_make_setup_all_pass": "PASS \u2014 all tool checks green on this machine",
+      "4_make_help": "PASS \u2014 prints target table with descriptions",
+      "5_disc_green": "PASS \u2014 disc still turns green (Phase 1 regression confirmed passing)",
+      "6_state_dir_created": "PASS \u2014 ~/.dexter/state/ created on startup",
+      "7_startup_log_structured": "PASS \u2014 JSON with version, socket, config_dir, configured_log_level fields",
+      "8_absent_config_uses_defaults": "PASS \u2014 INFO log 'No config at path \u2014 using defaults', no error exit",
+      "9_malformed_config_exits_structured": "PASS \u2014 ERROR JSON log with path+error detail, clean exit(1)"
+    },
+    "phase_3_criteria": {
+      "1_proto_updated": "PASS \u2014 full schema replacement: UIAction, SystemEvent, ActionApproval, ActionRequest, ActionCategory, AudioChunk, TranscriptChunk, StreamAudio RPC; field tags final",
+      "2_make_proto_clean": "PASS \u2014 make proto regenerated Swift pb+grpc files with zero warnings",
+      "3_cargo_build_clean": "PASS \u2014 zero warnings, zero errors after proto expansion + uuid dep",
+      "4_make_test_7_7": "PASS \u2014 7/7 tests pass (5 config unit tests + 2 new integration tests: session_bidirectional_roundtrip, stream_audio_returns_unimplemented)",
+      "5_swift_uuid_trace_ids": "PASS \u2014 DexterClient uses UUID().uuidString for ping and session trace IDs; spike-001 placeholder eliminated",
+      "6_connected_event": "PASS \u2014 DexterClient yields SystemEvent(CONNECTED) as first event in requestProducer",
+      "7_smoke_test_bidirectional": "PASS \u2014 Rust log shows ClientEvent received kind=system_event; Swift log shows Entity state \u2192 idle + Text response: 'session ready' (final: true)"
+    },
+    "phase_2_notes": [
+      "Config-logging bootstrap problem: logging must init before config load so malformed-TOML errors are captured. Solution: init with LoggingConfig::default() first; RUST_LOG env var overrides level at runtime.",
+      "serde partial-section defaults: #[serde(default)] on a field uses T::default() when the section is absent, but per-field defaults within the section require #[serde(default = \"fn\")] with explicit helper functions (because String::default() = \"\", not the model name).",
+      "with_current_span() is only on SubscriberBuilder JSON path, not Pretty path \u2014 builder types diverge after .pretty() vs .json(). Remove from pretty branch.",
+      "Makefile help grep pattern must match 'target: description' form only ('^## [a-z][a-z-]*:') to avoid picking up multi-line ## continuation comments."
+    ],
+    "phase_3_notes": [
+      "build.rs: build_client(false) was set because Swift owns the runtime client. Flipped to build_client(true) to make the generated DexterServiceClient available for #[cfg(test)] integration tests. The generated client is dead code in the production binary (pub mod, no warnings).",
+      "TokioIo wrapper required in tonic 0.12 test connectors: hyper 1.x split io traits from tokio traits. tokio::net::UnixStream implements tokio::io::AsyncRead/Write, but connect_with_connector requires hyper::rt::io::Read/Write. hyper_util::rt::TokioIo<T> is the bridge adapter. Added hyper-util = { version = \"0.1\", features = [\"tokio\"] } to dev-dependencies.",
+      "Oneshot channel session lifetime fix: replaced std::future::pending() hold-open task with oneshot::channel() pattern. Reader task holds Sender (_signal_done); drop on any exit path fires the oneshot; hold-open task exits and drops tx; ReceiverStream sees None \u2192 END_STREAM. Drop IS the signal, no explicit .send() needed.",
+      "description_p proto field rename: protoc-gen-swift renames proto field 'description' to 'description_p' due to conflict with CustomStringConvertible.description. Used in DexterClient.swift switch case for actionRequest.",
+      "event_kind() helper returns &'static str to avoid allocating a String on every log call. Match is exhaustive \u2014 compile error if new ClientEvent variants are added without updating it."
+    ],
+    "phase_4_criteria": {
+      "1_cargo_build_clean": "PASS \u2014 zero warnings, zero errors after all #[allow(dead_code)] suppressions",
+      "2_make_test_22_22": "PASS \u2014 22/22 unit tests pass (10 config, 7 InferenceError, 4 ModelId/ModelInfo, 1 offline engine new(), 2 ipc/server; 5 integration tests gated #[ignore])",
+      "3_engine_new_offline": "PASS \u2014 InferenceEngine::new() does not contact Ollama; AC-3 test passes offline always",
+      "4_generate_stream": "PASS \u2014 phi3:mini streams tokens, final chunk has done=true + eval_count>0, accumulated text non-empty",
+      "5_embed_phi3": "PASS \u2014 /api/embed with phi3:mini returns non-empty float vector (60s timeout for cold load)",
+      "6_list_models": "PASS \u2014 /api/tags returns correct ModelInfo list; null families field handled via Option<Vec<String>>.unwrap_or_default()",
+      "note_on_bugs": "See phase_4_notes for two bugs found and fixed during integration testing"
+    },
+    "phase_4_notes": [
+      "Ollama families:null deserialization bug: /api/tags returns \\\"families\\\": null (not absent) for some older models (wizardlm-uncensored:13b). serde #[serde(default)] handles missing keys but not explicit JSON null. Fix: changed OllamaModelDetails.families from Vec<String> to Option<Vec<String>>, then .unwrap_or_default() when building ModelInfo.",
+      "Integration test timeout too short for cold model load: test_config() used request_timeout_secs: 10. phi3:mini cold-loading from disk takes 20-40s. Embed test failed with RequestTimeout. Fix: raised to 60s in test_config() with a doc comment explaining the cold-load rationale.",
+      "Streaming timeout strategy: reqwest::ClientBuilder::timeout() and RequestBuilder::timeout() apply a wall-clock deadline to the entire request+response pair including streamed body. This kills legitimate long generations. Correct primitive: tokio::time::timeout() wrapping each .next() await call, resetting on every chunk. Only fires when Ollama stops sending entirely.",
+      "NDJSON final chunk: Ollama final streaming chunk has done:true but NO message field. OllamaChatChunk.message must be Option<OllamaChunkMessage> or the final chunk fails deserialization.",
+      "Ollama /api/embed not /api/embeddings: Post-0.1.26 embedding endpoint is /api/embed (plural form changed). Uses OLLAMA_EMBED_PATH constant."
+    ],
+    "phase_5_criteria": {
+      "1_cargo_build_clean": "PASS \u2014 zero warnings after #![allow(dead_code)] on router.rs and personality/layer.rs",
+      "2_make_test_50_50": "PASS \u2014 50/50 unit tests pass (previous 27 + 11 personality + 16 router/context; 5 Ollama integration tests gated #[ignore])",
+      "3_routing_all_policy_paths": "PASS \u2014 code+0-1\u2192CODE, code+2-3\u2192PRIMARY+CODE_fallback, vision\u2192VISION, chat+0-1\u2192FAST, chat+2\u2192PRIMARY, chat+3\u2192HEAVY all tested and correct",
+      "4_personality_injection": "PASS \u2014 apply_to_messages() prepends to empty, inserts before user, merges with existing system message, preserves history order",
+      "5_conversation_truncation": "PASS \u2014 ConversationContext drops oldest user+assistant pairs atomically; system message always survives; clear_history() preserves system message",
+      "6_personality_load_graceful": "PASS \u2014 load_or_default() handles missing file and malformed YAML without panicking; real project YAML parses correctly",
+      "note_on_bugs": "See phase_5_notes for one routing-test bug fixed during testing"
+    },
+    "phase_5_notes": [
+      "Route test bug: 'What time is it?' correctly classifies as RetrievalFirst (not Chat/FAST) because 'what time is' is in the retrieval-first keyword set \u2014 the model's training data is always stale for current time. The test asserted FAST incorrectly. Fix: updated test to assert RetrievalFirst, added new FAST test using 'tell me a joke about programmers' (no retrieval/code/vision signals).",
+      "serde_yaml 0.9.34+deprecated label: the crates.io version is tagged +deprecated in its release name but is the correct stable version for serde_yaml 0.9 \u2014 this is a crate metadata label, not a build warning. The crate continues to receive security patches and is widely used.",
+      "Routing keyword ordering: Vision check precedes Code and RetrievalFirst because some vision queries overlap with code (e.g., 'look at this screenshot of a compile error'). Vision always wins in overlap cases \u2014 the model selection is VISION; the orchestrator provides the image payload.",
+      "ConversationContext truncation removes pairs atomically: if a user message has no following assistant response (the last message is a user turn mid-stream), that user message is still counted as a complete turn and removed as a unit during trim_if_needed. This prevents half-pairs from accumulating in the context."
+    ],
+    "phase_6_criteria": {
+      "1_make_test_66_66": "PASS \u2014 66/66 unit tests pass (all Phase 1-5 tests + 7 SessionStateManager + 9 CoreOrchestrator + 2 ipc::server updated; 6 Ollama integration tests gated #[ignore])",
+      "2_session_opens_with_idle_state": "PASS \u2014 renamed from session_bidirectional_roundtrip; first event is EntityState(IDLE), no TextResponse for CONNECTED",
+      "3_session_state_persist_load": "PASS \u2014 7 SessionStateManager unit tests cover persist/load/symlink/timestamps/round-trip history",
+      "4_orchestrator_non_inference_handlers": "PASS \u2014 9 orchestrator unit tests cover CONNECTED/APP_FOCUSED/SCREEN_LOCKED/UIAction(Dismiss)/UIAction(Drag)/ActionApproval(approved)/ActionApproval(rejected)/None variant",
+      "5_integration_test_ignored": "ADDED \u2014 text_input_produces_streaming_tokens test with 30s timeout, gated #[ignore]; run with: make test-inference",
+      "6_dead_code_suppressions_cleared": "PASS \u2014 module-level #![allow(dead_code)] removed from engine.rs/router.rs/layer.rs; replaced with item-level #[allow(dead_code)] on Phase 7/8/9 hooks with phase annotation comments",
+      "note": "Criteria 6-10 from plan (manual acceptance: session file written on Ctrl+C, latest.json symlink, bootstrap log, entity transitions) require live run + Swift session. Architecture complete and wired \u2014 verify manually with make run."
+    },
+    "phase_6_notes": [
+      "UiAction capitalization: proto-generated type name is UiAction (not UIAction \u2014 prot follows camelCase from .proto field names). orchestrator.rs initially used UIAction which compiled as a type alias lookup but is actually UiAction in the generated code. Fixed in imports, function signature, test struct literals, and UIActionType \u2192 UiActionType.",
+      "ModelConfig missing Clone: orchestrator stores cfg.models.clone() to resolve model names at inference time. ModelConfig only had Debug+Deserialize derives. Added Clone to the derive list in config.rs.",
+      "Proto type visibility: ipc::server was a private module. orchestrator.rs needed to reference crate::ipc::proto::* types. Fixed by making server pub in ipc/mod.rs and adding pub use server::proto re-export. Orchestrator imports via crate::ipc::proto not crate::ipc::server::proto.",
+      "Dead-code suppression migration: removing module-level #![allow(dead_code)] from Phase 4/5 files exposed item-level warnings for Phase 7/8/9 APIs. Each unused item now has a targeted #[allow(dead_code)] with a comment naming the consuming phase (e.g., '// Phase 9 \u2014 Retrieval Pipeline'). This doubles as architectural documentation.",
+      "Integration test hang prevention: the streaming event loop inside text_input_produces_streaming_tokens is wrapped in tokio::time::timeout(30s). Without this, any stream teardown bug (e.g., hold-open task not exiting) silently hangs the test binary indefinitely in CI.",
+      "CoreOrchestrator::new() is fallible: InferenceEngine::new() returns Result<Self, InferenceError> (builds a reqwest Client, which can fail). The orchestrator propagates this as OrchestratorError::InferenceSetup. The server.rs reader task handles this with an early return that drops _signal_done, triggering the oneshot \u2192 hold-open \u2192 stream close sequence correctly."
+    ],
+    "phase_7_criteria": {
+      "1_make_test_79_79": "PASS \u2014 79/79 unit tests pass (previous 66 + 10 context_observer + 2 new orchestrator ContextObserver integration + 1 new orchestrator screen-lock test; 6 Ollama integration tests gated #[ignore])",
+      "2_swift_build_clean": "PASS \u2014 swift build completes with zero errors; only pre-existing grpc-swift deprecation warnings in generated proto code",
+      "3_ax_element_changed_in_proto": "PASS \u2014 SYSTEM_EVENT_TYPE_AX_ELEMENT_CHANGED=5 and SYSTEM_EVENT_TYPE_SCREEN_UNLOCKED=6 in dexter.proto; make proto regenerated Swift+Rust bindings cleanly",
+      "4_context_observer_hash_detection": "PASS \u2014 10 unit tests verify hash-based change detection, sensitive element redaction, 200-char truncation, screen lock toggle, context_summary formatting",
+      "5_orchestrator_exhaustive_match": "PASS \u2014 Rust match on SystemEventType covers all 6 variants (compiler enforces exhaustiveness); AX_ELEMENT_CHANGED and SCREEN_UNLOCKED arms implemented",
+      "6_event_bridge_privacy": "PASS \u2014 AXSecureTextField role check before value read; secondary keyword filter for password/credit card/cvv/ssn labels; value_preview empty for sensitive elements",
+      "note": "Manual acceptance criteria (3\u20137 from plan: app focus events/element change events/password field privacy/degraded mode without AX/screen lock) require live run with make run. Run make run to verify before starting Phase 8."
+    },
+    "phase_7_notes": [
+      "DistributedNotificationCenter vs NSWorkspace: NSWorkspace.sessionDidResignActiveNotification handles fast user switching, NOT screen lock. com.apple.screenIsLocked via DistributedNotificationCenter handles Ctrl+Cmd+Q / Lock Screen menu \u2014 the correct source for the SCREEN_LOCKED event.",
+      "Swift 6 strict concurrency + AXObserver C callback: The AXObserver C callback fires on CFRunLoopGetMain() (main thread), but the Swift 6 compiler cannot verify this from type signatures alone. Used @unchecked Sendable on EventBridge rather than @MainActor \u2014 avoids the defer { bridge.stop() } async constraint and the notification parameter sendability issue. All state access is guaranteed main-thread by NSWorkspace queue:.main and CFRunLoopGetMain(). This is the same pattern Apple uses for Obj-C framework bridges.",
+      "DexterClient integration: EventBridge is created inside withGRPCClient closure (after sessionID and continuation setup, before stub.session). The sendEvent closure uses Task { await self?.send(event) } to hop from the main thread to DexterClient's actor executor \u2014 required because @Sendable (Dexter_V1_ClientEvent) -> Void callbacks cannot directly call actor-isolated methods.",
+      "Rust secondary truncation guard: context_observer.rs imports AX_VALUE_PREVIEW_MAX_CHARS and truncates value_preview if over 200 chars, even though EventBridge already truncates. Defense-in-depth for future code paths that might skip EventBridge.",
+      "Proto intentional compile error: Adding new SystemEventType variants to the proto BEFORE implementing the Rust handlers produces a non-exhaustive match compile error. This is intentional \u2014 the error message names the exact missing variants, guiding implementation. The same pattern can be used for all future proto extensions."
+    ],
+    "phase_8_criteria": {
+      "1_make_test_119_119": "PASS \u2014 119/119 unit tests pass, 0 warnings (79 Phase 7 baseline + 5 audit + 15 policy + 8 executor + 7 engine + 5 new orchestrator extract_action_block/handle_action_approval_unknown; 6 Ollama integration tests gated #[ignore])",
+      "2_policy_engine_covers_all_paths": "PASS \u2014 SAFE (echo/ls/pwd/date), CAUTIOUS (git/file_write_home/file_write_tmp/applescript), DESTRUCTIVE (rm/mv/sudo/curl/system_paths); apply_override upward-only rule enforced in tests",
+      "3_executor_never_shell_true": "PASS \u2014 execute_shell uses tokio::process::Command::new(&args[0]).args(&args[1..]); no shell=true; direct OS arg array prevents injection",
+      "4_audit_log_append_only": "PASS \u2014 AuditLog.append() creates file on first call, never truncates; FileWrite.content redacted as '<N bytes omitted>' in spec_json",
+      "5_action_block_parsing": "PASS \u2014 extract_action_block() strips block from response text, parses serde JSON to ActionSpec, returns original on malformed/unclosed; 4 unit tests cover all paths",
+      "6_pending_drain_on_shutdown": "PASS \u2014 drain_pending_on_shutdown() called in shutdown(mut self) before persist; session end = implicit rejection; operator_approved=null in audit entry",
+      "7_personality_yaml_updated": "PASS \u2014 system_prompt_prefix in default.yaml documents all 4 action types, args-as-array rule, one-block-max rule, rationale requirement for state-modifying actions",
+      "note": "Manual acceptance (live action execution end-to-end with Swift UI showing ALERT state for DESTRUCTIVE actions and ActionApproval roundtrip) requires make run. Run before starting Phase 9 if confirming full pipeline."
+    },
+    "phase_8_notes": [
+      "Self-referential re-export error: pub use super::engine::{ActionSpec, ActionOutcome} inside engine.rs is a Rust compile error \u2014 a module re-exporting itself via super::self_module. Re-exports belong only in mod.rs. Caught in plan review before implementation.",
+      "Redundant inner use statement: constants ACTION_BLOCK_OPEN/ACTION_BLOCK_CLOSE imported at orchestrator.rs top level are in scope inside extract_action_block. Adding a second inner use produces an 'unused import' warning. Caught in plan review.",
+      "shutdown(mut self) pattern: drain_pending_on_shutdown() requires &mut on ActionEngine. Changed CoreOrchestrator::shutdown() signature from self to mut self to allow mutable method calls before the orchestrator is consumed. Callers pass owned values, so this is backwards-compatible.",
+      "Post-generation action detection: action blocks are parsed from the full accumulated response text after streaming completes \u2014 not from partial stream chunks. Avoids partial-delimiter detection across chunk boundaries at the cost of slightly delayed action dispatch (action fires after full response, not mid-stream).",
+      "No new Cargo deps: tokio = { features = [full] } already includes tokio::process::Command. serde_json, uuid, chrono all present from prior phases.",
+      "dead_code suppressions for Phase 9+ APIs: AuditEntry::now(), AuditEntryBuilder, rationale field in ActionSpec::FileWrite, PolicyEngine re-export, AuditLog re-export all carry #[allow(dead_code)] with phase comment. These become real callers in Phase 9 retrieval pipeline."
+    ],
+    "phase_9_criteria": {
+      "1_make_test_138_138": "PASS \u2014 138/138 unit tests pass, 0 warnings (119 Phase 8 baseline + 7 VectorStore + 4 WebRetriever + 6 RetrievalPipeline + 2 new orchestrator; 6 Ollama integration tests gated #[ignore])",
+      "2_vector_store_cosine_in_rust": "PASS \u2014 embedding_to_blob/blob_to_embedding round-trips correctly; cosine_similarity returns 1.0 for identical vecs, 0.0 for orthogonal, correct for known pairs; Mutex<Connection> satisfies tokio::spawn Send bound",
+      "3_html_extraction": "PASS \u2014 article > main > body priority; script/style/nav/footer/header stripped; whitespace normalized; truncation at RETRIEVAL_MAX_CONTENT_CHARS; 4 unit tests confirm all paths",
+      "4_trigger_detection": "PASS \u2014 detect_pre_trigger(is_retrieval_first=true) \u2192 MemorySearch; detect_post_trigger(UNCERTAINTY_MARKER in text) \u2192 UncertaintyMarker{topic}; both return None on negative cases",
+      "5_format_for_injection": "PASS \u2014 [Retrieved: {source}]\\n{content}\\n\\n format; empty context returns \"\"; memory + web result both appear in formatted output",
+      "6_degraded_fallback": "PASS \u2014 new_degraded() opens in-memory SQLite, always succeeds; make_orchestrator() uses new_degraded(); retrieval_non_fatal_does_not_prevent_session_state_persist confirms non-fatal behavior",
+      "7_send_sync_fix": "PASS \u2014 VectorStore wraps Connection in Mutex<Connection> \u2014 Mutex<T>: Sync when T: Send; Box<dyn Error + Send + Sync> on retrieve()/store_conversation_turn() return types; tokio::spawn Send bound satisfied",
+      "note": "Manual acceptance criteria (memory.db created, 'Looking that up...' acknowledgment, sqlite3 query, uncertainty follow-up) require live run with make run. Verify before starting Phase 10."
+    },
+    "phase_9_notes": [
+      "rusqlite::Connection is Send but NOT Sync: rusqlite::Connection contains RefCell<> internally which prevents Sync. tokio::spawn requires the spawned future to be Send, which requires &CoreOrchestrator: Send, which requires CoreOrchestrator: Sync. Fix: wrap Connection in std::sync::Mutex<Connection> in VectorStore. Mutex<T>: Sync when T: Send. All methods lock via self.conn.lock().expect(\"...\") before calling rusqlite APIs.",
+      "Box<dyn Error> not Send: Holding a Box<dyn std::error::Error> across an .await point breaks the Send bound required by tokio::spawn because the inner error might not be Send. Fix: change all pipeline return types to Box<dyn std::error::Error + Send + Sync>. Standard crate errors (reqwest::Error, rusqlite::Error) implement Send + Sync, so ? coercion still works.",
+      "Message struct has no images field: The plan assumed Message had {role, content, images} fields. Actual struct in inference/engine.rs only has {role, content}. Removed images: vec![] from retrieval context injection code.",
+      "Dead first-pass in extract_body(): An intermediate implementation approach (let text: String = root.descendants()...) was left in web.rs as dead code immediately superseded by filter_noise_descendants(). Removed to eliminate 'unused variable' warning.",
+      "generate_and_stream() model_name parameter: Takes &str so the primary generation can pass the router-decided tier (FAST/PRIMARY/CODE/HEAVY via decision.model.ollama_name()) while the uncertainty follow-up always passes model_config.primary. The follow-up uses PRIMARY because it is a grounding/correction pass, not a specialized task \u2014 code or heavy routing would be inappropriate for a factual retrieval follow-up.",
+      "detect_pre_trigger signature: Takes is_retrieval_first: bool rather than decision_category: &str. The caller uses matches!(decision.category, Category::RetrievalFirst) \u2014 avoids converting the Category enum to a string and back, and keeps the pipeline module from depending on the router module's enum type.",
+      "VectorStore::in_memory() for tests: new_degraded() calls VectorStore::in_memory() rather than new(db_path) \u2014 opens ':memory:' which always succeeds. Each call to make_orchestrator() in tests creates a fresh in-memory DB instance, preventing test cross-contamination."
+    ],
+    "phase_10_criteria": {
+      "1_make_test_159_159": "PASS \u2014 159/159 unit tests pass, 0 warnings (138 Phase 9 baseline + 5 voice/protocol + 7 voice/sentence + 3 voice/worker_client + 4 voice/coordinator + 0 renamed server test + 2 new orchestrator; 6 Ollama integration tests gated #[ignore])",
+      "2_sentence_splitter_min_chars_guard": "PASS \u2014 7 unit tests verify boundary detection at/above 10-char minimum; 'Mr. ' and 'e.g. ' not split below threshold",
+      "3_worker_client_pure_tests": "PASS \u2014 3 WorkerClient/WorkerError pure logic tests; no subprocess spawned",
+      "4_coordinator_degraded_mode": "PASS \u2014 new_degraded() always succeeds; is_tts_available() false until start_tts() spawns worker; Arc::ptr_eq confirms shared allocation",
+      "5_server_audio_fallback": "PASS \u2014 stream_audio_returns_ok_stream_when_worker_unavailable: STT worker unavailable \u2192 Ok(empty stream), no panic",
+      "6_orchestrator_voice_field": "PASS \u2014 make_orchestrator() completes with voice: VoiceCoordinator::new_degraded(); voice_tts_unavailable_does_not_break_text_generation_path confirms TTS bypass",
+      "7_zero_warnings": "PASS \u2014 all Phase 13+ API surface items (#[allow(dead_code)] on health_check/health_check_and_restart/HEALTH_PING/ERROR/worker_type/RESTART_MAX_ATTEMPTS/RESTART_BACKOFF_SECS) suppress correctly",
+      "note": "Manual acceptance criteria (STT live transcription end-to-end, TTS sentence synthesis with kokoro, Python worker process lifecycle) require make setup-python + make run. Python tests (14 total) require uv venv with faster-whisper and kokoro installed."
+    },
+    "phase_10_notes": [
+      "Test count 159 not 160: The plan's acceptance table counted the renamed stream_audio test as '+1 new test'. It was a rename of an existing test (net +0). 138 + 21 new = 159 is correct. Plan table error only.",
+      "generate_and_stream() actual streaming pattern: The plan's pseudocode used stream.next().await (futures StreamExt). The actual orchestrator uses rx.recv().await on a tokio::sync::mpsc::Receiver with chunks having .done and .content fields. TTS hook placed inside Ok(chunk) if !chunk.done, flush inside the done/error paths.",
+      "tts_tx move semantics: Option<UnboundedSender<String>> is moved into generate_and_stream(). When the function returns, the Option is dropped. The drop of the last UnboundedSender closes the unbounded channel, causing the TTS synthesis task's recv() loop to see None and exit cleanly.",
+      "SentenceSplitter scope: Instantiated once before the token accumulation loop (not inside). Holds inter-token state. Moving inside the loop would reset the boundary buffer on every token, preventing sentence detection across chunks.",
+      "VoiceCoordinator::new() stays synchronous: Making new() async would force CoreOrchestrator::new() async, cascading through server.rs. new_degraded() avoids this. start_voice() is called by server.rs reader task after orchestrator construction.",
+      "Arc<tokio::sync::Mutex<Option<WorkerClient>>> for TTS concurrency: The spawned TTS synthesis task needs to access the WorkerClient while the main inference loop runs. Wrapping in Arc<Mutex<>> allows the task to take the lock for each sentence without moving the coordinator into the task.",
+      "STT per-call architecture: stream_audio() creates a fresh WorkerClient(Stt) per RPC call rather than maintaining a shared STT worker. This avoids concurrent STT session contention and simplifies cleanup \u2014 the client is dropped when the RPC completes."
+    ],
+    "phase_11_criteria": {
+      "1_swift_build_clean": "PASS \u2014 swift build completes with 0 errors, 0 warnings from project code; only pre-existing grpc-swift deprecation warnings in generated dexter.grpc.swift remain",
+      "note": "Manual acceptance criteria (position persists across launches, first-launch default position, monitor removal cold/live, drag+rapid-quit, gRPC no regression) require make run to verify."
+    },
+    "phase_11_notes": [
+      "@objc + @MainActor: @objc methods on @MainActor-inferred classes (via NSApplicationDelegate protocol annotation) do NOT automatically inherit @MainActor isolation in Swift 6. Calling a @MainActor-isolated method (FloatingWindow.ensureOnScreen, inherited from NSPanel) from a plain @objc func produces a 'call to main actor-isolated instance method in synchronous nonisolated context' warning. Fix: explicit @MainActor annotation on the selector method.",
+      "Selector-based addObserver for @Sendable constraint: NotificationCenter.addObserver(forName:object:queue:using:) requires @Sendable closure. Capturing DexterApp (non-Sendable, NSApplicationDelegate) in a @Sendable closure triggers 'capture of self with non-Sendable type in @Sendable closure'. Selector-based addObserver(_:selector:name:object:) has no @Sendable constraint \u2014 the ObjC message dispatch mechanism doesn't participate in Swift's actor system \u2014 eliminating both warnings cleanly.",
+      "NSStringFromRect / NSRectFromString coordinate system: AppKit window frames are always in points, not pixels. Both functions operate on the same point-coordinate system, so round-tripping through UserDefaults is exact. NSRectFromString returns NSZeroRect for unparseable strings \u2014 the guard against this prevents a silent zero-origin window placement on corrupt defaults.",
+      "Center-point containment in loadOrDefaultFrame: Validation uses center-point containment (screen.frame.contains(center)) rather than full-frame containment. A window whose center is on a live screen is draggable to a fully on-screen position; full-frame containment would be overly aggressive and reset positions that are merely partially clipped near a screen edge.",
+      "applicationWillTerminate synchronous flush: The 250ms debounce DispatchWorkItem may not fire before process exit if the operator quits immediately after dragging. applicationWillTerminate calls persistFrameNow() synchronously before the process exits. Since persistFrameNow() is idempotent (harmless duplicate write if debounce already fired), this is a zero-downside guarantee.",
+      "defaultFrame() uses visibleFrame not frame: visibleFrame excludes the Dock and menu bar, so the 80pt y-offset is above the Dock rather than behind it. This matches the Phase 1 convention (init() used visibleFrame.minY + 20)."
+    ],
+    "phase_12_criteria": {
+      "1_swift_build_clean": "PASS \u2014 swift build completes with 0 errors, 0 warnings from project code; only pre-existing grpc-swift deprecation warnings in generated dexter.grpc.swift remain",
+      "note": "Manual acceptance criteria (Metal disc renders, click-through, entity state changes, action dialogs, gRPC no regression) require make run to verify."
+    },
+    "phase_12_notes": [
+      "SwiftPM cannot compile .metal files: There is no .metal compilation target in SwiftPM. Metal shader bytecode must come from elsewhere. Runtime MTLDevice.makeLibrary(source:options:) with an inline MSL string constant is the correct solution \u2014 no .metal file, no resource bundle entry, produces identical GPU bytecode to offline compilation.",
+      "MTKView + bitmapImageRepForCachingDisplay: MTKView renders through CAMetalLayer which bypasses the standard NSView compositing path. bitmapImageRepForCachingDisplay returns a zero-alpha bitmap for Metal content \u2014 PassthroughView's bitmap cache would see the disc as fully transparent and pass all clicks through. Fix: override hitTest(_:) in AnimatedEntity with circle SDF math that matches the shader geometry.",
+      "Circle SDF hitTest radius derivation: The shader uses aspect-correct coordinates where the shorter dimension maps to 1.0 in shader space (y spans -1\u20261). A disc of shader baseRadius = 0.55 occupies 0.55 \u00d7 (min(w,h) / 2) NSView points. For a 200\u00d7400pt window: 0.55 \u00d7 100 = 55pt. Using 0.4 \u00d7 min(w,h) = 80pt (naive formula) would make the click area ~45% larger than the visible disc.",
+      "MainActor.run async-body overload removed in Swift 6: Swift 6 removed the async-body overload of MainActor.run to prevent accidental main-actor-executor starvation (the async body would hold the MainActor executor while suspended, blocking other @MainActor work). The replacement: withCheckedContinuation + Task { @MainActor in }. The Task creates a new cooperative task isolated to @MainActor; the continuation bridges the result back to the awaiting actor context.",
+      "NSAlert.beginSheetModal suspension semantics: Inside Task { @MainActor in }, await alert.beginSheetModal(for:) suspends the task cooperatively \u2014 the MainActor executor is released while the sheet is displayed and reacquired when the operator clicks. The entity stays in whatever state Rust last set (typically ALERT) for the duration, which is the intended Phase 8 behavior.",
+      "NSView.isOpaque is a read-only computed property: MTKView (and NSView generally) declare isOpaque as a get-only computed property, not a stored property. It cannot be set in init \u2014 it must be overridden. Added override var isOpaque: Bool { false } alongside isFlipped. The CAMetalLayer transparency is also enforced at the layer level via layer?.isOpaque = false.",
+      "MTKView.init(coder:) is non-failable in ObjC: initWithCoder: returns nonnull instancetype in the ObjC header. Swift maps this to required init(coder:), non-failable. Declaring required init?(coder:) (failable) is a compile error. Fix: required init(coder:) with fatalError inside, annotated @available(*, unavailable).",
+      "premultiplied alpha pipeline: The fragment shader outputs float4(color \u00d7 alpha, alpha) \u2014 premultiplied. The Metal pipeline blend equation must be src\u00d71 + dst\u00d7(1-srcAlpha) (sourceRGBBlendFactor = .one, destinationRGBBlendFactor = .oneMinusSourceAlpha). Using straight-alpha blend factors (sourceRGBBlendFactor = .sourceAlpha) with a premultiplied source causes double-multiplication and dark fringing at disc edges."
+    ],
+    "next_planned": "Phase 13",
+    "phase_1_bugs_discovered": [
+      {
+        "bug": "grpc-swift 2.x UDS authority header",
+        "description": "unixDomainSocket(path:) with no authority: falls back to raw socket path (/tmp/dexter.sock), which grpc-swift percent-encodes to %2Ftmp%2Fdexter.sock and sends as the HTTP/2 :authority pseudo-header. The h2 crate correctly rejects this as a malformed authority (PROTOCOL_ERROR RST_STREAM). The tonic handler is never called.",
+        "fix": "Pass authority: \"localhost\" explicitly: .unixDomainSocket(path: Self.socketPath, authority: \"localhost\")",
+        "file": "src/swift/Sources/Dexter/Bridge/DexterClient.swift",
+        "grpc_swift_source": "grpc-swift-nio-transport Sources/GRPCNIOTransportCore/Client/Resolver/NameResolver+UDS.swift line 76"
+      },
+      {
+        "bug": "tokio_stream::once closes session stream immediately",
+        "description": "Once causes the server to send END_STREAM trailers immediately after the IDLE event. The Swift retry loop sees a normal return (no error) and reconnects instantly, creating a tight spin loop of ping+session cycles.",
+        "fix": "Use mpsc::channel + ReceiverStream (tokio-stream sync feature). Detached task holds tx alive via std::future::pending, keeping stream open until core shutdown. In Phase 6, orchestrator replaces the hold task with real event dispatch.",
+        "file": "src/rust-core/src/ipc/server.rs",
+        "cargo_toml_change": "tokio-stream features: [\"net\", \"sync\"]"
+      },
+      {
+        "bug": "Swift stdout block-buffering when redirected to file",
+        "description": "print() uses C runtime stdio which switches to block-buffering when stdout is a file rather than a TTY. Log messages appear only after the 8KB buffer fills or process exits.",
+        "fix": "setvbuf(stdout, nil, _IONBF, 0) in main.swift before app.run()",
+        "file": "src/swift/Sources/Dexter/main.swift"
+      },
+      {
+        "bug": "nc -z -U broken on macOS BSD netcat for UDS",
+        "description": "BSD netcat's -z (zero-I/O) flag does not reliably work with Unix domain sockets on macOS. Always returns non-zero even when socket is live.",
+        "fix": "Python socket.connect_ex() probe in Makefile wait-for-core target",
+        "file": "Makefile"
+      },
+      {
+        "bug": "RST_STREAM misdiagnosis (continuation lifecycle)",
+        "description": "Initial diagnosis attributed RST_STREAM to a continuation.finish() deadlock in Swift. The real cause was the :authority header bug above. The continuation fix (moving finish() into onResponse defer) was applied first and is correct code regardless, but did not solve the actual error.",
+        "lesson": "RST_STREAM PROTOCOL_ERROR from h2 always indicates a frame-level rejection before the handler fires. Enable h2=debug logging to see the exact rejection message before debugging higher-level code."
+      },
+      {
+        "bug": "std::future::pending() hold-open task leak (Phase 3 \u2014 fixed before implementation)",
+        "description": "The Phase 1 hold-open pattern (detached task with pending()) never exits. On Swift restart or session reconnect, old tasks accumulate holding zombie tx clones. Each reconnect leaks one task and one mpsc Sender clone, keeping the channel's recv side from ever seeing None. Over many reconnects, sender clone count grows unbounded.",
+        "fix": "Replaced with oneshot channel: reader task holds Sender (_signal_done), drop on any exit path fires oneshot, hold-open exits and drops tx, ReceiverStream closes \u2192 END_STREAM. See phase_3_notes for full explanation.",
+        "file": "src/rust-core/src/ipc/server.rs",
+        "phase_discovered": "Phase 3 (pre-implementation review)"
+      }
+    ]
+  },
+  "model_config": {
+    "fast": "qwen3:8b",
+    "primary": "mistral-small:24b",
+    "heavy": "deepseek-r1:32b",
+    "code": "deepseek-coder-v2:16b",
+    "vision": "llama3.2-vision:11b",
+    "embedding": "mxbai-embed-large"
+  },
+  "model_warming_strategy": {
+    "always_hot": [
+      "fast"
+    ],
+    "warm_on_startup_stay_resident": [
+      "primary"
+    ],
+    "cold_load_on_demand": [
+      "code",
+      "vision",
+      "heavy"
+    ],
+    "mutual_exclusion_pairs": [
+      {
+        "tiers": [
+          "heavy",
+          "vision"
+        ],
+        "reason": "deepseek-r1:32b (~18GB) + llama3.2-vision:11b (~8GB) = ~26GB, leaving insufficient headroom for OS and daemon overhead on 36GB. Router must issue explicit Ollama unload before loading either if the other is resident."
+      }
+    ],
+    "notes": "Routing decision itself is microsecond-level logic \u2014 latency only occurs on cold model load (~5-15s for large models). Fast and primary tiers cover ~90% of interactions and are always warm, so the common path has zero load latency. Heavy tier is an explicit escalation path where response latency is expected and acceptable."
+  },
+  "conversation_history": [],
+  "architectural_decisions": [
+    {
+      "component": "IPC",
+      "decision": "gRPC over Unix domain socket (/tmp/dexter.sock), Swift client + Rust tonic server",
+      "rationale": "Typed schema, bidirectional streaming, low local IPC overhead, robust contracts between UI and core",
+      "alternatives_rejected": [
+        "Plain JSON HTTP",
+        "NSDistributedNotificationCenter",
+        "WebSocket + JSON"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "UI Framework",
+      "decision": "Swift 6 + AppKit + Metal, NSPanel at .screenSaver level",
+      "rationale": "Native AppKit windowing is the most reliable route to always-on-top behavior across spaces; Metal handles animated entity rendering",
+      "alternatives_rejected": [
+        "Electron",
+        "Tauri",
+        "IOSurface direct composite"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Core Runtime",
+      "decision": "Rust + Tokio control plane",
+      "rationale": "Long-running reliability, strong concurrency, predictable latency, safer always-on daemon behavior than a dynamic scripting core",
+      "alternatives_rejected": [
+        "Python-only core",
+        "Node/Electron main process orchestration"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Inference Runtime",
+      "decision": "Ollama (local only)",
+      "rationale": "Apple Silicon Metal acceleration and practical model lifecycle management",
+      "alternatives_rejected": [
+        "llama.cpp direct integration",
+        "MLX-only path",
+        "LM Studio"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Context Observer",
+      "decision": "Swift EventBridge (AXObserver + NSWorkspace + CGEventTap) feeding Rust ContextObserver",
+      "rationale": "Objective-C APIs are accessed through native Swift interop, then normalized events are streamed to Rust for aggregation and routing",
+      "alternatives_rejected": [
+        "Direct Rust ObjC bindings in v1",
+        "Screenshot + OCR polling",
+        "AppleScript-only observation"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Model Tier - FAST",
+      "decision": "qwen3:8b",
+      "rationale": "Low-latency default with strong general quality and better instruction behavior for assistant turns. Always resident in memory.",
+      "alternatives_rejected": [
+        "qwen2.5:7b-instruct",
+        "llama3.2:3b"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Model Tier - PRIMARY",
+      "decision": "mistral-small:24b",
+      "rationale": "Stronger mid-tier reasoning and tool-use behavior while remaining viable on 36GB Apple Silicon. Loaded at startup and kept resident.",
+      "alternatives_rejected": [
+        "qwen2.5:14b-instruct",
+        "qwen2.5:32b-instruct as default"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Model Tier - HEAVY",
+      "decision": "deepseek-r1:32b",
+      "rationale": "Escalation-only thinking model for hard logic/math/planning tasks where slower response is acceptable in exchange for deeper reasoning. R1 burns significant context on chain-of-thought before responding \u2014 this is intentional at this tier, not a bug. ~18GB footprint requires mutual exclusion with vision tier.",
+      "alternatives_rejected": [
+        "qwen2.5:32b-instruct"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Model Tier - CODE",
+      "decision": "deepseek-coder-v2:16b",
+      "rationale": "Competitive local code benchmark performance and strong repair/refactor reliability for autonomous coding tasks",
+      "alternatives_rejected": [
+        "qwen2.5-coder:14b",
+        "qwen2.5-coder:7b"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Model Tier - VISION",
+      "decision": "llama3.2-vision:11b",
+      "rationale": "Materially stronger visual understanding for UI/screen interpretation versus small VLM alternatives. ~8GB footprint requires mutual exclusion with heavy tier.",
+      "alternatives_rejected": [
+        "moondream:latest",
+        "gemma3:12b"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Vector Store",
+      "decision": "SQLite + sqlite-vec",
+      "rationale": "Single-file local memory store with mature Rust ecosystem support (rusqlite crate) and no separate server process. FTS5 for full-text search included natively. Simpler operational profile than embedded alternatives in a Rust-core architecture.",
+      "alternatives_rejected": [
+        "LanceDB (Python-primary interface creates friction with Rust core)",
+        "ChromaDB (requires separate server)",
+        "FAISS (no metadata, no updates)"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Voice",
+      "decision": "Optional Python workers: faster-whisper (STT) + kokoro-82M (TTS)",
+      "rationale": "Best available local model tooling for each task. Orchestration and reliability remain in Rust; Python workers are supervised subprocesses. kokoro-82M streaming latency should be verified on Apple Silicon before committing \u2014 fallback is Piper if unacceptable.",
+      "alternatives_rejected": [
+        "openai-whisper (slower)",
+        "Piper-only TTS (lower quality)",
+        "cloud speech APIs (violates local-only constraint)"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    },
+    {
+      "component": "Package Management",
+      "decision": "Cargo for Rust core, uv for Python workers",
+      "rationale": "Native ecosystem tooling for each runtime with reproducible lockfiles",
+      "alternatives_rejected": [
+        "Python-only packaging",
+        "mixed ad-hoc scripts without lock discipline"
+      ],
+      "timestamp": "2026-03-05T00:00:00Z"
+    }
+  ],
+  "fine_tuning": {
+    "status": "Planned \u2014 out of scope for current phases, but architecture must support it from the start",
+    "candidate_tiers": [
+      "fast",
+      "primary"
+    ],
+    "rationale": "Fast and primary tiers handle the majority of conversational interactions and are therefore the correct targets for personality fine-tuning. Heavy and code tiers are task-specific enough that personality expression matters less there.",
+    "approach": "LoRA adapter training on top of base model weights. The personality layer must be implemented as a separable adapter \u2014 not as a system prompt \u2014 so that it can be retrained independently without touching capability architecture.",
+    "architectural_requirement": "The personality layer and the capability layer must have a clean interface boundary from day one. No personality logic embedded in routing, tool execution, or memory retrieval. Personality is expressed at the generation layer only, via a trained adapter that can be swapped or retrained without structural changes elsewhere.",
+    "training_data_strategy": "To be designed in a dedicated session. Will require curated conversation examples that reflect operator personality: dry humor, sarcasm, appropriate immaturity, and the ability to transition to serious mode without ceremony.",
+    "base_model_constraint": "Selected model tiers must have accessible weights for LoRA training. Verify that qwen3:8b and mistral-small:24b base weights are available via HuggingFace or equivalent before committing to these as fine-tuning targets.",
+    "notes": "The finished Dexter should be recognizable as a reflection of his operator to someone who interacts with both. This is a training outcome, not a prompting outcome. System prompts are a placeholder until fine-tuning is complete \u2014 they are not the final personality implementation."
+  },
+  "open_questions": [
+    {
+      "id": "OQ-001",
+      "question": "Verify kokoro-82M streaming latency on Apple Silicon is acceptable for real-time conversational TTS before Phase 10 voice implementation begins.",
+      "impact": "If latency is unacceptable, fallback to Piper. Document result either way.",
+      "blocking": false
+    },
+    {
+      "id": "OQ-002",
+      "question": "Confirm qwen3:8b and mistral-small:24b base weights are available for LoRA fine-tuning before fine-tuning phase begins.",
+      "impact": "If weights are unavailable or restricted, alternative fine-tuning targets must be selected before that phase starts.",
+      "blocking": false
+    }
+  ],
+  "environment": {
+    "ollama_version": "0.15.1",
+    "python_version": "3.14.2",
+    "swift_version": "6.2",
+    "rust_version": "1.92.0",
+    "cargo_version": "1.92.0",
+    "macos_version": "26.3",
+    "machine_ram_gb": 36,
+    "chip": "Apple Silicon",
+    "sip_disabled": true
+  },
+  "fresh_session_bootstrap_instructions": "1. Read IMPLEMENTATION_PLAN.md for the authoritative architecture. 2. Read this file fully \u2014 pay attention to all phase notes, model_warming_strategy, fine_tuning, and open_questions sections. 3. Use build_phase.current as execution start point. 4. Verify toolchains: rustc/cargo/swift/python. 5. Verify Ollama availability with 'ollama list'. 6. Inspect current source tree under src/ for actual build progress. 7. Phases 1\u201312 are fully complete \u2014 all automated criteria pass. Begin Phase 13 (End-to-End Voice: VoiceCapture + STT/TTS loop) immediately without re-running earlier phase work. 8. Run 'make test' (159 tests expected) before starting Phase 13 work to confirm no regressions. 9. Run 'cd src/swift && swift build' to confirm 0 errors, 0 project-code warnings before starting Phase 13 work.",
+  "test_counts": {
+    "rust": 251,
+    "python": 20,
+    "rust_unit": 267
+  },
+  "notes": "Phase 17 complete. ProactiveEngine added: rate-limited (90s interval, 30s startup grace), [SILENT] opt-out, collect_generation() non-streaming path. BehaviorConfig added to config.toml [behavior] section. Proactive fires on AppFocused changes when all 5 gates pass, uses FAST model, ephemeral (not added to conversation history). Phase 18 deferred: configurable hotkey (needs HotkeyConfig proto message), proactive on significant element changes, per-bundle exclusion list."
+}

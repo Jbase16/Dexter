@@ -1,0 +1,216 @@
+syntax = "proto3";
+package dexter.v1;
+
+service DexterService {
+  // Liveness probe and version handshake. Called once at connection time.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Bidirectional session stream.
+  // Swift sends ClientEvents (user text, UI actions, context observations, action approvals).
+  // Rust sends ServerEvents (responses, entity state changes, action requests, audio).
+  // Phase 6 orchestrator wires this to real component routing.
+  rpc Session(stream ClientEvent) returns (stream ServerEvent);
+
+  // Microphone audio stream → STT transcripts.
+  // Swift streams PCM audio chunks from VoiceCapture.
+  // Rust routes to the STT worker and streams back transcripts.
+  // DEFINED in Phase 3. IMPLEMENTED in Phase 10 (Voice Worker Bridge).
+  rpc StreamAudio(stream AudioChunk) returns (stream TranscriptChunk);
+}
+
+// ── Ping ──────────────────────────────────────────────────────────────────────
+
+message PingRequest  { string trace_id = 1; }
+message PingResponse { string trace_id = 1; string core_version = 2; }
+
+// ── Session stream — client events ────────────────────────────────────────────
+
+message ClientEvent {
+  string trace_id   = 1;  // UUID v4 — correlation across components
+  string session_id = 2;  // UUID v4 — stable for the lifetime of this Session call
+  oneof event {
+    TextInput      text_input      = 3;
+    UIAction       ui_action       = 4;
+    SystemEvent    system_event    = 5;
+    ActionApproval action_approval = 6;
+    BargIn         barg_in         = 7;  // Phase 27: operator spoke over TTS — cancel generation
+  }
+}
+
+// ── Session stream — server events ────────────────────────────────────────────
+
+message ServerEvent {
+  string trace_id = 1;
+  oneof event {
+    TextResponse      text_response  = 2;
+    EntityStateChange entity_state   = 3;
+    AudioResponse     audio_response = 4;
+    ActionRequest     action_request = 5;
+    ConfigSync        config_sync    = 6;  // Phase 18: session config pushed on session open
+    VadHint           vad_hint       = 7;  // Phase 24: adaptive silence threshold for next utterance
+  }
+}
+
+// ── Client event payloads ─────────────────────────────────────────────────────
+
+message TextInput {
+  string content    = 1;
+  // Phase 34: true when input came from STT (hotkey press) → TTS output enabled.
+  // false (default) when input came from the HUD typed field → text-only output.
+  // This couples input and output modality: voice in → voice+text out; type in → text only.
+  bool   from_voice = 2;
+}
+
+message UIAction {
+  UIActionType type    = 1;
+  string       payload = 2;  // JSON-encoded, type-specific. Empty when not needed.
+}
+
+enum UIActionType {
+  UI_ACTION_TYPE_UNSPECIFIED = 0;
+  UI_ACTION_TYPE_DISMISS     = 1;  // User dismissed Dexter from view
+  UI_ACTION_TYPE_DRAG        = 2;  // payload: {"x": 120, "y": 840} — new position
+  UI_ACTION_TYPE_RESIZE      = 3;  // payload: {"width": 200, "height": 400}
+}
+
+message SystemEvent {
+  SystemEventType type    = 1;
+  string          payload = 2;  // JSON-encoded, type-specific. Empty when not needed.
+}
+
+enum SystemEventType {
+  SYSTEM_EVENT_TYPE_UNSPECIFIED        = 0;
+  SYSTEM_EVENT_TYPE_CONNECTED          = 1;  // Swift shell connected; session open
+  SYSTEM_EVENT_TYPE_APP_FOCUSED        = 2;
+  // APP_FOCUSED payload (extended from Phase 3 — ax_element is optional):
+  //   {"bundle_id":"com.apple.Xcode","name":"Xcode",
+  //    "ax_element":{"role":"AXTextField","label":"Source Editor",
+  //                  "value_preview":"let x = 5","is_sensitive":false}}
+  //   ax_element is omitted if AX permission is not granted or element query fails.
+  SYSTEM_EVENT_TYPE_APP_UNFOCUSED      = 3;  // payload: "{}" (empty object)
+  SYSTEM_EVENT_TYPE_SCREEN_LOCKED      = 4;  // payload: "{}" (empty object)
+  SYSTEM_EVENT_TYPE_AX_ELEMENT_CHANGED = 5;
+  // AX_ELEMENT_CHANGED payload (focused AX element changed within current app):
+  //   {"role":"AXTextField","label":"Source Editor",
+  //    "value_preview":"let x = 5","is_sensitive":false}
+  //   value_preview is empty string when is_sensitive=true.
+  SYSTEM_EVENT_TYPE_SCREEN_UNLOCKED   = 6;   // payload: "{}" (empty object)
+  SYSTEM_EVENT_TYPE_HOTKEY_ACTIVATED        = 7;  // Global hotkey (Ctrl+Shift+Space) pressed — payload: "{}"
+  SYSTEM_EVENT_TYPE_AUDIO_PLAYBACK_COMPLETE = 8;  // Phase 18: Swift signals TTS audio has finished playing
+                                                   // payload: "{}" (no data needed)
+  SYSTEM_EVENT_TYPE_CLIPBOARD_CHANGED       = 9;  // Phase 28: operator copied text to clipboard
+                                                   // payload: {"text": "<content up to CLIPBOARD_MAX_CHARS>"}
+}
+
+// Phase 27: operator spoke over active TTS — signal Rust to cancel in-flight generation.
+// Sent by Swift on VAD rising-edge during SPEAKING state (barge-in).
+// Rust cancels the background generation task via cancel_token and transitions to LISTENING.
+message BargIn {
+  string trace_id = 1;
+}
+
+// Operator's approval or rejection of an ActionRequest from the server.
+message ActionApproval {
+  string action_id     = 1;  // Must match ActionRequest.action_id
+  bool   approved      = 2;
+  string operator_note = 3;  // Optional note attached to approval/rejection
+}
+
+// ── Server event payloads ─────────────────────────────────────────────────────
+
+message TextResponse {
+  string content  = 1;
+  bool   is_final = 2;  // False during streaming tokens; true on last chunk.
+}
+
+message EntityStateChange {
+  EntityState state = 1;
+}
+
+enum EntityState {
+  ENTITY_STATE_UNSPECIFIED = 0;
+  ENTITY_STATE_IDLE        = 1;
+  ENTITY_STATE_LISTENING   = 2;
+  ENTITY_STATE_THINKING    = 3;
+  ENTITY_STATE_SPEAKING    = 4;
+  ENTITY_STATE_ALERT       = 5;
+  ENTITY_STATE_FOCUSED     = 6;
+}
+
+// Server requests explicit operator confirmation before executing an action.
+// Swift presents a confirmation dialog; operator response is sent as ActionApproval.
+// SAFE actions skip this flow entirely — they are executed and logged without confirmation.
+message ActionRequest {
+  string         action_id   = 1;  // UUID — correlates with ActionApproval
+  string         description = 2;  // Human-readable description for the confirmation UI
+  ActionCategory category    = 3;
+  string         payload     = 4;  // JSON-encoded action parameters (type-specific)
+}
+
+enum ActionCategory {
+  ACTION_CATEGORY_UNSPECIFIED = 0;
+  ACTION_CATEGORY_SAFE        = 1;  // Execute immediately, no confirmation needed
+  ACTION_CATEGORY_CAUTIOUS    = 2;  // Execute + write to audit log
+  ACTION_CATEGORY_DESTRUCTIVE = 3;  // Requires explicit operator confirmation
+}
+
+// TTS audio pushed to Swift for AVAudioEngine playback.
+// Sequenced so Swift can detect gaps and maintain ordering.
+message AudioResponse {
+  bytes  data            = 1;  // Raw PCM, same format as AudioChunk input
+  uint32 sequence_number = 2;
+  bool   is_final        = 3;  // Phase 18: final sentinel for proactive TTS.
+                                // Rust sets true with empty data after all PCM chunks.
+                                // Swift uses this to arm the playback-complete callback.
+}
+
+// ── Audio stream ──────────────────────────────────────────────────────────────
+//
+// Streaming microphone audio → STT transcripts.
+// DEFINED Phase 3. IMPLEMENTED Phase 10 (Voice Worker Bridge).
+
+message AudioChunk {
+  bytes  data            = 1;  // Raw PCM: 16kHz, 16-bit, mono
+  uint32 sequence_number = 2;
+  uint32 sample_rate     = 3;  // Always 16000 for now; field exists for future resampler
+}
+
+message TranscriptChunk {
+  string text            = 1;
+  bool   is_final        = 2;  // False during partial transcription; true when segment complete
+  uint32 sequence_number = 3;  // Correlates with AudioChunk.sequence_number
+  bool   fast_path       = 4;  // Phase 24: when true, Rust already delivered this transcript
+                                // to the orchestrator directly. Swift must NOT echo it back
+                                // as a TextInput — that would trigger duplicate inference.
+}
+
+// Phase 24 (Solution 4): Override the VAD silence threshold for the next utterance.
+//
+// Sent during TTS streaming (after the last sentence is detected by SentenceSplitter,
+// BEFORE the is_final text sentinel) so Swift receives it while audio is still playing.
+// Swift's VoiceCapture applies it to the next utterance only, then resets to the default.
+//
+// Use case: yes/no questions use 8 frames (256ms) instead of the default 20 (640ms).
+// This shaves 384ms off every confirmation-style follow-up.
+message VadHint {
+  uint32 silence_frames = 1;  // Override VAD_SILENCE_FRAMES for next utterance
+}
+
+// ── Phase 18 — Configurable hotkey + session config push ──────────────────────
+
+// Hotkey parameters pushed from Rust to Swift at session open via ConfigSync.
+// Swift's EventBridge replaces hardcoded constants with these values.
+message HotkeyConfig {
+  uint32 key_code = 1;  // macOS virtual key code. kVK_Space = 49.
+  bool   ctrl     = 2;  // Require Control modifier.
+  bool   shift    = 3;  // Require Shift modifier.
+  bool   cmd      = 4;  // Require Command modifier.
+  bool   option   = 5;  // Require Option (Alt) modifier.
+}
+
+// Session-level configuration pushed from Rust core to Swift shell at session open.
+// Swift applies these values before processing any further events.
+// Ephemeral — not stored in conversation history or session state.
+message ConfigSync {
+  HotkeyConfig hotkey = 1;
+}

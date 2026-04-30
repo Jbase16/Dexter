@@ -1,0 +1,13 @@
+pyproject.toml
+dexter_workers.egg-info/PKG-INFO
+dexter_workers.egg-info/SOURCES.txt
+dexter_workers.egg-info/dependency_links.txt
+dexter_workers.egg-info/requires.txt
+dexter_workers.egg-info/top_level.txt
+tests/test_protocol.py
+tests/test_stt_worker.py
+tests/test_tts_worker.py
+workers/__init__.py
+workers/protocol.py
+workers/stt_worker.py
+workers/tts_worker.py
