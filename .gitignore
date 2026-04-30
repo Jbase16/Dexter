@@ -32,3 +32,6 @@ src/python-workers/.venv/
 *.gguf
 *.bin
 *.safetensors
+
+# Repomix exports
+docs/dexter-full.txt
