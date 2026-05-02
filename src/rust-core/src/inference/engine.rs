@@ -342,6 +342,27 @@ struct OllamaOptions {
     /// for the full rationale.
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<u32>,
+    /// Diagnostic (post-Phase 38c): explicit per-request RNG seed.
+    ///
+    /// We observed byte-identical model output across distinct user turns under
+    /// the FAST tier (qwen3:8b) — same 46-token response repeated verbatim 5
+    /// times in a row despite changing user messages and growing conversation
+    /// history. Temperature was at Ollama default (0.8), no `seed` field was
+    /// being sent.
+    ///
+    /// Hypothesis: Ollama may use a deterministic default seed when the field
+    /// is omitted, making sampling reproducible-given-prompt rather than
+    /// stochastic. By injecting a fresh seed per request (derived from the
+    /// system clock's lower 32 bits of nanoseconds), we force Ollama down a
+    /// different sample path on each call. If output stays byte-identical even
+    /// with varying seeds, the bug is upstream of sampling — likely the small
+    /// model collapsing into a degenerate attractor under bloated context, in
+    /// which case the Adaptive Context Compiler is the real fix.
+    ///
+    /// Either way, the seed is logged at debug! so failing turns can be
+    /// reproduced post-hoc by re-running with the same seed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<u32>,
 }
 
 /// Intermediate streaming chunk from /api/chat.
@@ -559,6 +580,17 @@ impl InferenceEngine {
         } else {
             req.keep_alive_override
         };
+
+        // Diagnostic: derive a per-request seed from the system clock so that
+        // Ollama cannot fall back to a deterministic default. See OllamaOptions.seed
+        // doc comment for the full rationale. Lower 32 bits of nanoseconds since
+        // UNIX_EPOCH gives microsecond-level entropy — well-distributed for our
+        // purpose ("a different sample path per call"), not cryptographic.
+        let request_seed: u32 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u32)
+            .unwrap_or(0);
+
         let body = OllamaChatRequest {
             model:    &req.model_name,
             messages: &req.messages,
@@ -567,6 +599,7 @@ impl InferenceEngine {
                 temperature: req.temperature,
                 num_predict: req.num_predict,
                 num_ctx:     req.num_ctx_override,
+                seed:        Some(request_seed),
             }),
             keep_alive,
             think:    false,  // disable qwen3 hidden reasoning chain
@@ -576,6 +609,7 @@ impl InferenceEngine {
             model   = %req.model_name,
             msgs    = req.messages.len(),
             unload  = req.unload_after,
+            seed    = request_seed,
             "Starting streaming generation"
         );
 

@@ -697,6 +697,18 @@ pub struct CoreOrchestrator {
     /// (e.g. every keystroke in a text editor). At most one prefill per
     /// `PREFILL_DEBOUNCE_SECS` (5 seconds).
     last_prefill_at:           Option<Instant>,
+    /// Timestamp of the most recent successful Vision-tier turn (image actually
+    /// attached). Read by the vision-continuation router override: if this is
+    /// within `VISION_CONTINUATION_WINDOW_SECS` AND the current user utterance
+    /// contains an anaphoric or visual-reference marker, the route is upgraded
+    /// from Chat → Vision so the image re-attaches and gemma4:26b can answer
+    /// follow-ups about the same (or newly-displayed) image.
+    ///
+    /// Set in `handle_text_input` after `capture_screen()` succeeds and the
+    /// image is appended to the user message. NOT set on Vision-route demotions
+    /// (capture failed, route fell back to PRIMARY) — those turns had no image,
+    /// so follow-ups have no visual context to continue.
+    last_vision_turn_at:       Option<Instant>,
     /// Phase 24: in-flight interaction tracking. Keyed by `action_id`.
     /// Entries are inserted when an action is dispatched to a background task
     /// and removed when TTS feedback completes or by the 5-minute GC sweep.
@@ -910,6 +922,7 @@ impl CoreOrchestrator {
             action_tx,                         // Phase 24
             interactions:              HashMap::new(), // Phase 24
             last_prefill_at:           None,           // Phase 24
+            last_vision_turn_at:       None,           // vision-continuation
             current_state:             EntityState::Idle,             // Phase 27
             cancel_token:              Arc::new(AtomicBool::new(false)), // Phase 27
             generation_tx,                                             // Phase 27
@@ -2635,6 +2648,72 @@ impl CoreOrchestrator {
             );
         }
 
+        // Joke-request override.
+        //
+        // qwen3:8b (FAST) handles humor badly: every response opens with a
+        // hedge preamble ("I'm not sure if this qualifies as a dad joke, but
+        // here goes:") and the model recycles the same 2-3 jokes across
+        // distinct requests. PRIMARY (gemma4:26b) is meaningfully better at
+        // both variety and tone. The cost of routing trivial joke requests to
+        // PRIMARY is one extra second of latency, vs the benefit of actual
+        // humor instead of a recycled brothel/ladder joke.
+        if matches!(decision.model, ModelId::Fast) && is_joke_request(&content) {
+            info!(
+                session  = %self.session_id,
+                trace_id = %trace_id,
+                "Joke request detected — upgrading FAST → PRIMARY for variety and tone"
+            );
+            decision.model = ModelId::Primary;
+            decision.reasoning = format!(
+                "{} [joke override: → PRIMARY for warmer delivery]",
+                decision.reasoning
+            );
+        }
+
+        // Vision continuation override.
+        //
+        // The router classifies based on the current utterance alone. That's
+        // correct for the FIRST turn that introduces an image ("take a look at
+        // my screen") but wrong for follow-ups: "how big is that?" / "what
+        // color?" / "show me another" all classify as Chat and route to FAST,
+        // which is text-only and will hallucinate visual details.
+        //
+        // If the most recent successful Vision turn was within
+        // `VISION_CONTINUATION_WINDOW_SECS` AND the new utterance contains an
+        // anaphoric or visual-reference marker, override to Vision so the
+        // existing capture+attach pipeline at line ~2956 fires again with a
+        // fresh screen capture. Re-capturing (vs caching bytes) means follow-
+        // ups about a *different* image still work — operator scrolls to a new
+        // image, says "what about this one?", and the live screen state goes
+        // to gemma4:26b.
+        //
+        // Only fires when the current decision is Chat-flavored (Fast or
+        // Primary). Vision/Code/Heavy decisions are left alone.
+        if matches!(decision.model, ModelId::Fast | ModelId::Primary) {
+            if let Some(last_vision) = self.last_vision_turn_at {
+                let elapsed = last_vision.elapsed().as_secs();
+                if elapsed <= crate::constants::VISION_CONTINUATION_WINDOW_SECS
+                    && is_vision_followup_reference(&content)
+                {
+                    let demoted_from = decision.model;
+                    info!(
+                        session         = %self.session_id,
+                        trace_id        = %trace_id,
+                        secs_since_last = elapsed,
+                        from            = ?demoted_from,
+                        "Vision continuation: follow-up to recent vision turn — upgrading to VISION"
+                    );
+                    decision.model = ModelId::Vision;
+                    decision.category = crate::inference::router::Category::Vision;
+                    decision.reasoning = format!(
+                        "{} [vision continuation: anaphoric/visual reference within {}s window → VISION]",
+                        decision.reasoning,
+                        crate::constants::VISION_CONTINUATION_WINDOW_SECS
+                    );
+                }
+            }
+        }
+
         // Phase 37.7: surface sticky-inheritance provenance in the structured log.
         // `Some(cat)` means the routed category was inherited from a prior turn
         // because the current utterance was ambiguous; `None` means direct
@@ -2965,6 +3044,12 @@ impl CoreOrchestrator {
                 if let Some(last_user) = target {
                     last_user.images = Some(vec![image_b64]);
                     image_attached = true;
+                    // Vision continuation: arm the follow-up window. From this
+                    // point until VISION_CONTINUATION_WINDOW_SECS elapses, any
+                    // anaphoric/visual-reference utterance ("how big is that?",
+                    // "what color is it?", "show me another") will re-route to
+                    // Vision instead of falling through to text-only FAST.
+                    self.last_vision_turn_at = Some(Instant::now());
                     debug!(session = %self.session_id, "Screen image attached to vision query message");
                 } else {
                     warn!(
@@ -3028,6 +3113,41 @@ impl CoreOrchestrator {
         // Phase 38 / Codex [7]: producer abort slot — populated by run_generation_background
         // after engine.generate_stream_cancellable returns Ok, drained by abort_active_generation.
         let producer_abort_bg  = self.generation_producer_abort.clone();
+
+        // Phase 0 (Adaptive Context Compiler): pre-build prompt-size telemetry.
+        //
+        // Measures the exact size of the assembled `messages` vector immediately
+        // before dispatch — the only point where ALL context injection (system
+        // prompt, conversation history, [Context:] / [Clipboard:] / [Memory:] /
+        // [Shell:] blocks, retrieval, action schemas, etc.) is finalized.
+        //
+        // Goal: prove or disprove the prompt-bloat hypothesis BEFORE building
+        // the context compiler. If FAST/PRIMARY prompts routinely exceed the
+        // budget thresholds (FAST >1500, PRIMARY >3000, CODE/HEAVY >4000), the
+        // compiler is mandatory. If they're consistently lean, the 20s prompt
+        // eval observed on HEAVY is compute-bound and the compiler won't fix it.
+        //
+        // Char-count / 4 is a rough estimator; real tokenizer integration lands
+        // in PR 2. Image payloads are excluded because Ollama processes them
+        // separately and base64 length doesn't correspond to token cost.
+        // Remove or downgrade to debug! once baseline data is collected.
+        {
+            let mut prompt_chars: usize = 0;
+            for m in &messages {
+                prompt_chars += m.role.chars().count() + m.content.chars().count() + 4; // role wrappers
+            }
+            let prompt_estimated_tokens = (prompt_chars / 4).max(1);
+            info!(
+                trace_id                = %trace_id,
+                model                   = %model_name,
+                category                = ?decision.category,
+                complexity              = ?decision.complexity,
+                message_count           = messages.len(),
+                prompt_chars            = prompt_chars,
+                prompt_estimated_tokens = prompt_estimated_tokens,
+                "PHASE0 prompt size pre-dispatch"
+            );
+        }
 
         self.generation_handle = Some(tokio::spawn(run_generation_background(
             engine,
@@ -5640,6 +5760,126 @@ fn is_off_host_request(content: &str) -> bool {
     off_host_phrases.iter().any(|p| lc.contains(p))
 }
 
+/// Joke-request detector.
+///
+/// Returns true when the operator's utterance unambiguously asks for a joke.
+/// Used by the router override that upgrades Fast → Primary on joke requests.
+///
+/// Background: qwen3:8b (FAST tier) handles joke requests poorly. Every joke
+/// response opens with a hedge preamble ("I'm not sure if this qualifies as a
+/// dad joke, but here goes:") and the model recycles the same handful of jokes
+/// across distinct requests ("tell me a dad joke", "tell me a dirty joke",
+/// "give me an adult joke" all return the same brothel/ladder joke). At 8B the
+/// model lacks the breadth and tonal range to deliver humor reliably. Routing
+/// to PRIMARY (gemma4:26b) gives both more variety and warmer delivery — the
+/// same model that handles the rest of the operator's casual chat well.
+///
+/// Bias: tight detection. Routing a non-joke request to PRIMARY isn't harmful
+/// (PRIMARY handles everything FAST does, just slower), but we don't want
+/// every mention of "joke" to upgrade — "what's the joke about that bug?" is
+/// referencing prior context, not requesting a joke.
+pub(crate) fn is_joke_request(content: &str) -> bool {
+    let lc = content.to_lowercase();
+
+    // Imperative joke-request phrasings. Each phrase is intentionally specific —
+    // a verb + the word "joke" — so non-request mentions ("the joke is on me",
+    // "what's the joke") don't false-positive.
+    let joke_request_phrases = [
+        "tell me a joke",
+        "tell me another joke",
+        "tell me a dad joke",
+        "tell me a dirty joke",
+        "tell me an adult joke",
+        "tell me a nsfw joke",
+        "tell another joke",
+        "give me a joke",
+        "give me another joke",
+        "give me a dad joke",
+        "give me a dirty joke",
+        "give me an adult joke",
+        "tell a joke",
+        "got a joke",
+        "got any jokes",
+        "know any jokes",
+        "make a joke",
+        "i want a joke",
+        "i want another joke",
+        "another joke",
+        "different joke",
+        "new joke",
+        "a step-dad joke",
+        "tell me a step-dad",
+        "tell me a step dad",
+    ];
+    joke_request_phrases.iter().any(|p| lc.contains(p))
+}
+
+/// Vision-continuation reference detector.
+///
+/// Returns true when the user's utterance plausibly refers back to visual content
+/// from a recent Vision turn — anaphoric pronouns, visual-property words, or
+/// direct comparison/inspection idioms. Used by the route override that upgrades
+/// Chat → Vision for follow-up questions about an already-shown image.
+///
+/// Bias: false-positive friendly. Routing a non-vision turn to Vision is
+/// graceful — the model gets the current screen attached, and if the screen is
+/// irrelevant the model just answers from text. Missing a real vision follow-up
+/// is the harsh failure (8B model confidently hallucinates "navy blue dress
+/// shirt"). When in doubt, route to Vision.
+///
+/// Phrases are bounded with leading/trailing space where a substring collision
+/// would matter ("color" doesn't collide; "it" without bounding would match
+/// "italic" so it's checked as a leading word only).
+pub(crate) fn is_vision_followup_reference(content: &str) -> bool {
+    let t = content.to_lowercase();
+    let trimmed = t.trim();
+
+    // Anaphoric sentence-starters. Bounded check: "it's red" matches; "italic
+    // formatting" doesn't. The trailing space/apostrophe is part of the pattern.
+    let anaphoric_starts = [
+        "this ", "this'", "this is", "this one", "this thing",
+        "that ", "that'", "that is", "that one", "that thing",
+        "it ", "it's", "it is", "its ",
+        "those ", "these ",
+    ];
+    if anaphoric_starts.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+
+    // Visual-property words anywhere in the utterance. These are strongly
+    // associated with discussing an image — color/shape/size/clothing/posture/
+    // composition. A short list is intentional; expansion happens based on
+    // operator-observed false negatives.
+    let visual_words = [
+        "color", "colour", "shade", "shape", "size", "outfit", "wearing",
+        "shirt", "pants", "jacket", "vest", "cardigan", "sweater", "dress",
+        "looks like", "look at", "the image", "the picture", "the photo",
+        "the screen", "show me", "another one", "the other one",
+        "bigger", "smaller", "darker", "lighter", "thicker", "thinner",
+        "longer", "shorter", "wider", "narrower",
+        // Measurement words — only asked in a visual-inspection context.
+        // "girth?" alone is the canonical example: minimal sentence, but
+        // unambiguous follow-up to a previous size estimate.
+        "girth", "length", "depth", "height", "width", "circumference",
+        "thickness", "diameter",
+    ];
+    if visual_words.iter().any(|w| t.contains(w)) {
+        return true;
+    }
+
+    // Direct visual questions. Bounded with trailing space to reduce collisions.
+    let visual_questions = [
+        "how big", "how large", "how small", "how long", "how wide",
+        "what color", "what colour", "what shape", "what size",
+        "what's it", "what is it", "what about that", "what about this",
+    ];
+    if visual_questions.iter().any(|q| t.contains(q)) {
+        return true;
+    }
+
+    false
+}
+
 /// Phase 37.9 / T8: detects operator self-send intent for iMessage.
 ///
 /// Returns true when the operator's utterance unambiguously requests sending
@@ -6337,6 +6577,135 @@ mod tests {
         assert!(!is_off_host_request("what's a good linux distro?"));
         assert!(!is_off_host_request("is this a server-grade cpu?"));
         assert!(!is_off_host_request("what does the linux kernel do?"));
+    }
+
+    // ── is_vision_followup_reference unit tests ──────────────────────────────
+
+    #[test]
+    fn vision_followup_detects_anaphoric_pronouns() {
+        // The exact phrasings the operator hit in the broken session.
+        assert!(is_vision_followup_reference("How big would you say that thing is?"));
+        assert!(is_vision_followup_reference("That isn't a sweater vest."));
+        assert!(is_vision_followup_reference("That's not a joke."));
+        assert!(is_vision_followup_reference("It's very light blue."));
+        assert!(is_vision_followup_reference("This one is bigger."));
+        assert!(is_vision_followup_reference("this is wrong"));
+    }
+
+    #[test]
+    fn vision_followup_detects_visual_property_words() {
+        // Property questions about an image — even without anaphora.
+        assert!(is_vision_followup_reference("what color is the cardigan"));
+        assert!(is_vision_followup_reference("describe the outfit"));
+        assert!(is_vision_followup_reference("show me another one"));
+        assert!(is_vision_followup_reference("the picture is blurry"));
+        assert!(is_vision_followup_reference("the screen looks weird"));
+    }
+
+    #[test]
+    fn vision_followup_detects_direct_visual_questions() {
+        assert!(is_vision_followup_reference("how big is it"));
+        assert!(is_vision_followup_reference("how large is the watermelon"));
+        assert!(is_vision_followup_reference("what color is it"));
+        assert!(is_vision_followup_reference("what shape is that"));
+        assert!(is_vision_followup_reference("what about that"));
+    }
+
+    #[test]
+    fn vision_followup_detects_comparative_descriptors() {
+        // Operator says "show me a bigger one" — clearly a vision follow-up
+        // even without explicit pronoun.
+        assert!(is_vision_followup_reference("want to see an even bigger one"));
+        assert!(is_vision_followup_reference("show me a smaller one"));
+        assert!(is_vision_followup_reference("a darker version please"));
+    }
+
+    #[test]
+    fn vision_followup_does_not_match_unrelated_chat() {
+        // Phrases that should NOT trigger vision continuation. Bias is toward
+        // false positives, but pure topic-shifts should pass through cleanly.
+        assert!(!is_vision_followup_reference("what's the weather"));
+        assert!(!is_vision_followup_reference("tell me a dad joke"));
+        assert!(!is_vision_followup_reference("set a timer for ten minutes"));
+        assert!(!is_vision_followup_reference("send a message to mom"));
+        assert!(!is_vision_followup_reference("what time is it in tokyo"));
+    }
+
+    #[test]
+    fn vision_followup_handles_capitalization() {
+        // The detector must be case-insensitive — operator typing "What Color"
+        // or "THIS IS WRONG" must still match.
+        assert!(is_vision_followup_reference("What Color Is It"));
+        assert!(is_vision_followup_reference("THIS IS WRONG"));
+        assert!(is_vision_followup_reference("How Big"));
+    }
+
+    #[test]
+    fn vision_followup_does_not_match_word_internal_substrings() {
+        // 'it' as a sentence-starter must not match 'italic'. The bounded
+        // anaphoric_starts list checks "it " with trailing space.
+        assert!(!is_vision_followup_reference("italic formatting is fine"));
+        assert!(!is_vision_followup_reference("italics matter here"));
+    }
+
+    #[test]
+    fn vision_followup_detects_measurement_words() {
+        // The canonical regression — operator types "girth?" as a one-word
+        // follow-up to a size estimate. Pre-fix, this routed FAST and got a
+        // hallucinated answer. Post-fix, it must route Vision.
+        assert!(is_vision_followup_reference("girth?"));
+        assert!(is_vision_followup_reference("length?"));
+        assert!(is_vision_followup_reference("circumference"));
+        assert!(is_vision_followup_reference("what's the depth"));
+        assert!(is_vision_followup_reference("how's the thickness"));
+    }
+
+    // ── is_joke_request unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn joke_request_detects_canonical_phrasings() {
+        assert!(is_joke_request("tell me a joke"));
+        assert!(is_joke_request("tell me a dad joke"));
+        assert!(is_joke_request("tell me a dirty joke"));
+        assert!(is_joke_request("tell me an adult joke"));
+        assert!(is_joke_request("give me a joke"));
+        assert!(is_joke_request("give me another joke"));
+    }
+
+    #[test]
+    fn joke_request_detects_step_dad_variants() {
+        // "step-dad joke" was a phrasing the operator used live; ensure
+        // hyphenated and unhyphenated both match.
+        assert!(is_joke_request("tell me a step-dad joke"));
+        assert!(is_joke_request("tell me a step dad joke"));
+    }
+
+    #[test]
+    fn joke_request_detects_imperative_followups() {
+        assert!(is_joke_request("another joke"));
+        assert!(is_joke_request("a different joke"));
+        assert!(is_joke_request("got any jokes"));
+        assert!(is_joke_request("know any jokes"));
+        assert!(is_joke_request("i want another joke"));
+    }
+
+    #[test]
+    fn joke_request_does_not_match_non_imperative_mentions() {
+        // Mentioning "joke" without requesting one must NOT match. These are
+        // common phrasings where the operator is referencing prior context or
+        // commenting on a joke, not asking for a new one.
+        assert!(!is_joke_request("that was a good joke"));
+        assert!(!is_joke_request("the joke is on me"));
+        assert!(!is_joke_request("what's the joke about"));
+        assert!(!is_joke_request("i don't get the joke"));
+        assert!(!is_joke_request("that joke was funny"));
+    }
+
+    #[test]
+    fn joke_request_handles_capitalization() {
+        assert!(is_joke_request("Tell Me A Joke"));
+        assert!(is_joke_request("TELL ME A DAD JOKE"));
+        assert!(is_joke_request("Give Me Another Joke"));
     }
 
     // ── is_self_reference_request unit tests (Phase 37.9 / T8) ────────────────

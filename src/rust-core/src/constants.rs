@@ -268,6 +268,31 @@ pub const CONVERSATION_MAX_TURNS: usize = 16;
 /// between a completed turn and "I guess I'm done for now" ambient state.
 pub const PROACTIVE_USER_ACTIVE_WINDOW_SECS: u64 = 60;
 
+/// Vision-continuation window (seconds): how long after a successful vision turn
+/// follow-up questions should re-route to the Vision tier with a fresh screen
+/// capture, rather than falling through to Chat/FAST.
+///
+/// Background: vision routing in Dexter is single-shot — the image attaches only
+/// when the router classifies the user's text as `Category::Vision`. Once a user
+/// asks "take a look at my screen", the next turn ("how big is that?", "what
+/// color is it?", "show me another") classifies as Chat and routes to FAST
+/// (qwen3:8b), which is text-only. The model has no choice but to hallucinate
+/// visual details from conversation context.
+///
+/// Fix: when a recent turn was a successful Vision route AND the new utterance
+/// contains an anaphoric/visual-reference marker, we override the route back to
+/// Vision so `capture_screen()` fires again and the image attaches to gemma4:26b.
+/// Re-capturing (instead of caching bytes) means follow-ups about a *different*
+/// image still work — the operator scrolls to a new image, says "what about this
+/// one?", and the live screen state goes to the model.
+///
+/// Tuning: 300s (5 min) covers a normal multi-turn conversation about an image
+/// while erring short enough that "what's it look like?" 20 minutes later — when
+/// the conversation has clearly moved on — falls through to default routing.
+/// Smaller windows risk losing legitimate follow-ups; larger windows risk
+/// false-positive vision routes when the operator is no longer in image-mode.
+pub const VISION_CONTINUATION_WINDOW_SECS: u64 = 300;
+
 /// Wall-clock timeout for the entire generation pipeline (seconds).
 ///
 /// If the full token stream has not completed within this window, the generation
