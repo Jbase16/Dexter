@@ -8,12 +8,12 @@
 /// - `store`    — `VectorStore`: SQLite + in-Rust cosine similarity over f32 BLOBs
 /// - `web`      — `WebRetriever`: HTTP fetch + HTML text extraction via `scraper`
 /// - `pipeline` — `RetrievalPipeline`: trigger detection, retrieval, context injection
-
 pub mod pipeline;
 pub mod store;
 pub mod web;
 
-#[allow(unused_imports)] // Phase 10+ callers via crate::retrieval::{RetrievalContext, RetrievalTrigger, RetrievalResult}
+#[allow(unused_imports)]
+// Phase 10+ callers via crate::retrieval::{RetrievalContext, RetrievalTrigger, RetrievalResult}
 pub use pipeline::{RetrievalContext, RetrievalPipeline, RetrievalResult, RetrievalTrigger};
 #[allow(unused_imports)] // Phase 10+ callers via crate::retrieval::MemoryEntry
 pub use store::{MemoryEntry, VectorStore};

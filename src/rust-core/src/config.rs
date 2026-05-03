@@ -21,8 +21,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info};
 
 use crate::constants::{
-    DEXTER_CONFIG_FILENAME, DEXTER_STATE_DIR, OLLAMA_BASE_URL, PERSONALITY_CONFIG_PATH,
-    SOCKET_PATH,
+    DEXTER_CONFIG_FILENAME, DEXTER_STATE_DIR, OLLAMA_BASE_URL, PERSONALITY_CONFIG_PATH, SOCKET_PATH,
 };
 
 // ── Top-level config ──────────────────────────────────────────────────────────
@@ -56,12 +55,12 @@ pub struct DexterConfig {
 impl Default for DexterConfig {
     fn default() -> Self {
         Self {
-            core:      CoreConfig::default(),
-            models:    ModelConfig::default(),
-            logging:   LoggingConfig::default(),
+            core: CoreConfig::default(),
+            models: ModelConfig::default(),
+            logging: LoggingConfig::default(),
             inference: InferenceConfig::default(),
-            behavior:  BehaviorConfig::default(),
-            hotkey:    HotkeyConfig::default(),
+            behavior: BehaviorConfig::default(),
+            hotkey: HotkeyConfig::default(),
         }
     }
 }
@@ -72,10 +71,10 @@ impl Default for DexterConfig {
 pub struct CoreConfig {
     /// Unix domain socket path. Overridable to use a non-default socket during
     /// integration tests (e.g., `/tmp/dexter-test.sock`) without recompiling.
-    pub socket_path:      String,
+    pub socket_path: String,
     /// Absolute path to the state directory. Defaults to `{home_dir}/.dexter/state`.
     /// Computed from `DEXTER_STATE_DIR` constant plus `home_dir()` if absent from config.
-    pub state_dir:        PathBuf,
+    pub state_dir: PathBuf,
     /// Path to the operator personality YAML profile.
     ///
     /// Loaded at startup by `main.rs` via `PersonalityLayer::load_or_default_from`,
@@ -97,7 +96,7 @@ impl Default for CoreConfig {
             .join(DEXTER_STATE_DIR);
 
         Self {
-            socket_path:      SOCKET_PATH.to_string(),
+            socket_path: SOCKET_PATH.to_string(),
             state_dir,
             personality_path: PERSONALITY_CONFIG_PATH.to_string(),
         }
@@ -145,22 +144,34 @@ pub struct ModelConfig {
 // on deepseek-r1:32b deliberately — DeepSeek's inherent-uncensored reasoning is
 // hard to replace, and the benchmark gap only matters on rare chat+complexity=3
 // escalations.
-fn default_model_fast()    -> String { "qwen3:8b".to_string() }
-fn default_model_primary() -> String { "gemma4:26b".to_string() }
-fn default_model_heavy()   -> String { "deepseek-r1:32b".to_string() }
-fn default_model_code()    -> String { "deepseek-coder-v2:16b".to_string() }
-fn default_model_vision()  -> String { "gemma4:26b".to_string() }
-fn default_model_embed()   -> String { "mxbai-embed-large".to_string() }
+fn default_model_fast() -> String {
+    "qwen3:8b".to_string()
+}
+fn default_model_primary() -> String {
+    "gemma4:26b".to_string()
+}
+fn default_model_heavy() -> String {
+    "deepseek-r1:32b".to_string()
+}
+fn default_model_code() -> String {
+    "deepseek-coder-v2:16b".to_string()
+}
+fn default_model_vision() -> String {
+    "gemma4:26b".to_string()
+}
+fn default_model_embed() -> String {
+    "mxbai-embed-large".to_string()
+}
 
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            fast:    default_model_fast(),
+            fast: default_model_fast(),
             primary: default_model_primary(),
-            heavy:   default_model_heavy(),
-            code:    default_model_code(),
-            vision:  default_model_vision(),
-            embed:   default_model_embed(),
+            heavy: default_model_heavy(),
+            code: default_model_code(),
+            vision: default_model_vision(),
+            embed: default_model_embed(),
         }
     }
 }
@@ -196,8 +207,8 @@ impl LogLevel {
         match self {
             LogLevel::Trace => "trace",
             LogLevel::Debug => "debug",
-            LogLevel::Info  => "info",
-            LogLevel::Warn  => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
             LogLevel::Error => "error",
         }
     }
@@ -205,14 +216,14 @@ impl LogLevel {
 
 #[derive(Debug, Deserialize)]
 pub struct LoggingConfig {
-    pub level:  LogLevel,
+    pub level: LogLevel,
     pub format: LogFormat,
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            level:  LogLevel::Info,
+            level: LogLevel::Info,
             format: LogFormat::Auto,
         }
     }
@@ -226,9 +237,9 @@ impl LoggingConfig {
     /// Uses `std::io::IsTerminal` from stdlib (stable since Rust 1.70) — no atty crate.
     pub fn use_json(&self) -> bool {
         match self.format {
-            LogFormat::Json   => true,
+            LogFormat::Json => true,
             LogFormat::Pretty => false,
-            LogFormat::Auto   => !std::io::stdout().is_terminal(),
+            LogFormat::Auto => !std::io::stdout().is_terminal(),
         }
     }
 }
@@ -274,19 +285,27 @@ pub struct InferenceConfig {
     pub auto_pull_missing_models: bool,
 }
 
-fn default_inference_ollama_base_url()              -> String { OLLAMA_BASE_URL.to_string() }
-fn default_inference_request_timeout_secs()         -> u64    { 60 }
-fn default_inference_connect_timeout_secs()         -> u64    { 5  }
-fn default_inference_stream_inactivity_timeout_secs() -> u64  { 30 }
+fn default_inference_ollama_base_url() -> String {
+    OLLAMA_BASE_URL.to_string()
+}
+fn default_inference_request_timeout_secs() -> u64 {
+    60
+}
+fn default_inference_connect_timeout_secs() -> u64 {
+    5
+}
+fn default_inference_stream_inactivity_timeout_secs() -> u64 {
+    30
+}
 
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            ollama_base_url:              default_inference_ollama_base_url(),
-            request_timeout_secs:         default_inference_request_timeout_secs(),
-            connect_timeout_secs:         default_inference_connect_timeout_secs(),
+            ollama_base_url: default_inference_ollama_base_url(),
+            request_timeout_secs: default_inference_request_timeout_secs(),
+            connect_timeout_secs: default_inference_connect_timeout_secs(),
             stream_inactivity_timeout_secs: default_inference_stream_inactivity_timeout_secs(),
-            auto_pull_missing_models:     false,
+            auto_pull_missing_models: false,
         }
     }
 }
@@ -388,19 +407,25 @@ pub struct BehaviorConfig {
     pub operator_self_aliases: Vec<String>,
 }
 
-fn default_behavior_proactive_enabled()           -> bool { true }
-fn default_behavior_proactive_interval_secs()     -> u64  { 90 }
-fn default_behavior_proactive_startup_grace_secs() -> u64 { 30 }
+fn default_behavior_proactive_enabled() -> bool {
+    true
+}
+fn default_behavior_proactive_interval_secs() -> u64 {
+    90
+}
+fn default_behavior_proactive_startup_grace_secs() -> u64 {
+    30
+}
 
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
-            proactive_enabled:              default_behavior_proactive_enabled(),
-            proactive_interval_secs:        default_behavior_proactive_interval_secs(),
-            proactive_startup_grace_secs:   default_behavior_proactive_startup_grace_secs(),
-            proactive_excluded_bundles:     vec![],
-            operator_self_handle:           None,
-            operator_self_aliases:          vec![],
+            proactive_enabled: default_behavior_proactive_enabled(),
+            proactive_interval_secs: default_behavior_proactive_interval_secs(),
+            proactive_startup_grace_secs: default_behavior_proactive_startup_grace_secs(),
+            proactive_excluded_bundles: vec![],
+            operator_self_handle: None,
+            operator_self_aliases: vec![],
         }
     }
 }
@@ -443,20 +468,30 @@ pub struct HotkeyConfig {
     pub option: bool,
 }
 
-fn default_hotkey_key_code() -> u32  { 49 }
-fn default_hotkey_ctrl()     -> bool { true }
-fn default_hotkey_shift()    -> bool { true }
-fn default_hotkey_cmd()      -> bool { false }
-fn default_hotkey_option()   -> bool { false }
+fn default_hotkey_key_code() -> u32 {
+    49
+}
+fn default_hotkey_ctrl() -> bool {
+    true
+}
+fn default_hotkey_shift() -> bool {
+    true
+}
+fn default_hotkey_cmd() -> bool {
+    false
+}
+fn default_hotkey_option() -> bool {
+    false
+}
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
             key_code: default_hotkey_key_code(),
-            ctrl:     default_hotkey_ctrl(),
-            shift:    default_hotkey_shift(),
-            cmd:      default_hotkey_cmd(),
-            option:   default_hotkey_option(),
+            ctrl: default_hotkey_ctrl(),
+            shift: default_hotkey_shift(),
+            cmd: default_hotkey_cmd(),
+            option: default_hotkey_option(),
         }
     }
 }
@@ -516,15 +551,19 @@ pub fn load() -> Result<DexterConfig> {
 /// Lives in `config.rs` rather than a standalone module because it is config-adjacent:
 /// the path comes from `CoreConfig.state_dir`, which is only known after config load.
 pub fn ensure_state_dir(state_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(state_dir)
-        .with_context(|| format!("Failed to create state directory at {}", state_dir.display()))
+    std::fs::create_dir_all(state_dir).with_context(|| {
+        format!(
+            "Failed to create state directory at {}",
+            state_dir.display()
+        )
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn resolve_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context(
-        "Cannot resolve home directory — HOME environment variable unset and no passwd entry found"
+        "Cannot resolve home directory — HOME environment variable unset and no passwd entry found",
     )?;
     Ok(home.join(".dexter").join(DEXTER_CONFIG_FILENAME))
 }
@@ -538,12 +577,12 @@ mod tests {
     #[test]
     fn default_models_are_correct() {
         let cfg = ModelConfig::default();
-        assert_eq!(cfg.fast,    "qwen3:8b");
+        assert_eq!(cfg.fast, "qwen3:8b");
         assert_eq!(cfg.primary, "gemma4:26b");
-        assert_eq!(cfg.heavy,   "deepseek-r1:32b");
-        assert_eq!(cfg.code,    "deepseek-coder-v2:16b");
-        assert_eq!(cfg.vision,  "gemma4:26b");
-        assert_eq!(cfg.embed,   "mxbai-embed-large");
+        assert_eq!(cfg.heavy, "deepseek-r1:32b");
+        assert_eq!(cfg.code, "deepseek-coder-v2:16b");
+        assert_eq!(cfg.vision, "gemma4:26b");
+        assert_eq!(cfg.embed, "mxbai-embed-large");
     }
 
     #[test]
@@ -552,8 +591,10 @@ mod tests {
         // by default. ModelId::Vision.unload_after_use() relies on this equality
         // to avoid evicting the warm PRIMARY after a vision query.
         let cfg = ModelConfig::default();
-        assert_eq!(cfg.vision, cfg.primary,
-            "default Vision must alias to PRIMARY to keep multimodal unification");
+        assert_eq!(
+            cfg.vision, cfg.primary,
+            "default Vision must alias to PRIMARY to keep multimodal unification"
+        );
     }
 
     #[test]
@@ -583,9 +624,9 @@ mod tests {
             fast = "llama3.2:1b"
         "#;
         let cfg: DexterConfig = toml::from_str(toml).expect("valid TOML");
-        assert_eq!(cfg.models.fast,    "llama3.2:1b");
-        assert_eq!(cfg.models.primary, "gemma4:26b");  // still default
-        assert_eq!(cfg.core.socket_path, SOCKET_PATH);         // still default
+        assert_eq!(cfg.models.fast, "llama3.2:1b");
+        assert_eq!(cfg.models.primary, "gemma4:26b"); // still default
+        assert_eq!(cfg.core.socket_path, SOCKET_PATH); // still default
     }
 
     #[test]
@@ -597,8 +638,8 @@ mod tests {
     #[test]
     fn inference_default_timeouts_are_sane() {
         let cfg = InferenceConfig::default();
-        assert_eq!(cfg.request_timeout_secs,          60);
-        assert_eq!(cfg.connect_timeout_secs,           5);
+        assert_eq!(cfg.request_timeout_secs, 60);
+        assert_eq!(cfg.connect_timeout_secs, 5);
         assert_eq!(cfg.stream_inactivity_timeout_secs, 30);
     }
 
@@ -611,9 +652,12 @@ mod tests {
     #[test]
     fn behavior_defaults_are_correct() {
         let cfg = BehaviorConfig::default();
-        assert!(cfg.proactive_enabled,                         "proactive must default to enabled");
-        assert_eq!(cfg.proactive_interval_secs,        90,    "default interval is 90s");
-        assert_eq!(cfg.proactive_startup_grace_secs,   30,    "default startup grace is 30s");
+        assert!(cfg.proactive_enabled, "proactive must default to enabled");
+        assert_eq!(cfg.proactive_interval_secs, 90, "default interval is 90s");
+        assert_eq!(
+            cfg.proactive_startup_grace_secs, 30,
+            "default startup grace is 30s"
+        );
     }
 
     #[test]
@@ -624,9 +668,18 @@ mod tests {
             proactive_interval_secs = 120
         "#;
         let cfg: DexterConfig = toml::from_str(toml).expect("valid TOML");
-        assert!(cfg.behavior.proactive_enabled,                "enabled must default to true");
-        assert_eq!(cfg.behavior.proactive_interval_secs, 120, "interval was overridden");
-        assert_eq!(cfg.behavior.proactive_startup_grace_secs, 30, "grace must stay at default");
+        assert!(
+            cfg.behavior.proactive_enabled,
+            "enabled must default to true"
+        );
+        assert_eq!(
+            cfg.behavior.proactive_interval_secs, 120,
+            "interval was overridden"
+        );
+        assert_eq!(
+            cfg.behavior.proactive_startup_grace_secs, 30,
+            "grace must stay at default"
+        );
     }
 
     #[test]
@@ -643,11 +696,11 @@ mod tests {
     #[test]
     fn hotkey_config_defaults_are_correct() {
         let cfg = HotkeyConfig::default();
-        assert_eq!(cfg.key_code, 49,   "default key_code must be 49 (kVK_Space)");
-        assert!(cfg.ctrl,              "default ctrl must be true");
-        assert!(cfg.shift,             "default shift must be true");
-        assert!(!cfg.cmd,              "default cmd must be false");
-        assert!(!cfg.option,           "default option must be false");
+        assert_eq!(cfg.key_code, 49, "default key_code must be 49 (kVK_Space)");
+        assert!(cfg.ctrl, "default ctrl must be true");
+        assert!(cfg.shift, "default shift must be true");
+        assert!(!cfg.cmd, "default cmd must be false");
+        assert!(!cfg.option, "default option must be false");
     }
 
     #[test]
@@ -656,9 +709,9 @@ mod tests {
         let toml = "[hotkey]\ncmd = true\n";
         let cfg: DexterConfig = toml::from_str(toml).expect("valid TOML");
         assert_eq!(cfg.hotkey.key_code, 49, "key_code must stay at default");
-        assert!(cfg.hotkey.ctrl,            "ctrl must stay at default");
-        assert!(cfg.hotkey.shift,           "shift must stay at default");
-        assert!(cfg.hotkey.cmd,             "cmd was overridden to true");
-        assert!(!cfg.hotkey.option,         "option must stay at default");
+        assert!(cfg.hotkey.ctrl, "ctrl must stay at default");
+        assert!(cfg.hotkey.shift, "shift must stay at default");
+        assert!(cfg.hotkey.cmd, "cmd was overridden to true");
+        assert!(!cfg.hotkey.option, "option must stay at default");
     }
 }

@@ -1,3 +1,9 @@
+use super::protocol::WorkerType;
+use super::worker_client::WorkerClient;
+use crate::constants::{
+    VOICE_PYTHON_EXE, VOICE_TTS_WORKER_PATH, VOICE_WORKER_RESTART_BACKOFF_SECS,
+    VOICE_WORKER_RESTART_MAX_ATTEMPTS,
+};
 /// VoiceCoordinator — TTS worker supervisor for CoreOrchestrator.
 ///
 /// Owns the TTS WorkerClient wrapped in Arc<Mutex<>> so the TTS synthesis
@@ -5,16 +11,12 @@
 /// inference loop without moving self into the task.
 ///
 /// STT workers are NOT managed here — stream_audio() creates them per-call.
-
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU32, Ordering},
+    Arc,
+};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use crate::constants::{
-    VOICE_PYTHON_EXE, VOICE_TTS_WORKER_PATH,
-    VOICE_WORKER_RESTART_MAX_ATTEMPTS, VOICE_WORKER_RESTART_BACKOFF_SECS,
-};
-use super::worker_client::WorkerClient;
-use super::protocol::WorkerType;
 
 /// Phase 38c: VoiceCoordinator is Clone so that one daemon-lifetime instance can
 /// be shared across all gRPC sessions. Pre-Phase-38c, each new session created
@@ -31,12 +33,12 @@ use super::protocol::WorkerType;
 /// supervisor task is the only caller that mutates lifecycle state.
 #[derive(Clone)]
 pub struct VoiceCoordinator {
-    tts:                  Arc<Mutex<Option<WorkerClient>>>,
-    tts_ready:            Arc<AtomicBool>,   // lock-free availability check
-    python_exe:           String,
-    tts_script:           String,
-    restarts:             Arc<AtomicU32>,    // Phase 38c: Arc-wrapped for cross-session sharing
-    permanently_degraded: Arc<AtomicBool>,   // Phase 38c: Arc-wrapped — set once, read everywhere
+    tts: Arc<Mutex<Option<WorkerClient>>>,
+    tts_ready: Arc<AtomicBool>, // lock-free availability check
+    python_exe: String,
+    tts_script: String,
+    restarts: Arc<AtomicU32>, // Phase 38c: Arc-wrapped for cross-session sharing
+    permanently_degraded: Arc<AtomicBool>, // Phase 38c: Arc-wrapped — set once, read everywhere
 }
 
 impl VoiceCoordinator {
@@ -44,11 +46,11 @@ impl VoiceCoordinator {
     /// Call start_tts().await afterwards to attempt worker spawn.
     pub fn new_degraded() -> Self {
         Self {
-            tts:                  Arc::new(Mutex::new(None)),
-            tts_ready:            Arc::new(AtomicBool::new(false)),
-            python_exe:           VOICE_PYTHON_EXE.to_string(),
-            tts_script:           VOICE_TTS_WORKER_PATH.to_string(),
-            restarts:             Arc::new(AtomicU32::new(0)),
+            tts: Arc::new(Mutex::new(None)),
+            tts_ready: Arc::new(AtomicBool::new(false)),
+            python_exe: VOICE_PYTHON_EXE.to_string(),
+            tts_script: VOICE_TTS_WORKER_PATH.to_string(),
+            restarts: Arc::new(AtomicU32::new(0)),
             permanently_degraded: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -112,14 +114,14 @@ impl VoiceCoordinator {
             let mut guard = self.tts.lock().await;
             match guard.as_mut() {
                 Some(c) => c.health_check().await,
-                None    => false,
+                None => false,
             }
         };
         let restarts_now = self.restarts.load(Ordering::Relaxed);
         if !alive && restarts_now < VOICE_WORKER_RESTART_MAX_ATTEMPTS {
-            let delay = VOICE_WORKER_RESTART_BACKOFF_SECS << restarts_now;  // exponential
+            let delay = VOICE_WORKER_RESTART_BACKOFF_SECS << restarts_now; // exponential
             warn!(
-                attempt    = restarts_now + 1,
+                attempt = restarts_now + 1,
                 delay_secs = delay,
                 "TTS worker dead — restarting"
             );
@@ -131,7 +133,8 @@ impl VoiceCoordinator {
         } else if !alive && !self.permanently_degraded.load(Ordering::Relaxed) {
             // Transition into permanent degradation — log exactly once via
             // compare-and-swap so concurrent callers don't double-log.
-            if self.permanently_degraded
+            if self
+                .permanently_degraded
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
@@ -172,7 +175,10 @@ mod tests {
     #[test]
     fn new_degraded_is_not_available() {
         let vc = VoiceCoordinator::new_degraded();
-        assert!(!vc.is_tts_available(), "Degraded coordinator must report unavailable");
+        assert!(
+            !vc.is_tts_available(),
+            "Degraded coordinator must report unavailable"
+        );
     }
 
     #[test]
@@ -186,7 +192,10 @@ mod tests {
         let vc = VoiceCoordinator::new_degraded();
         let arc1 = vc.tts_arc();
         let arc2 = vc.tts_arc();
-        assert!(Arc::ptr_eq(&arc1, &arc2), "Both Arc clones must point to the same allocation");
+        assert!(
+            Arc::ptr_eq(&arc1, &arc2),
+            "Both Arc clones must point to the same allocation"
+        );
     }
 
     #[test]
@@ -225,16 +234,23 @@ mod tests {
 
         // Mutate via vc; observe via vc2.
         vc.tts_ready.store(true, Ordering::Relaxed);
-        assert!(vc2.is_tts_available(),
-                "clone must observe tts_ready changes via shared Arc");
+        assert!(
+            vc2.is_tts_available(),
+            "clone must observe tts_ready changes via shared Arc"
+        );
 
         vc.permanently_degraded.store(true, Ordering::Relaxed);
-        assert!(vc2.is_permanently_degraded(),
-                "clone must observe permanently_degraded changes via shared Arc");
+        assert!(
+            vc2.is_permanently_degraded(),
+            "clone must observe permanently_degraded changes via shared Arc"
+        );
 
         vc.restarts.store(7, Ordering::Relaxed);
-        assert_eq!(vc2.restarts.load(Ordering::Relaxed), 7,
-                   "clone must observe restart count via shared Arc");
+        assert_eq!(
+            vc2.restarts.load(Ordering::Relaxed),
+            7,
+            "clone must observe restart count via shared Arc"
+        );
     }
 
     #[test]
@@ -246,7 +262,9 @@ mod tests {
         let vc2 = vc.clone();
         let arc1 = vc.tts_arc();
         let arc2 = vc2.tts_arc();
-        assert!(Arc::ptr_eq(&arc1, &arc2),
-                "tts_arc() across clones must point to the same allocation");
+        assert!(
+            Arc::ptr_eq(&arc1, &arc2),
+            "tts_arc() across clones must point to the same allocation"
+        );
     }
 }

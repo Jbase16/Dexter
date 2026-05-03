@@ -16,11 +16,11 @@
 //! Capturing   ─── buffer > MAX_QUERY_LEN ──► Passthrough (flush as literal text)
 //! ```
 
-const SENTINEL_PREFIX: &str  = "[UNCERTAIN:";
-const SENTINEL_CLOSE:  char  = ']';
+const SENTINEL_PREFIX: &str = "[UNCERTAIN:";
+const SENTINEL_CLOSE: char = ']';
 /// Maximum characters allowed in the query portion of the sentinel.
 /// Keeps the rolling buffer bounded; a longer "query" is almost certainly not a sentinel.
-const MAX_QUERY_LEN:   usize = 200;
+const MAX_QUERY_LEN: usize = 200;
 
 /// State of the uncertainty scanner.
 #[derive(Debug, PartialEq)]
@@ -41,7 +41,7 @@ enum State {
 /// primary generation call — this is enforced by the ownership model: the interceptor
 /// is created inside `generate_primary()` which is called once per primary generation).
 pub struct UncertaintyInterceptor {
-    state:  State,
+    state: State,
     buffer: String,
 }
 
@@ -53,13 +53,16 @@ pub enum InterceptorOutput {
     Passthrough(String),
     /// Sentinel detected. `flush` is any pre-marker text that should be forwarded;
     /// `query` is the extracted retrieval query.
-    Intercepted { flush: Option<String>, query: String },
+    Intercepted {
+        flush: Option<String>,
+        query: String,
+    },
 }
 
 impl UncertaintyInterceptor {
     pub fn new() -> Self {
         Self {
-            state:  State::Passthrough,
+            state: State::Passthrough,
             buffer: String::with_capacity(64),
         }
     }
@@ -103,7 +106,7 @@ impl UncertaintyInterceptor {
             // Retain everything AFTER "[UNCERTAIN:" for close-bracket scanning.
             let after = self.buffer[idx + SENTINEL_PREFIX.len()..].to_string();
             self.buffer = after;
-            self.state  = State::Capturing;
+            self.state = State::Capturing;
 
             // Check if the close bracket is already in the carried-over tail.
             let capturing_result = self.scan_for_close();
@@ -111,7 +114,11 @@ impl UncertaintyInterceptor {
                 InterceptorOutput::Intercepted { flush: _, query } => {
                     // Merge pre_marker into the flush field (it must be forwarded before retrieval).
                     InterceptorOutput::Intercepted {
-                        flush: if pre_marker.is_empty() { None } else { Some(pre_marker) },
+                        flush: if pre_marker.is_empty() {
+                            None
+                        } else {
+                            Some(pre_marker)
+                        },
                         query,
                     }
                 }
@@ -171,7 +178,7 @@ impl UncertaintyInterceptor {
             let query: String = self.buffer[..close_pos].trim().to_string();
             // Drop everything up to and including the close bracket.
             self.buffer = self.buffer[close_pos + 1..].to_string();
-            self.state  = State::Intercepted;
+            self.state = State::Intercepted;
             return InterceptorOutput::Intercepted { flush: None, query };
         }
 
@@ -214,16 +221,22 @@ mod tests {
     /// Run a sequence of tokens through a fresh interceptor and collect results.
     /// Returns (all_flushed_text_joined, Option<intercepted_query>).
     fn run_stream(tokens: &[&str]) -> (Vec<String>, Option<String>) {
-        let mut ic     = UncertaintyInterceptor::new();
+        let mut ic = UncertaintyInterceptor::new();
         let mut output = Vec::new();
-        let mut query  = None;
+        let mut query = None;
         for token in tokens {
             match ic.process(token) {
                 InterceptorOutput::Passthrough(t) => {
-                    if !t.is_empty() { output.push(t); }
+                    if !t.is_empty() {
+                        output.push(t);
+                    }
                 }
                 InterceptorOutput::Intercepted { flush, query: q } => {
-                    if let Some(f) = flush { if !f.is_empty() { output.push(f); } }
+                    if let Some(f) = flush {
+                        if !f.is_empty() {
+                            output.push(f);
+                        }
+                    }
                     query = Some(q);
                 }
             }
@@ -237,7 +250,10 @@ mod tests {
         let (flushed, query) = run_stream(tokens);
         // All tokens should pass through unchanged; no sentinel in input.
         assert_eq!(flushed.join(""), "The answer is 42.");
-        assert!(query.is_none(), "no sentinel should yield no intercepted query");
+        assert!(
+            query.is_none(),
+            "no sentinel should yield no intercepted query"
+        );
     }
 
     #[test]
@@ -251,8 +267,11 @@ mod tests {
         // Intercepted query must be extracted precisely.
         assert_eq!(query.as_deref(), Some("current year"));
         // Pre-marker text ("The answer is ") must be flushed before the sentinel.
-        assert!(flushed.iter().any(|t| t.contains("The answer is")),
-            "pre-marker text must be flushed: got {:?}", flushed);
+        assert!(
+            flushed.iter().any(|t| t.contains("The answer is")),
+            "pre-marker text must be flushed: got {:?}",
+            flushed
+        );
         // Post-sentinel text is dropped — orchestrator restarts generation for re-prompt.
     }
 
@@ -261,8 +280,11 @@ mod tests {
         // Sentinel split across multiple tokens — common in practice with sub-word tokenisers.
         let tokens = &["The ", "[UNCE", "RTAIN: latest rust version", "]", " done."];
         let (_, query) = run_stream(tokens);
-        assert_eq!(query.as_deref(), Some("latest rust version"),
-            "sentinel split across tokens must be correctly reassembled");
+        assert_eq!(
+            query.as_deref(),
+            Some("latest rust version"),
+            "sentinel split across tokens must be correctly reassembled"
+        );
     }
 
     #[test]
@@ -272,9 +294,13 @@ mod tests {
         let token = format!("[UNCERTAIN: {}", long_content); // no closing ]
         let tokens: Vec<&str> = vec![&token];
         let (flushed, query) = run_stream(&tokens);
-        assert!(query.is_none(),
-            "missing close bracket must not produce an intercepted query");
-        assert!(!flushed.is_empty(),
-            "overlong buffer must be flushed as passthrough, not silently dropped");
+        assert!(
+            query.is_none(),
+            "missing close bracket must not produce an intercepted query"
+        );
+        assert!(
+            !flushed.is_empty(),
+            "overlong buffer must be flushed as passthrough, not silently dropped"
+        );
     }
 }

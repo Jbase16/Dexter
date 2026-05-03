@@ -35,8 +35,8 @@ pub fn init(config: &LoggingConfig) -> Result<()> {
     // `EnvFilter::try_from_default_env()` reads `RUST_LOG`. If absent, fall back
     // to the config-specified level applied to all targets (not crate-scoped —
     // the operator controls that via `RUST_LOG` if they need granular control).
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(config.level.as_str()));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(config.level.as_str()));
 
     if config.use_json() {
         // JSON format: one JSON object per log line, with timestamp, level,
@@ -48,7 +48,7 @@ pub fn init(config: &LoggingConfig) -> Result<()> {
             .json()
             .with_env_filter(filter)
             .with_target(true)
-            .with_current_span(false)   // spans not yet used; avoids empty span noise
+            .with_current_span(false) // spans not yet used; avoids empty span noise
             .try_init()
             .map_err(|e| anyhow::anyhow!("Failed to initialize JSON tracing subscriber: {}", e))?;
     } else {
@@ -59,7 +59,9 @@ pub fn init(config: &LoggingConfig) -> Result<()> {
             .with_env_filter(filter)
             .with_target(true)
             .try_init()
-            .map_err(|e| anyhow::anyhow!("Failed to initialize pretty tracing subscriber: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to initialize pretty tracing subscriber: {}", e)
+            })?;
     }
 
     Ok(())

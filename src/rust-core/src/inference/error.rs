@@ -93,24 +93,12 @@ impl std::error::Error for InferenceError {}
 impl From<InferenceError> for tonic::Status {
     fn from(e: InferenceError) -> tonic::Status {
         match &e {
-            InferenceError::OllamaUnavailable { .. } => {
-                tonic::Status::unavailable(e.to_string())
-            }
-            InferenceError::ModelNotFound(_) => {
-                tonic::Status::not_found(e.to_string())
-            }
-            InferenceError::StreamInterrupted(_) => {
-                tonic::Status::unavailable(e.to_string())
-            }
-            InferenceError::RequestTimeout => {
-                tonic::Status::deadline_exceeded(e.to_string())
-            }
-            InferenceError::ApiError { .. } => {
-                tonic::Status::internal(e.to_string())
-            }
-            InferenceError::SerializationError(_) => {
-                tonic::Status::internal(e.to_string())
-            }
+            InferenceError::OllamaUnavailable { .. } => tonic::Status::unavailable(e.to_string()),
+            InferenceError::ModelNotFound(_) => tonic::Status::not_found(e.to_string()),
+            InferenceError::StreamInterrupted(_) => tonic::Status::unavailable(e.to_string()),
+            InferenceError::RequestTimeout => tonic::Status::deadline_exceeded(e.to_string()),
+            InferenceError::ApiError { .. } => tonic::Status::internal(e.to_string()),
+            InferenceError::SerializationError(_) => tonic::Status::internal(e.to_string()),
         }
     }
 }
@@ -127,7 +115,8 @@ impl From<reqwest::Error> for InferenceError {
             // Capture the URL from the reqwest error if available; fall back to
             // a generic description. The engine will have already logged the URL
             // in context before propagating.
-            let url = e.url()
+            let url = e
+                .url()
                 .map(|u| u.to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
             InferenceError::OllamaUnavailable {
@@ -160,7 +149,7 @@ mod tests {
     #[test]
     fn ollama_unavailable_maps_to_grpc_unavailable() {
         let err = InferenceError::OllamaUnavailable {
-            url:    "http://localhost:11434".to_string(),
+            url: "http://localhost:11434".to_string(),
             source: "connection refused".to_string(),
         };
         let status = tonic::Status::from(err);
@@ -184,7 +173,10 @@ mod tests {
 
     #[test]
     fn api_error_maps_to_grpc_internal() {
-        let err = InferenceError::ApiError { status: 500, message: "boom".to_string() };
+        let err = InferenceError::ApiError {
+            status: 500,
+            message: "boom".to_string(),
+        };
         let status = tonic::Status::from(err);
         assert_eq!(status.code(), Code::Internal);
         assert!(status.message().contains("500"));

@@ -6,7 +6,6 @@
 /// where short leading text precedes `. `.
 ///
 /// Boundaries: `. `, `! `, `? `, `\n\n`
-
 use crate::constants::TTS_SENTENCE_MIN_CHARS;
 
 pub struct SentenceSplitter {
@@ -14,7 +13,11 @@ pub struct SentenceSplitter {
 }
 
 impl SentenceSplitter {
-    pub fn new() -> Self { Self { buffer: String::new() } }
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+        }
+    }
 
     /// Push one inference token. Returns 0 or more complete sentences.
     pub fn push(&mut self, token: &str) -> Vec<String> {
@@ -26,7 +29,11 @@ impl SentenceSplitter {
     pub fn flush(&mut self) -> Option<String> {
         let s = self.buffer.trim().to_string();
         self.buffer.clear();
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     fn try_split(&mut self) -> Vec<String> {
@@ -34,15 +41,18 @@ impl SentenceSplitter {
         let mut results = Vec::new();
         loop {
             // Find the earliest boundary in the buffer.
-            let earliest = boundaries.iter().filter_map(|b| {
-                self.buffer.find(b).map(|pos| (pos + b.len(), *b))
-            }).min_by_key(|(pos, _)| *pos);
+            let earliest = boundaries
+                .iter()
+                .filter_map(|b| self.buffer.find(b).map(|pos| (pos + b.len(), *b)))
+                .min_by_key(|(pos, _)| *pos);
 
             match earliest {
                 Some((end, _)) if end >= TTS_SENTENCE_MIN_CHARS => {
                     let sentence = self.buffer[..end].trim().to_string();
                     self.buffer = self.buffer[end..].to_string();
-                    if !sentence.is_empty() { results.push(sentence); }
+                    if !sentence.is_empty() {
+                        results.push(sentence);
+                    }
                 }
                 _ => break,
             }
@@ -86,7 +96,10 @@ mod tests {
         let mut s = SentenceSplitter::new();
         // "Mr. " is 4 chars — below TTS_SENTENCE_MIN_CHARS (10), should NOT split
         let result = s.push("Mr. ");
-        assert!(result.is_empty(), "Short boundary 'Mr. ' should not trigger split");
+        assert!(
+            result.is_empty(),
+            "Short boundary 'Mr. ' should not trigger split"
+        );
     }
 
     #[test]

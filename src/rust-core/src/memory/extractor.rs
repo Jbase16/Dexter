@@ -205,21 +205,33 @@ mod tests {
     fn extract_facts_returns_empty_for_questions() {
         // Interrogative guard: ending in '?' suppresses all extraction.
         // This prevents "do you know my name?" from storing "operator name: [capture]".
-        assert!(extract_facts("what is my name?").is_empty(),
-            "question must produce no facts");
-        assert!(extract_facts("am I using the right tool?").is_empty(),
-            "question must produce no facts");
-        assert!(extract_facts("where do I work?").is_empty(),
-            "question must produce no facts");
+        assert!(
+            extract_facts("what is my name?").is_empty(),
+            "question must produce no facts"
+        );
+        assert!(
+            extract_facts("am I using the right tool?").is_empty(),
+            "question must produce no facts"
+        );
+        assert!(
+            extract_facts("where do I work?").is_empty(),
+            "question must produce no facts"
+        );
     }
 
     #[test]
     fn extract_facts_returns_empty_for_no_match() {
-        assert!(extract_facts("the weather is nice today").is_empty(),
-            "no-pattern input must produce no facts");
-        assert!(extract_facts("please summarize this document").is_empty(),
-            "no-pattern input must produce no facts");
-        assert!(extract_facts("").is_empty(),
-            "empty input must produce no facts");
+        assert!(
+            extract_facts("the weather is nice today").is_empty(),
+            "no-pattern input must produce no facts"
+        );
+        assert!(
+            extract_facts("please summarize this document").is_empty(),
+            "no-pattern input must produce no facts"
+        );
+        assert!(
+            extract_facts("").is_empty(),
+            "empty input must produce no facts"
+        );
     }
 }

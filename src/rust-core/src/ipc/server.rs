@@ -3,8 +3,14 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-use tokio::{net::UnixListener, sync::{mpsc, Mutex}};
-use tokio_stream::{wrappers::{ReceiverStream, UnixListenerStream}, Stream};
+use tokio::{
+    net::UnixListener,
+    sync::{mpsc, Mutex},
+};
+use tokio_stream::{
+    wrappers::{ReceiverStream, UnixListenerStream},
+    Stream,
+};
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -12,12 +18,12 @@ use uuid::Uuid;
 use crate::{
     action::ActionResult,
     config::DexterConfig,
-    orchestrator::GenerationResult,
     constants::{
-        BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION,
-        VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH, VOICE_WORKER_HEALTH_INTERVAL_SECS,
+        BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH,
+        VOICE_WORKER_HEALTH_INTERVAL_SECS,
     },
     orchestrator::CoreOrchestrator,
+    orchestrator::GenerationResult,
     voice::{worker_client::WorkerClient, WorkerType},
 };
 
@@ -41,15 +47,18 @@ use proto::{
 /// final transcript here, it also marks the `TranscriptChunk` as `fast_path = true` so
 /// Swift suppresses the TextInput echo — preventing duplicate inference.
 enum InternalEvent {
-    TranscriptReady { text: String, trace_id: String },
+    TranscriptReady {
+        text: String,
+        trace_id: String,
+    },
     /// Shell command-completion event from the zsh integration hook.
     ///
     /// Phase 30: delivered via `orchestrator_tx`; the session's `select!` loop calls
     /// `orchestrator.handle_shell_command()` on receipt. Silently dropped when no
     /// session is active (orchestrator_tx is None).
     ShellCommand {
-        command:   String,
-        cwd:       String,
+        command: String,
+        cwd: String,
         exit_code: Option<i32>,
     },
 }
@@ -65,12 +74,12 @@ enum InternalEvent {
 /// Extracted as a standalone function so unit tests can verify parsing without
 /// spawning a real Unix socket listener.
 fn parse_shell_payload(json_str: &str) -> Option<(String, String, Option<i32>)> {
-    use crate::constants::{SHELL_CMD_MIN_CHARS, SHELL_CMD_MAX_CHARS, SHELL_CWD_MAX_CHARS};
+    use crate::constants::{SHELL_CMD_MAX_CHARS, SHELL_CMD_MIN_CHARS, SHELL_CWD_MAX_CHARS};
 
     #[derive(serde::Deserialize)]
     struct ShellPayload {
-        command:   String,
-        cwd:       String,
+        command: String,
+        cwd: String,
         exit_code: Option<i32>,
     }
 
@@ -105,12 +114,10 @@ fn parse_shell_payload(json_str: &str) -> Option<(String, String, Option<i32>)> 
 ///
 /// If no session is active (`orchestrator_tx` is `None`), events are silently
 /// dropped. Shell context is ephemeral; buffering across sessions adds no value.
-async fn run_shell_listener(
-    orchestrator_tx: Arc<Mutex<Option<mpsc::Sender<InternalEvent>>>>,
-) {
+async fn run_shell_listener(orchestrator_tx: Arc<Mutex<Option<mpsc::Sender<InternalEvent>>>>) {
     use crate::constants::SHELL_SOCKET_PATH;
-    use tokio::net::UnixListener;
     use tokio::io::AsyncReadExt;
+    use tokio::net::UnixListener;
 
     // Remove stale socket from a previous crash. Silent on ENOENT (first run).
     let _ = std::fs::remove_file(SHELL_SOCKET_PATH);
@@ -132,8 +139,11 @@ async fn run_shell_listener(
 
     loop {
         let (mut stream, _addr) = match listener.accept().await {
-            Ok(s)  => s,
-            Err(e) => { warn!(error = %e, "Shell listener: accept error — continuing"); continue; }
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "Shell listener: accept error — continuing");
+                continue;
+            }
         };
 
         // Each connection handled in its own task so the accept loop is never blocked.
@@ -146,15 +156,21 @@ async fn run_shell_listener(
                 return;
             }
             let json_str = match std::str::from_utf8(&buf) {
-                Ok(s)  => s,
-                Err(e) => { warn!(error = %e, "Shell listener: non-UTF8 payload"); return; }
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "Shell listener: non-UTF8 payload");
+                    return;
+                }
             };
 
             let Some((command, cwd, exit_code)) = parse_shell_payload(json_str) else {
                 // Warn only for non-empty payloads — empty reads happen if nc connects
                 // and closes without writing (e.g. a Dexter liveness probe).
                 if !json_str.trim().is_empty() {
-                    warn!(raw = json_str, "Shell listener: payload rejected (parse/validation failure)");
+                    warn!(
+                        raw = json_str,
+                        "Shell listener: payload rejected (parse/validation failure)"
+                    );
                 }
                 return;
             };
@@ -162,7 +178,13 @@ async fn run_shell_listener(
             let guard = tx_arc.lock().await;
             if let Some(tx) = guard.as_ref() {
                 // Ignore send error — session may be tearing down; event is safely lost.
-                let _ = tx.send(InternalEvent::ShellCommand { command, cwd, exit_code }).await;
+                let _ = tx
+                    .send(InternalEvent::ShellCommand {
+                        command,
+                        cwd,
+                        exit_code,
+                    })
+                    .await;
             }
             // If None: no session active; drop silently.
         });
@@ -210,7 +232,9 @@ impl CoreService {
         // stream_audio() falls back to on-demand spawn if this hasn't completed.
         let stt_warm = stt.clone();
         tokio::spawn(async move {
-            match WorkerClient::spawn(WorkerType::Stt, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH).await {
+            match WorkerClient::spawn(WorkerType::Stt, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH)
+                .await
+            {
                 Ok(client) => {
                     *stt_warm.lock().await = Some(client);
                     info!("STT worker pre-warmed and ready");
@@ -224,7 +248,7 @@ impl CoreService {
         // inherit clones of this state and skip warmup entirely.
         let shared = crate::orchestrator::SharedDaemonState::new_degraded();
         let shared_for_warmup = shared.clone();
-        let cfg_for_warmup    = cfg.clone();
+        let cfg_for_warmup = cfg.clone();
         tokio::spawn(async move {
             shared_for_warmup.run_startup_warmup(cfg_for_warmup).await;
         });
@@ -265,10 +289,7 @@ type StreamAudioStream = Pin<Box<dyn Stream<Item = Result<TranscriptChunk, Statu
 
 #[tonic::async_trait]
 impl DexterService for CoreService {
-    async fn ping(
-        &self,
-        request: Request<PingRequest>,
-    ) -> Result<Response<PingResponse>, Status> {
+    async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>, Status> {
         let trace_id = request.into_inner().trace_id;
         info!(trace_id = %trace_id, "Ping received");
         Ok(Response::new(PingResponse {
@@ -299,23 +320,21 @@ impl DexterService for CoreService {
         request: Request<Streaming<ClientEvent>>,
     ) -> Result<Response<Self::SessionStream>, Status> {
         let session_trace = new_trace_id();
-        let cfg           = self.cfg.clone();
+        let cfg = self.cfg.clone();
         // Phase 38c: clone of the daemon-lifetime shared state. Moved into the
         // reader task below so the orchestrator constructor can receive its own clone
         // and the greeting-gate compare_exchange can run against the shared atomic.
-        let shared_clone  = self.shared.clone();
-        let (tx, rx)      = mpsc::channel::<Result<ServerEvent, Status>>(16);
+        let shared_clone = self.shared.clone();
+        let (tx, rx) = mpsc::channel::<Result<ServerEvent, Status>>(16);
 
         // Push the initial IDLE state so Swift can reflect the entity's resting posture.
         // This is sent before the orchestrator is constructed so there is no latency gap
         // between the gRPC session opening and Swift's first visual state update.
         let idle_event = ServerEvent {
             trace_id: new_trace_id(),
-            event: Some(proto::server_event::Event::EntityState(
-                EntityStateChange {
-                    state: EntityState::Idle.into(),
-                },
-            )),
+            event: Some(proto::server_event::Event::EntityState(EntityStateChange {
+                state: EntityState::Idle.into(),
+            })),
         };
         tx.send(Ok(idle_event))
             .await
@@ -326,8 +345,8 @@ impl DexterService for CoreService {
         // Oneshot channel couples reader task lifetime to hold-open task lifetime.
         // The Sender is held by the reader; its drop (on any exit path) signals the hold-open.
         let (reader_done_tx, reader_done_rx) = tokio::sync::oneshot::channel::<()>();
-        let tx_reader        = tx.clone();
-        let mut inbound      = request.into_inner();
+        let tx_reader = tx.clone();
+        let mut inbound = request.into_inner();
         let orchestrator_tx_arc = self.orchestrator_tx.clone();
 
         // ── Reader task ──────────────────────────────────────────────────────
@@ -353,7 +372,7 @@ impl DexterService for CoreService {
             // Phase 38c: pass the daemon-lifetime SharedDaemonState clone so this
             // session uses the already-warm TTS/browser workers and skips its own
             // model warmup entirely.
-            let tx_reader_clone = tx_reader.clone();  // kept for fallback IDLE send after greeting
+            let tx_reader_clone = tx_reader.clone(); // kept for fallback IDLE send after greeting
             let shared_for_orch = shared_clone.clone();
             let mut orchestrator = match CoreOrchestrator::new(
                 &cfg,
@@ -363,7 +382,7 @@ impl DexterService for CoreService {
                 gen_tx,
                 shared_for_orch,
             ) {
-                Ok(o)  => o,
+                Ok(o) => o,
                 Err(e) => {
                     error!(
                         session = %session_trace,
@@ -379,27 +398,34 @@ impl DexterService for CoreService {
             // and "Ready." — subsequent reconnects (Swift restart, dexter-cli runs)
             // skip the greeting and go straight to IDLE. The atomic prevents a race
             // between two near-simultaneous reconnects.
-            let we_own_greeting = shared_clone.startup_greeting_sent
+            let we_own_greeting = shared_clone
+                .startup_greeting_sent
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok();
 
             if we_own_greeting {
                 // Show startup status immediately — daemon may still be mid-warmup.
                 let startup_trace = new_trace_id();
-                let _ = tx_reader_clone.send(Ok(ServerEvent {
-                    trace_id: startup_trace.clone(),
-                    event: Some(proto::server_event::Event::EntityState(EntityStateChange {
-                        state: EntityState::Thinking.into(),
-                    })),
-                })).await;
-                let _ = tx_reader_clone.send(Ok(ServerEvent {
-                    trace_id: startup_trace,
-                    event: Some(proto::server_event::Event::TextResponse(proto::TextResponse {
-                        content:  "Starting up…".to_string(),
-                        // is_final=true: closes the response immediately so the HUD auto-dismisses.
-                        is_final: true,
-                    })),
-                })).await;
+                let _ = tx_reader_clone
+                    .send(Ok(ServerEvent {
+                        trace_id: startup_trace.clone(),
+                        event: Some(proto::server_event::Event::EntityState(EntityStateChange {
+                            state: EntityState::Thinking.into(),
+                        })),
+                    }))
+                    .await;
+                let _ = tx_reader_clone
+                    .send(Ok(ServerEvent {
+                        trace_id: startup_trace,
+                        event: Some(proto::server_event::Event::TextResponse(
+                            proto::TextResponse {
+                                content: "Starting up…".to_string(),
+                                // is_final=true: closes the response immediately so the HUD auto-dismisses.
+                                is_final: true,
+                            },
+                        )),
+                    }))
+                    .await;
 
                 // Phase 38c: wait for the daemon-startup warmup to complete before
                 // playing "Ready." — the announcement is a contract with the operator
@@ -447,9 +473,9 @@ impl DexterService for CoreService {
             // Periodic health-check timer for the TTS worker (Phase 13).
             // Interleaved with inbound message reads via tokio::select! so the timer
             // never blocks message processing and the loop stays fully cooperative.
-            let mut health_interval = tokio::time::interval(
-                std::time::Duration::from_secs(VOICE_WORKER_HEALTH_INTERVAL_SECS)
-            );
+            let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(
+                VOICE_WORKER_HEALTH_INTERVAL_SECS,
+            ));
             // Burst-tick behaviour: skip the immediate first tick (t=0) so we don't
             // health-check before start_voice() has even had a chance to succeed.
             health_interval.tick().await;
@@ -457,9 +483,9 @@ impl DexterService for CoreService {
             // Browser worker health-check fires every 60s (much less frequent than TTS
             // because browser is idle most of the time and Chromium startup is expensive).
             let mut browser_health_interval = tokio::time::interval(
-                std::time::Duration::from_secs(BROWSER_WORKER_HEALTH_INTERVAL_SECS)
+                std::time::Duration::from_secs(BROWSER_WORKER_HEALTH_INTERVAL_SECS),
             );
-            browser_health_interval.tick().await;  // skip t=0
+            browser_health_interval.tick().await; // skip t=0
 
             loop {
                 tokio::select! {
@@ -594,16 +620,21 @@ impl DexterService for CoreService {
     ) -> Result<Response<Self::StreamAudioStream>, Status> {
         use crate::voice::protocol::msg;
 
-        let (tx, rx)           = mpsc::channel::<Result<TranscriptChunk, Status>>(16);
-        let stt_arc            = self.stt.clone();
+        let (tx, rx) = mpsc::channel::<Result<TranscriptChunk, Status>>(16);
+        let stt_arc = self.stt.clone();
         let orchestrator_tx_fp = self.orchestrator_tx.clone();
 
         tokio::spawn(async move {
             // Acquire the persistent STT worker.  If not yet ready, spawn on-demand.
             let mut guard = stt_arc.lock().await;
             if guard.is_none() {
-                match WorkerClient::spawn(WorkerType::Stt, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH).await {
-                    Ok(c)  => { info!("STT worker ready (on-demand spawn)"); *guard = Some(c); }
+                match WorkerClient::spawn(WorkerType::Stt, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH)
+                    .await
+                {
+                    Ok(c) => {
+                        info!("STT worker ready (on-demand spawn)");
+                        *guard = Some(c);
+                    }
                     Err(e) => {
                         warn!(error = %e, "STT worker unavailable — returning empty transcript");
                         return;
@@ -616,17 +647,21 @@ impl DexterService for CoreService {
             let alive = {
                 let client = guard.as_mut().expect("guard is Some; checked above");
 
-                let mut inbound  = request.into_inner();
-                let mut send_ok  = true;
+                let mut inbound = request.into_inner();
+                let mut send_ok = true;
                 while let Ok(Some(chunk)) = inbound.message().await {
-                    if client.write_frame(msg::AUDIO_CHUNK, &chunk.data).await.is_err() {
+                    if client
+                        .write_frame(msg::AUDIO_CHUNK, &chunk.data)
+                        .await
+                        .is_err()
+                    {
                         send_ok = false;
                         break;
                     }
                 }
 
                 if !send_ok {
-                    false   // write failed — worker is dead
+                    false // write failed — worker is dead
                 } else {
                     let _ = client.write_frame(msg::AUDIO_END, &[]).await;
 
@@ -638,7 +673,7 @@ impl DexterService for CoreService {
                             Ok(Some((msg::TRANSCRIPT, payload))) => {
                                 match serde_json::from_slice::<serde_json::Value>(&payload) {
                                     Ok(v) => {
-                                        let text     = v["text"].as_str().unwrap_or("").to_string();
+                                        let text = v["text"].as_str().unwrap_or("").to_string();
                                         let is_final = v["is_final"].as_bool().unwrap_or(true);
 
                                         // Phase 24c: for final transcripts, attempt direct
@@ -654,22 +689,26 @@ impl DexterService for CoreService {
                                                 let trace_id = Uuid::new_v4().to_string();
                                                 // A send error here means the session is ending;
                                                 // the transcript will still reach Swift via gRPC.
-                                                let delivered = otx.send(InternalEvent::TranscriptReady {
-                                                    text: text.clone(),
-                                                    trace_id,
-                                                }).await.is_ok();
+                                                let delivered = otx
+                                                    .send(InternalEvent::TranscriptReady {
+                                                        text: text.clone(),
+                                                        trace_id,
+                                                    })
+                                                    .await
+                                                    .is_ok();
                                                 delivered
                                             } else {
-                                                false  // No active session — Swift echoes normally
+                                                false // No active session — Swift echoes normally
                                             }
                                         } else {
-                                            false  // Partial transcripts never echoed by Swift
+                                            false // Partial transcripts never echoed by Swift
                                         };
 
                                         let chunk = TranscriptChunk {
                                             text,
                                             is_final,
-                                            sequence_number: v["sequence"].as_u64().unwrap_or(0) as u32,
+                                            sequence_number: v["sequence"].as_u64().unwrap_or(0)
+                                                as u32,
                                             fast_path,
                                         };
                                         let _ = tx.send(Ok(chunk)).await;
@@ -677,9 +716,12 @@ impl DexterService for CoreService {
                                     Err(e) => warn!(error = %e, "STT TRANSCRIPT JSON parse error"),
                                 }
                             }
-                            Ok(Some((msg::TRANSCRIPT_DONE, _))) => break,  // end of utterance
-                            Ok(Some((msg::HEALTH_PONG, _)))     => {}       // discard stray pongs
-                            Ok(Some(_)) | Ok(None) => { still_alive = false; break; }
+                            Ok(Some((msg::TRANSCRIPT_DONE, _))) => break, // end of utterance
+                            Ok(Some((msg::HEALTH_PONG, _))) => {}         // discard stray pongs
+                            Ok(Some(_)) | Ok(None) => {
+                                still_alive = false;
+                                break;
+                            }
                             Err(e) => {
                                 error!(error = %e, "STT worker read error");
                                 still_alive = false;
@@ -689,7 +731,7 @@ impl DexterService for CoreService {
                     }
                     still_alive
                 }
-            };  // client borrow ends here → guard is exclusively owned again
+            }; // client borrow ends here → guard is exclusively owned again
 
             if !alive {
                 // Worker died — clear slot so next call re-spawns cleanly.
@@ -715,7 +757,7 @@ impl DexterService for CoreService {
 /// in a Stream that tonic's `serve_with_incoming` can consume directly.
 pub async fn serve(socket_path: &str, cfg: Arc<DexterConfig>) -> anyhow::Result<()> {
     let listener = UnixListener::bind(socket_path)?;
-    let stream   = UnixListenerStream::new(listener);
+    let stream = UnixListenerStream::new(listener);
 
     info!(socket = socket_path, "gRPC server listening");
 
@@ -738,11 +780,11 @@ fn new_trace_id() -> String {
 /// Used in structured log fields — avoids allocating a String per log call.
 fn event_kind(event: &proto::client_event::Event) -> &'static str {
     match event {
-        proto::client_event::Event::TextInput(_)      => "text_input",
-        proto::client_event::Event::UiAction(_)       => "ui_action",
-        proto::client_event::Event::SystemEvent(_)    => "system_event",
+        proto::client_event::Event::TextInput(_) => "text_input",
+        proto::client_event::Event::UiAction(_) => "ui_action",
+        proto::client_event::Event::SystemEvent(_) => "system_event",
         proto::client_event::Event::ActionApproval(_) => "action_approval",
-        proto::client_event::Event::BargIn(_)         => "barg_in",
+        proto::client_event::Event::BargIn(_) => "barg_in",
     }
 }
 
@@ -831,12 +873,8 @@ mod tests {
     use crate::config::{InferenceConfig, ModelConfig};
     use hyper_util::rt::TokioIo;
     use proto::{
-        client_event,
-        dexter_service_client::DexterServiceClient,
-        AudioChunk as ProtoAudioChunk,
-        SystemEvent,
-        SystemEventType,
-        TextInput,
+        client_event, dexter_service_client::DexterServiceClient, AudioChunk as ProtoAudioChunk,
+        SystemEvent, SystemEventType, TextInput,
     };
     use tokio::net::UnixStream;
     use tonic::transport::Endpoint;
@@ -917,12 +955,12 @@ mod tests {
         let mut cfg = DexterConfig::default();
         let phi3 = "phi3:mini".to_string();
         cfg.models = ModelConfig {
-            fast:    phi3.clone(),
+            fast: phi3.clone(),
             primary: phi3.clone(),
-            heavy:   phi3.clone(),
-            code:    phi3.clone(),
-            vision:  phi3.clone(),
-            embed:   phi3,
+            heavy: phi3.clone(),
+            code: phi3.clone(),
+            vision: phi3.clone(),
+            embed: phi3,
         };
         // Raise the inactivity timeout a little — phi3:mini on cold load can be slow.
         cfg.inference = InferenceConfig {
@@ -947,10 +985,10 @@ mod tests {
         let mut client = make_client(socket.clone()).await;
 
         let connected_event = ClientEvent {
-            trace_id:   Uuid::new_v4().to_string(),
+            trace_id: Uuid::new_v4().to_string(),
             session_id: Uuid::new_v4().to_string(),
             event: Some(client_event::Event::SystemEvent(SystemEvent {
-                r#type:  SystemEventType::Connected.into(),
+                r#type: SystemEventType::Connected.into(),
                 payload: String::new(),
             })),
         };
@@ -965,8 +1003,11 @@ mod tests {
         let first = stream.message().await.unwrap().unwrap();
         match first.event {
             Some(proto::server_event::Event::EntityState(ref change)) => {
-                assert_eq!(change.state, proto::EntityState::Idle as i32,
-                           "First event must be EntityState(IDLE)");
+                assert_eq!(
+                    change.state,
+                    proto::EntityState::Idle as i32,
+                    "First event must be EntityState(IDLE)"
+                );
             }
             other => panic!("Expected EntityState(IDLE), got: {:?}", other),
         }
@@ -974,14 +1015,10 @@ mod tests {
         // The CONNECTED handler produces no further events (deferred to Phase 7).
         // Stream should end within 2 seconds as the orchestrator shuts down after
         // the client's single-event stream ends.
-        let next = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.message(),
-        )
-        .await;
+        let next = tokio::time::timeout(std::time::Duration::from_secs(2), stream.message()).await;
 
         match next {
-            Ok(Ok(None))  => { /* Stream closed cleanly — expected */ }
+            Ok(Ok(None)) => { /* Stream closed cleanly — expected */ }
             Ok(Ok(Some(evt))) => {
                 // If the orchestrator sends any additional events (e.g. future CONNECTED
                 // ack), accept them but verify they are EntityState events only.
@@ -990,8 +1027,9 @@ mod tests {
                     other => panic!("Unexpected non-EntityState event: {:?}", other),
                 }
             }
-            Ok(Err(e))    => panic!("Stream error: {e}"),
-            Err(_timeout) => { /* Timeout on stream end is acceptable — stream may be slow to close */ }
+            Ok(Err(e)) => panic!("Stream error: {e}"),
+            Err(_timeout) => { /* Timeout on stream end is acceptable — stream may be slow to close */
+            }
         }
 
         std::fs::remove_file(&socket).ok();
@@ -1006,16 +1044,17 @@ mod tests {
         let mut client = make_client(socket.clone()).await;
 
         let chunk = ProtoAudioChunk {
-            data:            vec![0u8; 32],
+            data: vec![0u8; 32],
             sequence_number: 0,
-            sample_rate:     16000,
+            sample_rate: 16000,
         };
 
-        let result = client
-            .stream_audio(tokio_stream::iter(vec![chunk]))
-            .await;
+        let result = client.stream_audio(tokio_stream::iter(vec![chunk])).await;
 
-        assert!(result.is_ok(), "stream_audio must return Ok even when STT worker unavailable");
+        assert!(
+            result.is_ok(),
+            "stream_audio must return Ok even when STT worker unavailable"
+        );
 
         std::fs::remove_file(&socket).ok();
     }
@@ -1035,10 +1074,10 @@ mod tests {
         // A simple, short prompt so the FAST model responds quickly.
         // "Say exactly: hello" is unambiguous — any LLM produces 1-3 tokens.
         let text_input_event = ClientEvent {
-            trace_id:   Uuid::new_v4().to_string(),
+            trace_id: Uuid::new_v4().to_string(),
             session_id: Uuid::new_v4().to_string(),
             event: Some(client_event::Event::TextInput(TextInput {
-                content:    "Say exactly: hello".to_string(),
+                content: "Say exactly: hello".to_string(),
                 from_voice: false,
             })),
         };
@@ -1060,8 +1099,11 @@ mod tests {
         let e2 = stream.message().await.unwrap().unwrap();
         match e2.event {
             Some(proto::server_event::Event::EntityState(ref s)) => {
-                assert_eq!(s.state, proto::EntityState::Thinking as i32,
-                           "Second event must be EntityState(THINKING)");
+                assert_eq!(
+                    s.state,
+                    proto::EntityState::Thinking as i32,
+                    "Second event must be EntityState(THINKING)"
+                );
             }
             other => panic!("Expected THINKING, got: {:?}", other),
         }
@@ -1070,16 +1112,15 @@ mod tests {
         //
         // Wrapped in a 30-second timeout so a stream teardown bug (e.g. hold-open task
         // not exiting) produces a clear timeout failure rather than a silent CI hang.
-        let (saw_non_final, saw_final) = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            async {
+        let (saw_non_final, saw_final) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 let mut saw_non_final = false;
-                let mut saw_final     = false;
+                let mut saw_final = false;
                 loop {
                     let event = match stream.message().await {
-                        Ok(Some(e))  => e,
-                        Ok(None)     => break,  // END_STREAM — stream closed cleanly
-                        Err(e)       => panic!("Stream error: {e}"),
+                        Ok(Some(e)) => e,
+                        Ok(None) => break, // END_STREAM — stream closed cleanly
+                        Err(e) => panic!("Stream error: {e}"),
                     };
                     match event.event {
                         Some(proto::server_event::Event::TextResponse(ref r)) if !r.is_final => {
@@ -1089,20 +1130,23 @@ mod tests {
                             saw_final = true;
                         }
                         Some(proto::server_event::Event::EntityState(ref s))
-                            if s.state == proto::EntityState::Idle as i32 && saw_final => {
-                            break;  // Full IDLE → THINKING → tokens → IDLE cycle complete.
+                            if s.state == proto::EntityState::Idle as i32 && saw_final =>
+                        {
+                            break; // Full IDLE → THINKING → tokens → IDLE cycle complete.
                         }
                         other => panic!("Unexpected event during streaming: {:?}", other),
                     }
                 }
                 (saw_non_final, saw_final)
-            },
-        )
-        .await
-        .expect("integration test timed out after 30s — possible stream teardown bug");
+            })
+            .await
+            .expect("integration test timed out after 30s — possible stream teardown bug");
 
-        assert!(saw_non_final, "Expected streaming token events with is_final=false");
-        assert!(saw_final,     "Expected final TextResponse with is_final=true");
+        assert!(
+            saw_non_final,
+            "Expected streaming token events with is_final=false"
+        );
+        assert!(saw_final, "Expected final TextResponse with is_final=true");
 
         std::fs::remove_file(&socket).ok();
     }

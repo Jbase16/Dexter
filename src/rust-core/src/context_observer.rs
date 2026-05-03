@@ -24,7 +24,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::constants::{AX_VALUE_PREVIEW_MAX_CHARS, CLIPBOARD_MAX_CHARS, SHELL_CMD_MAX_CHARS, SHELL_CWD_MAX_CHARS};
+use crate::constants::{
+    AX_VALUE_PREVIEW_MAX_CHARS, CLIPBOARD_MAX_CHARS, SHELL_CMD_MAX_CHARS, SHELL_CWD_MAX_CHARS,
+};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -35,11 +37,11 @@ use crate::constants::{AX_VALUE_PREVIEW_MAX_CHARS, CLIPBOARD_MAX_CHARS, SHELL_CM
 /// sends the value of password fields or other sensitive inputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxElementInfo {
-    pub role:          String,
-    pub label:         Option<String>,
+    pub role: String,
+    pub label: Option<String>,
     /// Truncated to AX_VALUE_PREVIEW_MAX_CHARS. None when is_sensitive=true.
     pub value_preview: Option<String>,
-    pub is_sensitive:  bool,
+    pub is_sensitive: bool,
 }
 
 /// Shell command context — the most recently completed command in the operator's shell.
@@ -49,9 +51,9 @@ pub struct AxElementInfo {
 /// command completion; the history is not retained.
 #[derive(Debug, Clone)]
 pub struct ShellCommandContext {
-    pub command:     String,
-    pub cwd:         String,
-    pub exit_code:   Option<i32>,
+    pub command: String,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
     /// When this context was received by the core. Used by `prepare_messages_for_inference`
     /// to omit injection when the command is older than `SHELL_CONTEXT_MAX_AGE_SECS`.
     pub received_at: DateTime<Utc>,
@@ -64,14 +66,14 @@ pub struct ShellCommandContext {
 /// `last_updated` is always `Utc::now()` at the moment the snapshot changes.
 #[derive(Debug, Clone)]
 pub struct ContextSnapshot {
-    pub app_bundle_id:    Option<String>,
-    pub app_name:         Option<String>,
-    pub focused_element:  Option<AxElementInfo>,
+    pub app_bundle_id: Option<String>,
+    pub app_name: Option<String>,
+    pub focused_element: Option<AxElementInfo>,
     pub is_screen_locked: bool,
     /// Operator clipboard text. None until a CLIPBOARD_CHANGED event arrives.
     /// Bounded to CLIPBOARD_MAX_CHARS. ContextObserver starts fresh every session —
     /// clipboard content from a prior session is never persisted here.
-    pub clipboard_text:   Option<String>,
+    pub clipboard_text: Option<String>,
     /// When the clipboard was last updated. Used by prepare_messages_for_inference
     /// to decide whether clipboard content is fresh enough to inject automatically
     /// (< CLIPBOARD_RECENCY_SECS) vs requiring an explicit operator reference.
@@ -81,8 +83,8 @@ pub struct ContextSnapshot {
     /// Injected as [Shell: ...] in prepare_messages_for_inference when fresh.
     pub last_shell_command: Option<ShellCommandContext>,
     /// DefaultHasher over all semantic fields. Recomputed on every update.
-    pub snapshot_hash:    u64,
-    pub last_updated:     DateTime<Utc>,
+    pub snapshot_hash: u64,
+    pub last_updated: DateTime<Utc>,
 }
 
 /// Stateful aggregator for macOS context signals.
@@ -105,8 +107,8 @@ struct ClipboardPayload {
 /// Deserialized from APP_FOCUSED event payload JSON.
 #[derive(Deserialize)]
 struct AppFocusedPayload {
-    bundle_id:  String,
-    name:       String,
+    bundle_id: String,
+    name: String,
     ax_element: Option<AxElementPayload>,
 }
 
@@ -114,10 +116,10 @@ struct AppFocusedPayload {
 /// optional `ax_element` sub-object inside an APP_FOCUSED payload.
 #[derive(Deserialize)]
 struct AxElementPayload {
-    role:          String,
-    label:         Option<String>,
+    role: String,
+    label: Option<String>,
     value_preview: Option<String>,
-    is_sensitive:  bool,
+    is_sensitive: bool,
 }
 
 // ── ContextObserver implementation ────────────────────────────────────────────
@@ -126,15 +128,15 @@ impl ContextObserver {
     /// Create a new observer with an empty, unlocked initial snapshot.
     pub fn new() -> Self {
         let snapshot = ContextSnapshot {
-            app_bundle_id:     None,
-            app_name:          None,
-            focused_element:   None,
-            is_screen_locked:  false,
-            clipboard_text:    None,
+            app_bundle_id: None,
+            app_name: None,
+            focused_element: None,
+            is_screen_locked: false,
+            clipboard_text: None,
             clipboard_changed_at: None,
             last_shell_command: None,
-            snapshot_hash:     0,
-            last_updated:      Utc::now(),
+            snapshot_hash: 0,
+            last_updated: Utc::now(),
         };
         Self { snapshot }
     }
@@ -163,17 +165,20 @@ impl ContextObserver {
         let bundle_id = payload.bundle_id;
         let is_terminal = is_terminal_bundle(&bundle_id);
 
-        self.snapshot.app_bundle_id   = Some(bundle_id);
-        self.snapshot.app_name        = Some(payload.name);
+        self.snapshot.app_bundle_id = Some(bundle_id);
+        self.snapshot.app_name = Some(payload.name);
         // Phase 36: terminal-emulator scrollback leaks our own log output back into
         // the model's context ("the screen shows a terminal window with a SQLite
         // query being executed..."). Strip value_preview for any terminal bundle;
         // keep role + label so context_summary() still identifies the app.
-        self.snapshot.focused_element = payload.ax_element
-            .map(ax_payload_to_info)
-            .map(|mut el| { if is_terminal { el.value_preview = None; } el });
-        self.snapshot.last_updated    = Utc::now();
-        self.snapshot.snapshot_hash   = compute_hash(&self.snapshot);
+        self.snapshot.focused_element = payload.ax_element.map(ax_payload_to_info).map(|mut el| {
+            if is_terminal {
+                el.value_preview = None;
+            }
+            el
+        });
+        self.snapshot.last_updated = Utc::now();
+        self.snapshot.snapshot_hash = compute_hash(&self.snapshot);
 
         self.snapshot.snapshot_hash != old_hash
     }
@@ -212,8 +217,8 @@ impl ContextObserver {
             info.value_preview = None;
         }
         self.snapshot.focused_element = Some(info);
-        self.snapshot.last_updated    = Utc::now();
-        self.snapshot.snapshot_hash   = compute_hash(&self.snapshot);
+        self.snapshot.last_updated = Utc::now();
+        self.snapshot.snapshot_hash = compute_hash(&self.snapshot);
 
         self.snapshot.snapshot_hash != old_hash
     }
@@ -227,8 +232,8 @@ impl ContextObserver {
             return false;
         }
         self.snapshot.is_screen_locked = locked;
-        self.snapshot.last_updated     = Utc::now();
-        self.snapshot.snapshot_hash    = compute_hash(&self.snapshot);
+        self.snapshot.last_updated = Utc::now();
+        self.snapshot.snapshot_hash = compute_hash(&self.snapshot);
         true
     }
 
@@ -270,8 +275,8 @@ impl ContextObserver {
 
         self.snapshot.clipboard_text = Some(text);
         self.snapshot.clipboard_changed_at = Some(Utc::now());
-        self.snapshot.last_updated   = Utc::now();
-        self.snapshot.snapshot_hash  = compute_hash(&self.snapshot);
+        self.snapshot.last_updated = Utc::now();
+        self.snapshot.snapshot_hash = compute_hash(&self.snapshot);
 
         self.snapshot.snapshot_hash != old_hash
     }
@@ -291,12 +296,7 @@ impl ContextObserver {
     /// defence-in-depth guard — the `parse_shell_payload` function in `ipc/server.rs`
     /// performs primary truncation, but this guards against future callers that bypass it.
     /// Overwrites any previous shell context. Hash is recomputed.
-    pub fn update_shell_command(
-        &mut self,
-        command: String,
-        cwd: String,
-        exit_code: Option<i32>,
-    ) {
+    pub fn update_shell_command(&mut self, command: String, cwd: String, exit_code: Option<i32>) {
         let command = if command.chars().count() > SHELL_CMD_MAX_CHARS {
             command.chars().take(SHELL_CMD_MAX_CHARS).collect()
         } else {
@@ -313,7 +313,7 @@ impl ContextObserver {
             exit_code,
             received_at: Utc::now(),
         });
-        self.snapshot.last_updated  = Utc::now();
+        self.snapshot.last_updated = Utc::now();
         self.snapshot.snapshot_hash = compute_hash(&self.snapshot);
     }
 
@@ -339,16 +339,16 @@ impl ContextObserver {
             let value = el.value_preview.as_deref().unwrap_or("");
 
             match (label.is_empty(), value.is_empty()) {
-                (true,  true)  => None,
-                (false, true)  => Some(label.to_string()),
-                (true,  false) => Some(value.to_string()),
+                (true, true) => None,
+                (false, true) => Some(label.to_string()),
+                (true, false) => Some(value.to_string()),
                 (false, false) => Some(format!("{label}: {value}")),
             }
         });
 
         Some(match element_part {
             Some(part) => format!("{app_name} \u{2014} {part}"),
-            None       => app_name.to_string(),
+            None => app_name.to_string(),
         })
     }
 }
@@ -406,7 +406,7 @@ fn ax_payload_to_info(p: AxElementPayload) -> AxElementInfo {
     };
 
     AxElementInfo {
-        role:  p.role,
+        role: p.role,
         label: p.label.filter(|l| !l.is_empty()),
         value_preview,
         is_sensitive: p.is_sensitive,
@@ -452,14 +452,23 @@ mod tests {
         format!(r#"{{"bundle_id":"{bundle_id}","name":"{name}"}}"#)
     }
 
-    fn app_focused_payload_with_element(bundle_id: &str, name: &str, role: &str, label: &str, value: &str, sensitive: bool) -> String {
+    fn app_focused_payload_with_element(
+        bundle_id: &str,
+        name: &str,
+        role: &str,
+        label: &str,
+        value: &str,
+        sensitive: bool,
+    ) -> String {
         format!(
             r#"{{"bundle_id":"{bundle_id}","name":"{name}","ax_element":{{"role":"{role}","label":"{label}","value_preview":"{value}","is_sensitive":{sensitive}}}}}"#
         )
     }
 
     fn element_payload(role: &str, label: &str, value: &str, sensitive: bool) -> String {
-        format!(r#"{{"role":"{role}","label":"{label}","value_preview":"{value}","is_sensitive":{sensitive}}}"#)
+        format!(
+            r#"{{"role":"{role}","label":"{label}","value_preview":"{value}","is_sensitive":{sensitive}}}"#
+        )
     }
 
     // ── Initial state ────────────────────────────────────────────────────────
@@ -495,14 +504,18 @@ mod tests {
         let payload = app_focused_payload("com.apple.Terminal", "Terminal");
         obs.update_from_app_focused(&payload);
         let changed = obs.update_from_app_focused(&payload);
-        assert!(!changed, "Identical payload must report no change (hash unchanged)");
+        assert!(
+            !changed,
+            "Identical payload must report no change (hash unchanged)"
+        );
     }
 
     #[test]
     fn update_different_app_returns_true() {
         let mut obs = ContextObserver::new();
         obs.update_from_app_focused(&app_focused_payload("com.apple.Finder", "Finder"));
-        let changed = obs.update_from_app_focused(&app_focused_payload("com.apple.Terminal", "Terminal"));
+        let changed =
+            obs.update_from_app_focused(&app_focused_payload("com.apple.Terminal", "Terminal"));
         assert!(changed, "Switching apps must report a change");
         assert_eq!(obs.snapshot().app_name.as_deref(), Some("Terminal"));
     }
@@ -513,14 +526,22 @@ mod tests {
     fn ax_element_changed_preserves_app_identity() {
         let mut obs = ContextObserver::new();
         obs.update_from_app_focused(&app_focused_payload("com.apple.Xcode", "Xcode"));
-        obs.update_from_element_changed(&element_payload("AXTextField", "Source Editor", "let x = 5", false));
+        obs.update_from_element_changed(&element_payload(
+            "AXTextField",
+            "Source Editor",
+            "let x = 5",
+            false,
+        ));
 
         let snap = obs.snapshot();
         // App identity must survive the element update.
         assert_eq!(snap.app_bundle_id.as_deref(), Some("com.apple.Xcode"));
         assert_eq!(snap.app_name.as_deref(), Some("Xcode"));
         // Element should now be populated.
-        let el = snap.focused_element.as_ref().expect("element must be present");
+        let el = snap
+            .focused_element
+            .as_ref()
+            .expect("element must be present");
         assert_eq!(el.role, "AXTextField");
         assert_eq!(el.label.as_deref(), Some("Source Editor"));
         assert_eq!(el.value_preview.as_deref(), Some("let x = 5"));
@@ -531,11 +552,23 @@ mod tests {
         let mut obs = ContextObserver::new();
         // EventBridge sends is_sensitive=true for password fields.
         // value_preview should be None regardless of what the payload says.
-        obs.update_from_element_changed(&element_payload("AXSecureTextField", "Password", "", true));
+        obs.update_from_element_changed(&element_payload(
+            "AXSecureTextField",
+            "Password",
+            "",
+            true,
+        ));
 
-        let el = obs.snapshot().focused_element.as_ref().expect("element must be present");
+        let el = obs
+            .snapshot()
+            .focused_element
+            .as_ref()
+            .expect("element must be present");
         assert!(el.is_sensitive);
-        assert!(el.value_preview.is_none(), "value_preview must be None for sensitive elements");
+        assert!(
+            el.value_preview.is_none(),
+            "value_preview must be None for sensitive elements"
+        );
     }
 
     #[test]
@@ -544,9 +577,18 @@ mod tests {
         // Send a 201-char value — Rust must truncate it to 200 chars as a secondary
         // guard even if EventBridge somehow sends an overlong value.
         let value_201: String = "a".repeat(201);
-        obs.update_from_element_changed(&element_payload("AXTextField", "Editor", &value_201, false));
+        obs.update_from_element_changed(&element_payload(
+            "AXTextField",
+            "Editor",
+            &value_201,
+            false,
+        ));
 
-        let el = obs.snapshot().focused_element.as_ref().expect("element must be present");
+        let el = obs
+            .snapshot()
+            .focused_element
+            .as_ref()
+            .expect("element must be present");
         assert_eq!(
             el.value_preview.as_deref().map(|v| v.chars().count()),
             Some(200),
@@ -584,8 +626,12 @@ mod tests {
     fn context_summary_formats_app_and_element() {
         let mut obs = ContextObserver::new();
         obs.update_from_app_focused(&app_focused_payload_with_element(
-            "com.apple.Xcode", "Xcode",
-            "AXTextField", "Source Editor", "let x = 5", false,
+            "com.apple.Xcode",
+            "Xcode",
+            "AXTextField",
+            "Source Editor",
+            "let x = 5",
+            false,
         ));
 
         let summary = obs.context_summary().expect("summary must be present");
@@ -616,7 +662,8 @@ mod tests {
         let hash_after_first = obs.snapshot().snapshot_hash;
         obs.update_from_clipboard_changed(&clipboard_payload("second content"));
         assert_ne!(
-            obs.snapshot().snapshot_hash, hash_after_first,
+            obs.snapshot().snapshot_hash,
+            hash_after_first,
             "Hash must change when clipboard content changes"
         );
     }
@@ -635,7 +682,10 @@ mod tests {
         let long_text: String = "x".repeat(CLIPBOARD_MAX_CHARS + 100);
         obs.update_from_clipboard_changed(&clipboard_payload(&long_text));
 
-        let stored_len = obs.snapshot().clipboard_text.as_deref()
+        let stored_len = obs
+            .snapshot()
+            .clipboard_text
+            .as_deref()
             .map(|t| t.chars().count())
             .unwrap_or(0);
         assert_eq!(
@@ -771,7 +821,11 @@ mod tests {
             false,
         ));
 
-        let el = obs.snapshot().focused_element.as_ref().expect("element present");
+        let el = obs
+            .snapshot()
+            .focused_element
+            .as_ref()
+            .expect("element present");
         assert_eq!(el.role, "AXTextArea");
         assert!(
             el.value_preview.is_none(),
@@ -791,7 +845,11 @@ mod tests {
             false,
         ));
 
-        let el = obs.snapshot().focused_element.as_ref().expect("element present");
+        let el = obs
+            .snapshot()
+            .focused_element
+            .as_ref()
+            .expect("element present");
         assert_eq!(el.value_preview.as_deref(), Some("Documents"));
     }
 }

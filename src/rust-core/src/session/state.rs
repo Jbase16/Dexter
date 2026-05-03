@@ -3,10 +3,11 @@
 /// ## Purpose
 ///
 /// `SessionStateManager` owns an in-progress session's conversation history and
-/// persists it to a JSON file at `~/.dexter/state/` when the session ends. On next
-/// startup, the orchestrator loads the prior session via `load_latest()` and bootstraps
-/// `ConversationContext` from the recovered history — so a fresh daemon instance
-/// continues a conversation seamlessly without asking the operator for context.
+/// persists it to a JSON file at `~/.dexter/state/` when the session ends. The JSON
+/// files are audit/debug artifacts and can be inspected via `load_latest()`, but the
+/// orchestrator deliberately does not replay prior transcripts into new live prompts.
+/// Cross-session context belongs in retrieval/memory where it can be relevance-ranked
+/// and framed explicitly as prior-session reference material.
 ///
 /// ## File naming
 ///
@@ -43,7 +44,7 @@ use crate::{
 /// system prompt fresh on every session from the YAML profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryEntry {
-    pub role:    String,
+    pub role: String,
     pub content: String,
 }
 
@@ -54,10 +55,10 @@ pub struct HistoryEntry {
 /// Phase 6 — Phase 7 will update them when it implements its own state writing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildPhaseInfo {
-    pub current:               String,
-    pub completed_components:  Vec<String>,
-    pub next_planned:          String,
-    pub notes:                 String,
+    pub current: String,
+    pub completed_components: Vec<String>,
+    pub next_planned: String,
+    pub notes: String,
 }
 
 /// Snapshot of active Ollama model tags captured from `ModelConfig` at persist time.
@@ -68,22 +69,22 @@ pub struct BuildPhaseInfo {
 /// what was in use when the session ended.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfigSnapshot {
-    pub fast:      String,
-    pub primary:   String,
-    pub heavy:     String,
-    pub code:      String,
-    pub vision:    String,
+    pub fast: String,
+    pub primary: String,
+    pub heavy: String,
+    pub code: String,
+    pub vision: String,
     pub embedding: String,
 }
 
 impl ModelConfigSnapshot {
     fn from_config(cfg: &ModelConfig) -> Self {
         Self {
-            fast:      cfg.fast.clone(),
-            primary:   cfg.primary.clone(),
-            heavy:     cfg.heavy.clone(),
-            code:      cfg.code.clone(),
-            vision:    cfg.vision.clone(),
+            fast: cfg.fast.clone(),
+            primary: cfg.primary.clone(),
+            heavy: cfg.heavy.clone(),
+            code: cfg.code.clone(),
+            vision: cfg.vision.clone(),
             embedding: cfg.embed.clone(),
         }
     }
@@ -96,8 +97,8 @@ impl ModelConfigSnapshot {
 /// is left as a placeholder that Phase 9 or the bootstrap script can fill.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentInfo {
-    pub macos_version:  String,
-    pub rust_version:   String,
+    pub macos_version: String,
+    pub rust_version: String,
 }
 
 impl EnvironmentInfo {
@@ -107,7 +108,7 @@ impl EnvironmentInfo {
             // from `sw_vers` would require a subprocess. We capture what's cheaply
             // available at compile time for now; Phase 15 can add a runtime probe.
             macos_version: std::env::consts::OS.to_string(),
-            rust_version:  env!("CARGO_PKG_RUST_VERSION", "unknown").to_string(),
+            rust_version: env!("CARGO_PKG_RUST_VERSION", "unknown").to_string(),
         }
     }
 }
@@ -118,16 +119,16 @@ impl EnvironmentInfo {
 /// Flat serde serialization — no nested arrays of arrays or special encoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
-    pub schema_version:          String,
-    pub session_id:              String,
-    pub session_start:           String,          // ISO8601 UTC
-    pub session_end:             Option<String>,  // None until persist() is called
-    pub build_phase:             BuildPhaseInfo,
-    pub model_config:            ModelConfigSnapshot,
-    pub conversation_history:    Vec<HistoryEntry>,
+    pub schema_version: String,
+    pub session_id: String,
+    pub session_start: String,       // ISO8601 UTC
+    pub session_end: Option<String>, // None until persist() is called
+    pub build_phase: BuildPhaseInfo,
+    pub model_config: ModelConfigSnapshot,
+    pub conversation_history: Vec<HistoryEntry>,
     pub architectural_decisions: Vec<serde_json::Value>,
-    pub open_questions:          Vec<serde_json::Value>,
-    pub environment:             EnvironmentInfo,
+    pub open_questions: Vec<serde_json::Value>,
+    pub environment: EnvironmentInfo,
 }
 
 // ── SessionStateManager ───────────────────────────────────────────────────────
@@ -138,11 +139,11 @@ pub struct SessionState {
 /// Accumulates conversation turns via `push_turn()`. Consumes itself via `persist()`
 /// when the session ends — writes the JSON file and updates the `latest.json` symlink.
 pub struct SessionStateManager {
-    state_dir:     PathBuf,
-    session_id:    String,
+    state_dir: PathBuf,
+    session_id: String,
     session_start: DateTime<Utc>,
-    history:       Vec<HistoryEntry>,
-    model_config:  ModelConfigSnapshot,
+    history: Vec<HistoryEntry>,
+    model_config: ModelConfigSnapshot,
 }
 
 impl SessionStateManager {
@@ -152,11 +153,11 @@ impl SessionStateManager {
     /// (created at daemon startup in `main.rs` via `config::ensure_state_dir()`).
     pub fn new(state_dir: &Path, session_id: &str, model_cfg: &ModelConfig) -> Self {
         Self {
-            state_dir:     state_dir.to_path_buf(),
-            session_id:    session_id.to_string(),
+            state_dir: state_dir.to_path_buf(),
+            session_id: session_id.to_string(),
             session_start: Utc::now(),
-            history:       Vec::new(),
-            model_config:  ModelConfigSnapshot::from_config(model_cfg),
+            history: Vec::new(),
+            model_config: ModelConfigSnapshot::from_config(model_cfg),
         }
     }
 
@@ -177,7 +178,7 @@ impl SessionStateManager {
         }
 
         let content = match std::fs::read_to_string(&symlink_path) {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 warn!(
                     path = %symlink_path.display(),
@@ -208,7 +209,7 @@ impl SessionStateManager {
     /// every session from the YAML profile.
     pub fn push_turn(&mut self, role: &str, content: &str) {
         self.history.push(HistoryEntry {
-            role:    role.to_string(),
+            role: role.to_string(),
             content: content.to_string(),
         });
     }
@@ -246,11 +247,11 @@ impl SessionStateManager {
 
         let state = SessionState {
             schema_version: SESSION_STATE_SCHEMA_VERSION.to_string(),
-            session_id:     self.session_id,
-            session_start:  self.session_start.to_rfc3339(),
-            session_end:    Some(session_end.to_rfc3339()),
+            session_id: self.session_id,
+            session_start: self.session_start.to_rfc3339(),
+            session_end: Some(session_end.to_rfc3339()),
             build_phase: BuildPhaseInfo {
-                current:              "Phase 6 — Rust Orchestrator + Session State".to_string(),
+                current: "Phase 6 — Rust Orchestrator + Session State".to_string(),
                 completed_components: vec![
                     "Foundation".to_string(),
                     "IPC Contract".to_string(),
@@ -260,31 +261,27 @@ impl SessionStateManager {
                     "CoreOrchestrator".to_string(),
                     "SessionStateManager".to_string(),
                 ],
-                next_planned:         "Phase 7 — Context Observer".to_string(),
-                notes:                String::new(),
+                next_planned: "Phase 7 — Context Observer".to_string(),
+                notes: String::new(),
             },
-            model_config:            self.model_config,
-            conversation_history:    self.history,
+            model_config: self.model_config,
+            conversation_history: self.history,
             architectural_decisions: vec![],
-            open_questions:          vec![],
-            environment:             EnvironmentInfo::capture(),
+            open_questions: vec![],
+            environment: EnvironmentInfo::capture(),
         };
 
         // Serialize and write the session file.
-        let json = serde_json::to_string_pretty(&state)
-            .map_err(SessionError::Serialize)?;
-        std::fs::write(&file_path, json)
-            .map_err(SessionError::Io)?;
+        let json = serde_json::to_string_pretty(&state).map_err(SessionError::Serialize)?;
+        std::fs::write(&file_path, json).map_err(SessionError::Io)?;
 
         // Update the latest.json symlink: remove old → create new.
         // Removal is best-effort (may not exist on first session).
         let symlink_path = self.state_dir.join(SESSION_LATEST_SYMLINK);
         if symlink_path.exists() || symlink_path.symlink_metadata().is_ok() {
-            std::fs::remove_file(&symlink_path)
-                .map_err(SessionError::Io)?;
+            std::fs::remove_file(&symlink_path).map_err(SessionError::Io)?;
         }
-        symlink(&file_path, &symlink_path)
-            .map_err(SessionError::Io)?;
+        symlink(&file_path, &symlink_path).map_err(SessionError::Io)?;
 
         Ok(file_path)
     }
@@ -304,7 +301,7 @@ pub enum SessionError {
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionError::Io(e)        => write!(f, "Session I/O error: {e}"),
+            SessionError::Io(e) => write!(f, "Session I/O error: {e}"),
             SessionError::Serialize(e) => write!(f, "Session serialization error: {e}"),
         }
     }
@@ -323,7 +320,11 @@ mod tests {
     }
 
     fn make_manager(dir: &Path) -> SessionStateManager {
-        SessionStateManager::new(dir, "a1b2c3d4-e5f6-7890-abcd-ef1234567890", &default_model_config())
+        SessionStateManager::new(
+            dir,
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            &default_model_config(),
+        )
     }
 
     #[test]
@@ -332,7 +333,7 @@ mod tests {
         let dir = tmp.path();
 
         let mut mgr = make_manager(dir);
-        mgr.push_turn("user",      "hello");
+        mgr.push_turn("user", "hello");
         mgr.push_turn("assistant", "hi there");
 
         let written_path = mgr.persist().expect("persist should succeed");
@@ -345,7 +346,10 @@ mod tests {
 
         // File name must start with the prefix.
         let file_name = written_path.file_name().unwrap().to_str().unwrap();
-        assert!(file_name.starts_with("session_"), "filename must start with 'session_'");
+        assert!(
+            file_name.starts_with("session_"),
+            "filename must start with 'session_'"
+        );
 
         // Symlink must exist and point to the session file.
         let symlink_path = dir.join("latest.json");
@@ -373,16 +377,16 @@ mod tests {
 
         // Persist a session with two turns.
         let mut mgr = make_manager(dir);
-        mgr.push_turn("user",      "what is 2+2?");
+        mgr.push_turn("user", "what is 2+2?");
         mgr.push_turn("assistant", "4");
         mgr.persist().expect("persist");
 
         // Load it back.
         let state = SessionStateManager::load_latest(dir).expect("should have previous session");
         assert_eq!(state.conversation_history.len(), 2);
-        assert_eq!(state.conversation_history[0].role,    "user");
+        assert_eq!(state.conversation_history[0].role, "user");
         assert_eq!(state.conversation_history[0].content, "what is 2+2?");
-        assert_eq!(state.conversation_history[1].role,    "assistant");
+        assert_eq!(state.conversation_history[1].role, "assistant");
         assert_eq!(state.conversation_history[1].content, "4");
     }
 
@@ -391,9 +395,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut mgr = make_manager(tmp.path());
 
-        mgr.push_turn("user",      "first");
+        mgr.push_turn("user", "first");
         mgr.push_turn("assistant", "second");
-        mgr.push_turn("user",      "third");
+        mgr.push_turn("user", "third");
 
         let history = mgr.history();
         assert_eq!(history.len(), 3);
@@ -405,7 +409,7 @@ mod tests {
     #[test]
     fn persist_writes_iso8601_timestamps() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mgr  = make_manager(tmp.path());
+        let mgr = make_manager(tmp.path());
         mgr.persist().expect("persist");
 
         let symlink_path = tmp.path().join("latest.json");
@@ -415,9 +419,10 @@ mod tests {
         // Both timestamps must be parseable as RFC3339/ISO8601.
         DateTime::parse_from_rfc3339(&state.session_start)
             .expect("session_start must be valid ISO8601");
-        let end = state.session_end.expect("session_end must be set after persist");
-        DateTime::parse_from_rfc3339(&end)
-            .expect("session_end must be valid ISO8601");
+        let end = state
+            .session_end
+            .expect("session_end must be set after persist");
+        DateTime::parse_from_rfc3339(&end).expect("session_end must be valid ISO8601");
     }
 
     #[test]

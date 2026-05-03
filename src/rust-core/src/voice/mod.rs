@@ -5,7 +5,6 @@
 /// - `sentence`      — SentenceSplitter for token-stream sentence detection
 /// - `worker_client` — WorkerClient: subprocess spawn + frame I/O
 /// - `coordinator`   — VoiceCoordinator: TTS lifecycle, health checks, restart
-
 pub mod coordinator;
 pub mod protocol;
 pub mod sentence;

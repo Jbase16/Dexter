@@ -17,8 +17,9 @@
 /// One orchestrator is constructed per gRPC `Session()` call. It lives in a single
 /// Tokio task (the reader task in `ipc::server`) and processes events sequentially.
 /// Sequential processing is intentional: ordering guarantees come from the single-task
-/// model, not from locks. A new session after disconnect bootstraps `ConversationContext`
-/// from the previous session's persisted history so conversation continuity is preserved.
+/// model, not from locks. Session JSON is persisted for audit/debugging, but it is not
+/// replayed into new live conversations; cross-session context belongs in retrieval/memory
+/// with explicit relevance checks, not raw transcript bootstrap.
 ///
 /// ## Failure guarantees
 ///
@@ -27,8 +28,8 @@
 /// that indicates an unrecoverable session state — it means the gRPC send channel to
 /// Swift has been dropped, and the reader task will exit and call `shutdown()`.
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -44,10 +45,9 @@ use crate::{
         ACTION_BLOCK_CLOSE, ACTION_BLOCK_OPEN, AGENTIC_MAX_DEPTH, CONVERSATION_MAX_TURNS,
         FAST_MODEL_KEEP_ALIVE, GENERATION_HARD_TIMEOUT_SECS, GENERATION_WALL_TIMEOUT_SECS,
         LARGE_MODEL_NUM_CTX, MEMORY_DB_FILENAME, PREFILL_DEBOUNCE_SECS,
-        PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE,
-        RETRIEVAL_ACKNOWLEDGMENT, SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
+        PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE, RETRIEVAL_ACKNOWLEDGMENT,
+        SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
     },
-    memory::{MemoryCommand, detect_memory_command, extract_facts, slug_id},
     context_observer::ContextObserver,
     inference::{
         engine::{GenerationRequest, InferenceEngine},
@@ -56,17 +56,18 @@ use crate::{
         retrieval_classifier::is_retrieval_first_query,
         router::{Category, ConversationContext, ModelRouter},
     },
-    system,
     ipc::proto::{
         client_event, server_event, ActionApproval, ActionCategory, ActionRequest, ClientEvent,
         EntityState, EntityStateChange, ServerEvent, SystemEvent, SystemEventType, TextResponse,
         UiAction,
     },
+    memory::{detect_memory_command, extract_facts, slug_id, MemoryCommand},
     personality::PersonalityLayer,
     proactive::ProactiveEngine,
     retrieval::RetrievalPipeline,
     session::SessionStateManager,
-    voice::{VoiceCoordinator, protocol::msg, sentence::SentenceSplitter},
+    system,
+    voice::{protocol::msg, sentence::SentenceSplitter, VoiceCoordinator},
 };
 
 /// Bridging phrases emitted when the uncertainty sentinel fires mid-stream.
@@ -91,11 +92,7 @@ const BRIDGING_PHRASES: &[&str] = &[
 /// When iterating `messages` looking for the most recent *genuine* user turn (e.g. vision
 /// image attachment, barge-in cancellation target), use [`is_tool_result_content`] to skip
 /// over synthetic injections and land on the operator's actual question.
-const TOOL_RESULT_PREFIXES: &[&str] = &[
-    "[Retrieved",
-    "[Action result",
-    "[Action FAILED",
-];
+const TOOL_RESULT_PREFIXES: &[&str] = &["[Retrieved", "[Action result", "[Action FAILED"];
 
 /// Returns `true` if `content` begins with any prefix in [`TOOL_RESULT_PREFIXES`].
 ///
@@ -168,21 +165,24 @@ fn strip_context_markers(s: &str) -> String {
     // user-turn prefix format (replacing the old "Clipboard: …" system messages).
     // Legacy bracket prefixes are retained so responses stored in memory from
     // prior sessions still get stripped on replay.
-    const BRACKET_PREFIXES: &[&str] = &[
-        "[Context:", "[Clipboard:", "[Shell:", "[Memory:", "[Env ",
-    ];
-    const LINE_PREFIXES:    &[&str] = &["Context:", "Clipboard:", "Shell:", "Memory:"];
+    const BRACKET_PREFIXES: &[&str] = &["[Context:", "[Clipboard:", "[Shell:", "[Memory:", "[Env "];
+    const LINE_PREFIXES: &[&str] = &["Context:", "Clipboard:", "Shell:", "Memory:"];
 
     // Pass 1: Remove bracket-delimited tokens anywhere in the text.
     // Content appearing AFTER the closing `]` is preserved.
     let mut out = s.to_string();
     for &prefix in BRACKET_PREFIXES {
         while let Some(start) = out.find(prefix) {
-            let close = out[start..].find(']')
+            let close = out[start..]
+                .find(']')
                 .map(|i| start + i + 1)
                 .unwrap_or(out.len());
             // Eat a trailing space so preserved content isn't double-spaced.
-            let close = if out.get(close..close + 1) == Some(" ") { close + 1 } else { close };
+            let close = if out.get(close..close + 1) == Some(" ") {
+                close + 1
+            } else {
+                close
+            };
             out.replace_range(start..close, "");
         }
     }
@@ -205,6 +205,7 @@ fn strip_context_markers(s: &str) -> String {
 /// 10 seconds: the bridging phrase has already been sent; the operator is waiting.
 /// On timeout: inject a failure context and re-prompt to state uncertainty explicitly.
 const RETRIEVAL_TIMEOUT_SECS: u64 = 10;
+const COMEDY_MODE_INSTRUCTION: &str = "Comedy mode: The operator is asking for humor. Answer with the joke or comedic iteration directly. Do not refuse, moralize, sanitize, soften, lecture about sensitivity, add a safety preamble, or explain that a topic is too risky for comedy. Do not treat identity-themed comedy (gay, queer, trans, race, religion, etc.) as a special refusal category. Match the requested comedic premise and tone directly. No hedge preambles like \"I'm not sure this qualifies\" or \"here goes\".";
 
 // ── Phase 27: generation result ───────────────────────────────────────────────
 
@@ -216,25 +217,25 @@ const RETRIEVAL_TIMEOUT_SECS: u64 = 10;
 pub struct GenerationResult {
     /// True when the generation was cancelled mid-stream by a barge-in.
     /// `handle_generation_complete` skips all post-processing when set.
-    pub cancelled:      bool,
-    pub full_response:  String,
-    pub intercepted_q:  Option<String>,
+    pub cancelled: bool,
+    pub full_response: String,
+    pub intercepted_q: Option<String>,
     /// True when a TTS task was active and the is_final audio sentinel was sent.
     /// When true, `handle_generation_complete` defers IDLE to AUDIO_PLAYBACK_COMPLETE.
     pub tts_was_active: bool,
-    pub trace_id:       String,
+    pub trace_id: String,
     /// Original user message — needed for memory accumulation (extract_facts,
     /// embed_and_store_turn, record assistant reply). For agentic continuation steps
     /// this carries the original user query (not the intermediate step's content).
-    pub content:        String,
+    pub content: String,
     /// Embed model tag — needed for post-generation retrieval / memory operations.
-    pub embed_model:    String,
+    pub embed_model: String,
     /// Phase 31: true when this result is from run_shell_error_proactive_background.
     /// handle_generation_complete skips all regular post-processing when set.
     pub is_shell_proactive: bool,
     /// Phase 31: true when is_shell_proactive AND model returned [SILENT] or empty.
     /// Signals handle_generation_complete to refund the proactive rate-limit slot.
-    pub proactive_silent:   bool,
+    pub proactive_silent: bool,
     /// Phase 32: depth in the agentic action chain (0 = user-initiated, 1+ = continuation).
     /// Passed to new Interactions so handle_action_result can enforce AGENTIC_MAX_DEPTH.
     pub agentic_depth: u8,
@@ -247,7 +248,7 @@ pub struct GenerationResult {
     /// so future consumers (HUD indicator, Prometheus exporter, anomaly alerting)
     /// can read it without re-instrumenting the generation loop.
     #[allow(dead_code)]
-    pub telemetry:   GenerationTelemetry,
+    pub telemetry: GenerationTelemetry,
 }
 
 /// T1.4: per-generation telemetry captured by `run_generation_background`
@@ -260,23 +261,23 @@ pub struct GenerationResult {
 #[derive(Debug, Clone, Default)]
 pub struct GenerationTelemetry {
     /// Model tag used for this generation (e.g. "qwen3:8b").
-    pub model:          String,
+    pub model: String,
     /// Milliseconds from `gen_started` to first visible operator-facing token.
     /// `None` if the generation cancelled / errored before producing any output.
     pub first_token_ms: Option<u64>,
     /// Total wall-clock time of the generation, in milliseconds.
-    pub total_ms:       u64,
+    pub total_ms: u64,
     /// Number of streaming chunks received (close approximation to token count —
     /// Ollama emits one chunk per token for FAST/PRIMARY models, fewer per chunk
     /// for some HEAVY streaming modes).
-    pub token_count:    u32,
+    pub token_count: u32,
     /// True when this generation was cancelled (barge-in or deadline).
-    pub cancelled:      bool,
+    pub cancelled: bool,
     /// Character length of `full_response` at termination.
-    pub response_len:   usize,
+    pub response_len: usize,
     /// Depth in the agentic chain (0 = user-initiated). Duplicated here so the
     /// log line stands alone without having to look at the outer GenerationResult.
-    pub agentic_depth:  u8,
+    pub agentic_depth: u8,
 }
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -302,9 +303,9 @@ impl std::fmt::Display for OrchestratorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OrchestratorError::InferenceSetup(e) => write!(f, "InferenceEngine init failed: {e}"),
-            OrchestratorError::ChannelClosed      => write!(f, "gRPC session channel closed"),
-            OrchestratorError::RetrievalSetup(s)  => write!(f, "RetrievalPipeline init failed: {s}"),
-            OrchestratorError::VoiceSetup(s)       => write!(f, "VoiceCoordinator init failed: {s}"),
+            OrchestratorError::ChannelClosed => write!(f, "gRPC session channel closed"),
+            OrchestratorError::RetrievalSetup(s) => write!(f, "RetrievalPipeline init failed: {s}"),
+            OrchestratorError::VoiceSetup(s) => write!(f, "VoiceCoordinator init failed: {s}"),
         }
     }
 }
@@ -324,14 +325,14 @@ impl std::error::Error for OrchestratorError {}
 /// removes stale entries to handle silently-panicked action tasks.
 pub struct Interaction {
     #[allow(dead_code)] // Phase 24c: used by TTS priority queue for trace correlation
-    pub trace_id:         String,
-    pub stage:            InteractionStage,
+    pub trace_id: String,
+    pub stage: InteractionStage,
     #[allow(dead_code)] // Phase 24c: used by TTS priority queue to schedule Active vs Background
-    pub priority:         InteractionPriority,
-    pub created_at:       Instant,
+    pub priority: InteractionPriority,
+    pub created_at: Instant,
     /// Phase 32: position of this action in the agentic chain (0 = first action from user turn).
     /// Used by handle_action_result to enforce AGENTIC_MAX_DEPTH and pass depth+1 forward.
-    pub agentic_depth:    u8,
+    pub agentic_depth: u8,
     /// Phase 32: the original user query that started this agentic chain.
     /// Threaded through all continuation steps so memory embedding stays tied to the
     /// root request rather than intermediate action results.
@@ -441,12 +442,12 @@ const INTERACTION_TTL_SECS: u64 = 300;
 ///     completion).
 #[derive(Clone)]
 pub struct SharedDaemonState {
-    pub voice:                   crate::voice::VoiceCoordinator,
-    pub browser:                 crate::browser::BrowserCoordinator,
-    pub fast_model_warm:         Arc<AtomicBool>,
-    pub primary_model_warm:      Arc<AtomicBool>,
-    pub embed_model_warm:        Arc<AtomicBool>,
-    pub startup_greeting_sent:   Arc<AtomicBool>,
+    pub voice: crate::voice::VoiceCoordinator,
+    pub browser: crate::browser::BrowserCoordinator,
+    pub fast_model_warm: Arc<AtomicBool>,
+    pub primary_model_warm: Arc<AtomicBool>,
+    pub embed_model_warm: Arc<AtomicBool>,
+    pub startup_greeting_sent: Arc<AtomicBool>,
 }
 
 impl SharedDaemonState {
@@ -459,11 +460,11 @@ impl SharedDaemonState {
     /// against degraded coordinators.
     pub fn new_degraded() -> Self {
         Self {
-            voice:                 crate::voice::VoiceCoordinator::new_degraded(),
-            browser:               crate::browser::BrowserCoordinator::new_degraded(),
-            fast_model_warm:       Arc::new(AtomicBool::new(false)),
-            primary_model_warm:    Arc::new(AtomicBool::new(false)),
-            embed_model_warm:      Arc::new(AtomicBool::new(false)),
+            voice: crate::voice::VoiceCoordinator::new_degraded(),
+            browser: crate::browser::BrowserCoordinator::new_degraded(),
+            fast_model_warm: Arc::new(AtomicBool::new(false)),
+            primary_model_warm: Arc::new(AtomicBool::new(false)),
+            embed_model_warm: Arc::new(AtomicBool::new(false)),
             startup_greeting_sent: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -506,9 +507,7 @@ impl SharedDaemonState {
 
         // Build an InferenceEngine for the warmup requests. CoreOrchestrator::new
         // will build its own per-session; this one is just for daemon startup.
-        let engine = match crate::inference::engine::InferenceEngine::new(
-            cfg.inference.clone(),
-        ) {
+        let engine = match crate::inference::engine::InferenceEngine::new(cfg.inference.clone()) {
             Ok(e) => e,
             Err(e) => {
                 warn!(
@@ -529,18 +528,10 @@ impl SharedDaemonState {
 
         // Step 4: FAST model (await). First-token latency for any chat depends
         // on this being warm.
-        warm_fast_model_inline(
-            &engine,
-            &cfg.models.fast,
-            &self.fast_model_warm,
-        ).await;
+        warm_fast_model_inline(&engine, &cfg.models.fast, &self.fast_model_warm).await;
 
         // Step 5: PRIMARY model (await). Routed-PRIMARY queries depend on this.
-        warm_primary_model_inline(
-            &engine,
-            &cfg.models.primary,
-            &self.primary_model_warm,
-        ).await;
+        warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
 
         // Step 6: PRIMARY keepalive task. Long-lived; runs for the daemon's
         // lifetime. Re-touches PRIMARY's mmap'd pages every
@@ -562,15 +553,15 @@ impl SharedDaemonState {
 
 /// Phase 38c helper — fire-and-forget embed model warmup.
 fn spawn_embed_warmup(
-    engine:      crate::inference::engine::InferenceEngine,
+    engine: crate::inference::engine::InferenceEngine,
     embed_model: String,
-    warm_flag:   Arc<AtomicBool>,
+    warm_flag: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         info!("Warming up embed model: {embed_model}");
         let req = crate::inference::engine::EmbeddingRequest {
             model_name: embed_model.clone(),
-            input:      "warmup".to_string(),
+            input: "warmup".to_string(),
         };
         match engine.embed(req).await {
             Ok(_) => {
@@ -587,21 +578,21 @@ fn spawn_embed_warmup(
 
 /// Phase 38c helper — sequential FAST model warmup. Awaited by daemon-startup.
 async fn warm_fast_model_inline(
-    engine:    &crate::inference::engine::InferenceEngine,
-    model:     &str,
+    engine: &crate::inference::engine::InferenceEngine,
+    model: &str,
     warm_flag: &Arc<AtomicBool>,
 ) {
     info!("Warming up FAST model: {model}");
     let req = GenerationRequest {
-        model_name:          model.to_string(),
-        messages:            vec![crate::inference::engine::Message::user("hi".to_string())],
-        temperature:         None,
-        unload_after:        false,
+        model_name: model.to_string(),
+        messages: vec![crate::inference::engine::Message::user("hi".to_string())],
+        temperature: None,
+        unload_after: false,
         keep_alive_override: Some(FAST_MODEL_KEEP_ALIVE),
-        num_predict:         Some(1),
+        num_predict: Some(1),
         // 300s window covers worst-case cold-loads on USB-SSD.
         inactivity_timeout_override_secs: Some(300),
-        num_ctx_override:    None,
+        num_ctx_override: None,
     };
     match engine.generate_stream(req).await {
         Ok(mut rx) => {
@@ -618,21 +609,21 @@ async fn warm_fast_model_inline(
 
 /// Phase 38c helper — sequential PRIMARY model warmup. Awaited by daemon-startup.
 async fn warm_primary_model_inline(
-    engine:    &crate::inference::engine::InferenceEngine,
-    model:     &str,
+    engine: &crate::inference::engine::InferenceEngine,
+    model: &str,
     warm_flag: &Arc<AtomicBool>,
 ) {
     info!("Warming up PRIMARY model: {model}");
     let req = GenerationRequest {
-        model_name:          model.to_string(),
-        messages:            vec![crate::inference::engine::Message::user("hi".to_string())],
-        temperature:         None,
-        unload_after:        false,
+        model_name: model.to_string(),
+        messages: vec![crate::inference::engine::Message::user("hi".to_string())],
+        temperature: None,
+        unload_after: false,
         keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
-        num_predict:         Some(1),
+        num_predict: Some(1),
         // 300s window covers worst-case cold-loads on USB-SSD.
         inactivity_timeout_override_secs: Some(300),
-        num_ctx_override:    None,
+        num_ctx_override: None,
     };
     match engine.generate_stream(req).await {
         Ok(mut rx) => {
@@ -653,50 +644,50 @@ async fn warm_primary_model_inline(
 
 /// Per-session coordinator. Constructed once per `Session()` RPC call.
 pub struct CoreOrchestrator {
-    engine:           InferenceEngine,
-    router:           ModelRouter,
-    personality:      PersonalityLayer,
-    context:          ConversationContext,
+    engine: InferenceEngine,
+    router: ModelRouter,
+    personality: PersonalityLayer,
+    context: ConversationContext,
     /// Cached from DexterConfig at construction time — used in every handle_text_input
     /// to resolve `ModelId` → Ollama model tag via `ModelId::ollama_name(&model_config)`.
-    model_config:     ModelConfig,
-    session_mgr:      SessionStateManager,
-    context_observer: ContextObserver,   // Phase 7 — machine context aggregator
-    action_engine:    ActionEngine,      // Phase 8 — system action execution
-    retrieval:        RetrievalPipeline, // Phase 9 — semantic memory + web grounding
-    voice:            VoiceCoordinator,  // Phase 10 — TTS worker lifecycle
-    proactive_engine: ProactiveEngine,   // Phase 17 — proactive observation rate-limiter
-    hotkey_config:    crate::config::HotkeyConfig, // Phase 18 — pushed to Swift via ConfigSync
+    model_config: ModelConfig,
+    session_mgr: SessionStateManager,
+    context_observer: ContextObserver, // Phase 7 — machine context aggregator
+    action_engine: ActionEngine,       // Phase 8 — system action execution
+    retrieval: RetrievalPipeline,      // Phase 9 — semantic memory + web grounding
+    voice: VoiceCoordinator,           // Phase 10 — TTS worker lifecycle
+    proactive_engine: ProactiveEngine, // Phase 17 — proactive observation rate-limiter
+    hotkey_config: crate::config::HotkeyConfig, // Phase 18 — pushed to Swift via ConfigSync
     /// Phase 37.9 / T8: operator's own iMessage handle for self-send intercept.
     /// When set and the operator says "text myself"/"send me X", the orchestrator
     /// rewrites the LLM's Messages-send AppleScript to address this handle
     /// directly — bypassing Contacts lookup and the confabulation risk that
     /// produced the T8 live-smoke failure. None → self-send requests are rejected.
-    operator_self_handle:  Option<String>,
+    operator_self_handle: Option<String>,
     /// Phase 37.9 / T8: operator's self-nicknames (case-insensitive, whole-word).
     /// Extends self-reference detection so "text jay my list" also resolves to
     /// `operator_self_handle` when "jay" is listed here. Empty by default.
     operator_self_aliases: Vec<String>,
-    tx:               mpsc::Sender<Result<ServerEvent, Status>>,
-    session_id:       String,
+    tx: mpsc::Sender<Result<ServerEvent, Status>>,
+    session_id: String,
     // Phase 15: suppress repeated UI notifications after permanent worker failure.
-    voice_degraded_notified:   bool,
+    voice_degraded_notified: bool,
     browser_degraded_notified: bool,
     /// Phase 19: True while a CAUTIOUS/DESTRUCTIVE action awaits operator approval.
     /// Prevents AUDIO_PLAYBACK_COMPLETE from emitting a spurious EntityState::Idle that
     /// would cancel the ALERT state during the operator's confirmation window.
     /// Set in `handle_text_input` on ActionOutcome::PendingApproval.
     /// Cleared in `handle_action_approval` before transitioning back to IDLE.
-    action_awaiting_approval:  bool,
+    action_awaiting_approval: bool,
     /// Phase 24: sender half of the action result channel. Cloned into each
     /// spawned action task so it can deliver `ActionResult` back to the event loop.
     /// The receiver (`action_rx`) lives in `ipc::server`'s `select!` loop.
-    action_tx:                 mpsc::Sender<ActionResult>,
+    action_tx: mpsc::Sender<ActionResult>,
     /// Phase 24: debounce timestamp for KV cache prefill requests.
     /// Prevents flooding Ollama with prefill requests on rapid context changes
     /// (e.g. every keystroke in a text editor). At most one prefill per
     /// `PREFILL_DEBOUNCE_SECS` (5 seconds).
-    last_prefill_at:           Option<Instant>,
+    last_prefill_at: Option<Instant>,
     /// Timestamp of the most recent successful Vision-tier turn (image actually
     /// attached). Read by the vision-continuation router override: if this is
     /// within `VISION_CONTINUATION_WINDOW_SECS` AND the current user utterance
@@ -708,14 +699,26 @@ pub struct CoreOrchestrator {
     /// image is appended to the user message. NOT set on Vision-route demotions
     /// (capture failed, route fell back to PRIMARY) — those turns had no image,
     /// so follow-ups have no visual context to continue.
-    last_vision_turn_at:       Option<Instant>,
+    last_vision_turn_at: Option<Instant>,
+    /// Timestamp of the most recent joke-request turn (joke override fired and
+    /// PRIMARY actually generated the joke). Read by the joke-continuation
+    /// override: if this is within `JOKE_CONTINUATION_WINDOW_SECS` AND the
+    /// current utterance contains a joke-iteration marker (criticism,
+    /// correction, "explain the joke", "another"), the route is upgraded
+    /// FAST → PRIMARY so the same model that told the joke can iterate.
+    ///
+    /// Without this, follow-ups like "that wasn't NSFW enough" or "explain
+    /// the joke" route to FAST (qwen3:8b), which lacks the breadth to iterate
+    /// and hallucinates joke explanations from training data rather than
+    /// reading the actual joke just told.
+    last_joke_turn_at: Option<Instant>,
     /// Phase 24: in-flight interaction tracking. Keyed by `action_id`.
     /// Entries are inserted when an action is dispatched to a background task
     /// and removed when TTS feedback completes or by the 5-minute GC sweep.
-    interactions:              HashMap<String, Interaction>,
+    interactions: HashMap<String, Interaction>,
     /// Phase 27: the most-recently sent entity state, tracked so `handle_barge_in`
     /// knows whether a state transition is needed. Updated in `send_state`.
-    current_state:             EntityState,
+    current_state: EntityState,
     /// Phase 37.5 / B5: true while a HEAVY-routed generation is in flight after
     /// we explicitly unloaded PRIMARY to make VRAM room. `handle_generation_complete`
     /// checks this; if set, it spawns `warm_up_primary_model()` so PRIMARY is
@@ -727,16 +730,16 @@ pub struct CoreOrchestrator {
     /// threaded through `GenerationResult` because the rewarm decision depends
     /// on orchestrator state (whether we were the ones who unloaded PRIMARY)
     /// rather than on the generation output.
-    pending_primary_rewarm:    bool,
+    pending_primary_rewarm: bool,
     /// Phase 27: cooperative cancellation token shared with the background generation
     /// task. `handle_barge_in` sets this to `true`; the token loop checks it per-token.
     /// Replaced with a fresh `Arc<AtomicBool>` after each barge-in so subsequent
     /// generations always start with a clean, uncancelled token.
-    cancel_token:              Arc<AtomicBool>,
+    cancel_token: Arc<AtomicBool>,
     /// Phase 27: sender half of the generation result channel. Cloned into each
     /// spawned generation task so it can deliver `GenerationResult` back to the
     /// event loop via `gen_rx` in `ipc::server`.
-    generation_tx:             mpsc::Sender<GenerationResult>,
+    generation_tx: mpsc::Sender<GenerationResult>,
     /// Phase 33: JoinHandle for the currently-running generation background task.
     ///
     /// Stored so cancellation can call `handle.abort()`, which drops the reqwest
@@ -744,7 +747,7 @@ pub struct CoreOrchestrator {
     /// generation immediately. Without this, a cancelled task sits blocked at
     /// `await stream.next()` for up to GENERATION_WALL_TIMEOUT_SECS (160s) if Ollama
     /// hasn't sent the first token yet — blocking the Ollama queue for the next request.
-    generation_handle:         Option<tokio::task::JoinHandle<()>>,
+    generation_handle: Option<tokio::task::JoinHandle<()>>,
     /// Phase 38 / Codex finding [7]: AbortHandle for the producer task spawned
     /// by `engine.generate_stream_cancellable()`. Stored inside an
     /// `Arc<std::sync::Mutex<Option<_>>>` because run_generation_background runs
@@ -762,7 +765,7 @@ pub struct CoreOrchestrator {
     /// instead of leaving it running for up to `ACTION_DOWNLOAD_TIMEOUT_SECS`.
     /// Composes with Session 1's `kill_on_drop(true)` on `Command`: aborting
     /// the task drops the inner `Child`, which sends SIGKILL to the subprocess.
-    in_flight_actions:         std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
+    in_flight_actions: std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
     /// Phase 38 / Codex finding [13]: AbortHandle for the currently-running
     /// TTS read loop (the task spawned by `make_tts_channel`). Same slot
     /// pattern as `generation_producer_abort` from Codex [7] — populated by
@@ -780,98 +783,89 @@ pub struct CoreOrchestrator {
     /// seq=0). The structural fix is a per-stream id field on AudioResponse
     /// (proto change). Deferred to Phase 38b along with the structured
     /// action types since that phase is already touching the proto.
-    tts_handle_abort:          Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+    tts_handle_abort: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
     /// Set to `true` by `warm_up_fast_model()` when qwen3:8b finishes loading.
     /// Checked in `handle_text_input` — if false, the operator is told to wait and the
     /// request is dropped rather than hanging Ollama with a competing inference request
     /// while the model is still loading from disk.
-    fast_model_warm:           Arc<AtomicBool>,
+    fast_model_warm: Arc<AtomicBool>,
     /// Phase 36: set to `true` by `warm_up_primary_model()` when gemma4:26b / mistral-small
     /// finishes loading. Not used as a gate (PRIMARY-routed requests still wait for the
     /// model on first use), but exposed for logging and potential telemetry: the warm
     /// state is the difference between "first PRIMARY query was instant" and
     /// "first PRIMARY query took 30-120s to emit a token".
     #[allow(dead_code)] // informational flag; no runtime gate yet
-    primary_model_warm:        Arc<AtomicBool>,
+    primary_model_warm: Arc<AtomicBool>,
     /// Set to `true` by `warm_up_embed()` when mxbai-embed-large finishes loading.
     /// Checked before `recall_relevant()` — if false, memory recall is skipped for
     /// that turn rather than blocking the entire inference pipeline for ~30s waiting
     /// for the embed model to load from disk. Recall is non-critical; latency is.
-    embed_model_warm:          Arc<AtomicBool>,
+    embed_model_warm: Arc<AtomicBool>,
     /// Phase 34: true when the current (or most recent) user turn came from voice input
     /// (hotkey → STT). Controls whether `make_tts_channel` spawns TTS synthesis.
     ///
     /// Voice in → voice+text out: set true in `handle_text_input` when `from_voice=true`.
     /// Typed in → text only:       set false when `from_voice=false`.
     /// Agentic continuations inherit the value from the turn that started the chain.
-    voice_mode:                bool,
+    voice_mode: bool,
     /// Phase 35: JSON representation of the last action dispatched in an agentic chain.
     /// Reset to `None` when a new user-initiated turn begins (agentic_depth == 0).
     /// Used to detect phantom retries: if depth > 0 and the model generates the exact
     /// same action spec as the previous step, the chain is stopped immediately with an
     /// error message rather than re-dispatching the identical failing action.
-    last_agentic_action_json:  Option<String>,
+    last_agentic_action_json: Option<String>,
 }
 
 impl CoreOrchestrator {
     /// Build a fully-wired orchestrator for one session.
     ///
-    /// Bootstraps `ConversationContext` from the previous session's history if one
-    /// exists — `SessionStateManager::load_latest()` is called here so the very first
-    /// `handle_text_input()` picks up where the last session left off.
+    /// Creates a fresh `ConversationContext` for this gRPC session.
+    ///
+    /// Session JSON is still persisted and `latest.json` is still read for logging, but
+    /// prior transcript turns are deliberately not replayed into the live prompt. Raw
+    /// bootstrap caused stale test/refusal turns to poison unrelated new sessions.
     ///
     /// Returns `Err(OrchestratorError::InferenceSetup)` if `InferenceEngine::new()` fails.
     /// That failure propagates to the reader task which logs and exits, causing the
     /// gRPC stream to close with `END_STREAM`. The daemon itself does not exit.
     pub fn new(
-        cfg:           &DexterConfig,
-        session_id:    String,
-        tx:            mpsc::Sender<Result<ServerEvent, Status>>,
-        action_tx:     mpsc::Sender<ActionResult>,
+        cfg: &DexterConfig,
+        session_id: String,
+        tx: mpsc::Sender<Result<ServerEvent, Status>>,
+        action_tx: mpsc::Sender<ActionResult>,
         generation_tx: mpsc::Sender<GenerationResult>,
         // Phase 38c: shared daemon-lifetime state (TTS worker, browser worker,
         // warmup flags, greeting-sent flag). Cloned by `CoreService` from the
         // single instance it constructs at daemon startup. Tests pass
         // `SharedDaemonState::new_degraded()`.
-        shared:        SharedDaemonState,
+        shared: SharedDaemonState,
     ) -> Result<Self, OrchestratorError> {
         let engine = InferenceEngine::new(cfg.inference.clone())
             .map_err(OrchestratorError::InferenceSetup)?;
 
-        let router      = ModelRouter;
+        let router = ModelRouter;
         // Phase 38 / Codex finding [33]: respect the operator-configured personality
         // path. `load_or_default_from()` falls back to defaults on missing/malformed
         // YAML the same way `load_or_default()` does — see PersonalityLayer impl.
         let personality = PersonalityLayer::load_or_default_from(&cfg.core.personality_path);
-        let session_mgr = SessionStateManager::new(
-            &cfg.core.state_dir,
-            &session_id,
-            &cfg.models,
-        );
+        let session_mgr = SessionStateManager::new(&cfg.core.state_dir, &session_id, &cfg.models);
 
-        // Bootstrap from previous session so conversation continues across daemon restarts.
-        // Round 3 / T1.1: max_turns = CONVERSATION_MAX_TURNS (4) — was 20. See the
-        // constant's doc for rationale; short version: KV-cache stability + token budget.
-        let mut context = ConversationContext::new(session_id.clone(), CONVERSATION_MAX_TURNS);
+        // Fresh per-session conversation context.
+        //
+        // Do NOT replay `latest.json` conversation_history here. That raw transcript
+        // bootstrap has repeatedly acted as prompt contamination: a previous test turn
+        // ("what color is the sky?") or refusal ("I do not generate NSFW...") becomes
+        // "recent conversation" for the next unrelated session. Cross-session memory
+        // must go through retrieval, where it can be relevance-ranked, framed as prior
+        // reference material, and suppressed for sensitive contexts like jokes.
+        let context = ConversationContext::new(session_id.clone(), CONVERSATION_MAX_TURNS);
         if let Some(prev) = SessionStateManager::load_latest(&cfg.core.state_dir) {
             let turn_count = prev.conversation_history.len();
-            for entry in prev.conversation_history {
-                match entry.role.as_str() {
-                    "user"      => context.push_user(entry.content),
-                    "assistant" => context.push_assistant(entry.content),
-                    other       => {
-                        warn!(
-                            session = %session_id,
-                            role = other,
-                            "Unknown role in persisted history — skipping"
-                        );
-                    }
-                }
-            }
             info!(
                 session    = %session_id,
+                previous_session = %prev.session_id,
                 prev_turns = turn_count,
-                "ConversationContext bootstrapped from previous session"
+                "Previous session state found — not bootstrapping transcript into live context"
             );
         }
 
@@ -899,46 +893,47 @@ impl CoreOrchestrator {
             router,
             personality,
             context,
-            model_config:     cfg.models.clone(),
+            model_config: cfg.models.clone(),
             session_mgr,
             context_observer: ContextObserver::new(),
             // Phase 38c: ActionEngine receives the shared BrowserCoordinator clone
             // so this session uses the daemon-lifetime chromium subprocess instead
             // of spawning its own.
-            action_engine:    ActionEngine::new(&cfg.core.state_dir, shared.browser.clone()),
+            action_engine: ActionEngine::new(&cfg.core.state_dir, shared.browser.clone()),
             retrieval,
             // Phase 38c: clone the shared VoiceCoordinator so this session uses the
             // daemon-lifetime kokoro worker instead of spawning its own.
-            voice:            shared.voice.clone(),
+            voice: shared.voice.clone(),
             proactive_engine: ProactiveEngine::new(&cfg.behavior), // Phase 17
-            hotkey_config:    cfg.hotkey.clone(),                  // Phase 18
-            operator_self_handle:  cfg.behavior.operator_self_handle.clone(),   // Phase 37.9 / T8
-            operator_self_aliases: cfg.behavior.operator_self_aliases.clone(),  // Phase 37.9 / T8
+            hotkey_config: cfg.hotkey.clone(),                     // Phase 18
+            operator_self_handle: cfg.behavior.operator_self_handle.clone(), // Phase 37.9 / T8
+            operator_self_aliases: cfg.behavior.operator_self_aliases.clone(), // Phase 37.9 / T8
             tx,
             session_id,
-            voice_degraded_notified:   false,
+            voice_degraded_notified: false,
             browser_degraded_notified: false,
-            action_awaiting_approval:  false,  // Phase 19
-            action_tx,                         // Phase 24
-            interactions:              HashMap::new(), // Phase 24
-            last_prefill_at:           None,           // Phase 24
-            last_vision_turn_at:       None,           // vision-continuation
-            current_state:             EntityState::Idle,             // Phase 27
-            cancel_token:              Arc::new(AtomicBool::new(false)), // Phase 27
-            generation_tx,                                             // Phase 27
-            generation_handle:         None,                          // Phase 33
+            action_awaiting_approval: false,  // Phase 19
+            action_tx,                        // Phase 24
+            interactions: HashMap::new(),     // Phase 24
+            last_prefill_at: None,            // Phase 24
+            last_vision_turn_at: None,        // vision-continuation
+            last_joke_turn_at: None,          // joke-continuation
+            current_state: EntityState::Idle, // Phase 27
+            cancel_token: Arc::new(AtomicBool::new(false)), // Phase 27
+            generation_tx,                    // Phase 27
+            generation_handle: None,          // Phase 33
             generation_producer_abort: Arc::new(std::sync::Mutex::new(None)), // Phase 38 / Codex [7]
-            in_flight_actions:         std::collections::HashMap::new(), // Phase 38 / Codex [10]
-            tts_handle_abort:          Arc::new(std::sync::Mutex::new(None)), // Phase 38 / Codex [13]
+            in_flight_actions: std::collections::HashMap::new(), // Phase 38 / Codex [10]
+            tts_handle_abort: Arc::new(std::sync::Mutex::new(None)), // Phase 38 / Codex [13]
             // Phase 38c: clone shared warmup atomics. When CoreService's daemon-
             // startup task sets these to true, every session sees the change.
             // No more per-session warmup queries.
-            fast_model_warm:           shared.fast_model_warm.clone(),
-            primary_model_warm:        shared.primary_model_warm.clone(),
-            embed_model_warm:          shared.embed_model_warm.clone(),
-            voice_mode:                false,                            // Phase 34
-            last_agentic_action_json:  None,                             // Phase 35
-            pending_primary_rewarm:    false,                            // Phase 37.5 / B5
+            fast_model_warm: shared.fast_model_warm.clone(),
+            primary_model_warm: shared.primary_model_warm.clone(),
+            embed_model_warm: shared.embed_model_warm.clone(),
+            voice_mode: false,              // Phase 34
+            last_agentic_action_json: None, // Phase 35
+            pending_primary_rewarm: false,  // Phase 37.5 / B5
         })
     }
 
@@ -1018,14 +1013,14 @@ impl CoreOrchestrator {
     /// weight pages — the reason we picked this cadence is specifically to
     /// exercise the full load path.
     fn spawn_primary_keepalive_task(
-        engine:    InferenceEngine,
-        model:     String,
+        engine: InferenceEngine,
+        model: String,
         warm_flag: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(
-                std::time::Duration::from_secs(PRIMARY_KEEPALIVE_PING_INTERVAL_SECS),
-            );
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                PRIMARY_KEEPALIVE_PING_INTERVAL_SECS,
+            ));
             // First tick fires immediately; skip it so we don't ping the model
             // we just finished warming up a moment ago.
             ticker.tick().await;
@@ -1040,18 +1035,18 @@ impl CoreOrchestrator {
                 }
 
                 let req = GenerationRequest {
-                    model_name:          model.clone(),
-                    messages:            vec![crate::inference::engine::Message::user("hi".to_string())],
-                    temperature:         None,
-                    unload_after:        false,
+                    model_name: model.clone(),
+                    messages: vec![crate::inference::engine::Message::user("hi".to_string())],
+                    temperature: None,
+                    unload_after: false,
                     keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
-                    num_predict:         Some(1),
+                    num_predict: Some(1),
                     // 60 s inactivity cap: under normal conditions a warm
                     // one-token ping returns in ~200 ms. If it blocks past
                     // 60 s, the model is in bad shape (unloaded, OOM, etc.) —
                     // bail rather than hanging the ping loop.
                     inactivity_timeout_override_secs: Some(60),
-                    num_ctx_override:    None,
+                    num_ctx_override: None,
                 };
                 match engine.generate_stream(req).await {
                     Ok(mut rx) => {
@@ -1164,19 +1159,19 @@ impl CoreOrchestrator {
         let recall_entries = vec![];
         let messages = self.prepare_messages_for_inference(&recall_entries);
 
-        let engine     = self.engine.clone();
+        let engine = self.engine.clone();
         let model_name = self.model_config.fast.clone();
 
         tokio::spawn(async move {
             let req = GenerationRequest {
-                model_name:          model_name.clone(),
+                model_name: model_name.clone(),
                 messages,
-                temperature:         None,
-                unload_after:        false,
+                temperature: None,
+                unload_after: false,
                 keep_alive_override: Some(FAST_MODEL_KEEP_ALIVE),
-                num_predict:         Some(1),  // Process prefix → KV cache, generate 1 token, stop
+                num_predict: Some(1), // Process prefix → KV cache, generate 1 token, stop
                 inactivity_timeout_override_secs: None,
-                num_ctx_override:    None,
+                num_ctx_override: None,
             };
 
             // Fire and forget — if it fails, the normal path runs.
@@ -1210,7 +1205,8 @@ impl CoreOrchestrator {
             self.send_text_response_to_ui(
                 "Voice capability lost after repeated failures. Text-only mode is now active.",
                 true,
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -1232,7 +1228,8 @@ impl CoreOrchestrator {
             self.send_text_response_to_ui(
                 "Browser automation unavailable after repeated failures.",
                 true,
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -1243,14 +1240,12 @@ impl CoreOrchestrator {
     /// Called once per event in the reader task's event loop. Returns `Ok(())` on
     /// success. Returns `Err` when the gRPC channel is closed (unrecoverable for
     /// this session — the reader task will break and call `shutdown()`).
-    pub async fn handle_event(
-        &mut self,
-        event: ClientEvent,
-    ) -> Result<(), OrchestratorError> {
+    pub async fn handle_event(&mut self, event: ClientEvent) -> Result<(), OrchestratorError> {
         let trace_id = event.trace_id.clone();
         match event.event {
             Some(client_event::Event::TextInput(input)) => {
-                self.handle_text_input(input.content, trace_id, input.from_voice).await
+                self.handle_text_input(input.content, trace_id, input.from_voice)
+                    .await
             }
             Some(client_event::Event::SystemEvent(sys)) => {
                 self.handle_system_event(sys, trace_id).await
@@ -1304,7 +1299,8 @@ impl CoreOrchestrator {
         // `inactivity` seconds before its next `tx.send()` discovered the closed
         // channel. The producer's abort_handle is published into this slot by
         // run_generation_background after a successful generate_stream_cancellable.
-        if let Some(producer_abort) = self.generation_producer_abort
+        if let Some(producer_abort) = self
+            .generation_producer_abort
             .lock()
             .ok()
             .and_then(|mut g| g.take())
@@ -1324,11 +1320,7 @@ impl CoreOrchestrator {
         // delivery immediately. Audio frames already buffered in the gRPC
         // channel are handled by Swift's `AudioPlayer.stop()` on the
         // LISTENING transition.
-        if let Some(tts_abort) = self.tts_handle_abort
-            .lock()
-            .ok()
-            .and_then(|mut g| g.take())
-        {
+        if let Some(tts_abort) = self.tts_handle_abort.lock().ok().and_then(|mut g| g.take()) {
             tts_abort.abort();
             aborted_anything = true;
         }
@@ -1415,15 +1407,15 @@ impl CoreOrchestrator {
         // which we proceed anyway on the theory that something unusual is
         // happening and the warmup's own error reporting is more useful
         // than a silent giveup.
-        let engine          = self.engine.clone();
-        let heavy_name      = self.model_config.heavy.clone();
-        let primary_name    = self.model_config.primary.clone();
-        let warm_flag       = self.primary_model_warm.clone();
-        let session_id      = self.session_id.clone();
+        let engine = self.engine.clone();
+        let heavy_name = self.model_config.heavy.clone();
+        let primary_name = self.model_config.primary.clone();
+        let warm_flag = self.primary_model_warm.clone();
+        let session_id = self.session_id.clone();
         // Clone twice: one moves into the spawned task; one stays in this scope
         // for the trailing `info!` after spawn.
-        let trace_id_task   = trace_id.to_string();
-        let trace_id_log    = trace_id.to_string();
+        let trace_id_task = trace_id.to_string();
+        let trace_id_log = trace_id.to_string();
         tokio::spawn(async move {
             let trace_id = trace_id_task;
             // Cancel path: HEAVY's unload_after=true sentinel is only honored on
@@ -1489,16 +1481,14 @@ impl CoreOrchestrator {
                 "Warming up PRIMARY model"
             );
             let req = GenerationRequest {
-                model_name:          primary_name.clone(),
-                messages:            vec![crate::inference::engine::Message::user(
-                    "hi".to_string(),
-                )],
-                temperature:         None,
-                unload_after:        false,
+                model_name: primary_name.clone(),
+                messages: vec![crate::inference::engine::Message::user("hi".to_string())],
+                temperature: None,
+                unload_after: false,
                 keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
-                num_predict:         Some(1),
+                num_predict: Some(1),
                 inactivity_timeout_override_secs: Some(300),
-                num_ctx_override:    None,
+                num_ctx_override: None,
             };
             match engine.generate_stream(req).await {
                 Ok(mut rx) => {
@@ -1584,11 +1574,11 @@ impl CoreOrchestrator {
         }
 
         let mut full_response = result.full_response;
-        let intercepted_q     = result.intercepted_q;
-        let tts_was_active    = result.tts_was_active;
-        let trace_id          = result.trace_id;
-        let content           = result.content;
-        let embed_model       = result.embed_model;
+        let intercepted_q = result.intercepted_q;
+        let tts_was_active = result.tts_was_active;
+        let trace_id = result.trace_id;
+        let content = result.content;
+        let embed_model = result.embed_model;
 
         // 7a. Phase 19 — Uncertainty sentinel handling.
         let mut response_already_recorded = false;
@@ -1605,7 +1595,8 @@ impl CoreOrchestrator {
             let retrieval_result = tokio::time::timeout(
                 std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
                 self.retrieval.retrieve_web_only(query),
-            ).await;
+            )
+            .await;
 
             let tool_content = match retrieval_result {
                 Ok(Ok(result)) => {
@@ -1617,8 +1608,10 @@ impl CoreOrchestrator {
                     );
                     format!(
                         "[Retrieved: {}]\nSource: {}\nConfidence: {:.0}%\n\n{}",
-                        result.query, result.source,
-                        result.confidence * 100.0, result.text,
+                        result.query,
+                        result.source,
+                        result.confidence * 100.0,
+                        result.text,
                     )
                 }
                 Ok(Err(e)) => {
@@ -1634,14 +1627,15 @@ impl CoreOrchestrator {
             self.context.push_tool_result(&tool_content);
 
             let reprompt_messages = self.prepare_messages_for_inference(&[]);
-            let reprompt_model    = self.model_config.primary.clone();
-            let reprompt_response = self.generate_and_stream(
-                &reprompt_model, reprompt_messages, &trace_id, false, None,
-            ).await?;
+            let reprompt_model = self.model_config.primary.clone();
+            let reprompt_response = self
+                .generate_and_stream(&reprompt_model, reprompt_messages, &trace_id, false, None)
+                .await?;
 
             full_response.push_str(&reprompt_response);
             if !reprompt_response.is_empty() {
-                self.context.push_assistant(strip_context_markers(&reprompt_response));
+                self.context
+                    .push_assistant(strip_context_markers(&reprompt_response));
                 self.session_mgr.push_turn("assistant", &reprompt_response);
             }
             response_already_recorded = true;
@@ -1650,19 +1644,30 @@ impl CoreOrchestrator {
         // 7b. Post-generation uncertainty retrieval (Phase 9).
         if let Some(trigger) = self.retrieval.detect_post_trigger(&full_response) {
             info!(session = %self.session_id, ?trigger, "Uncertainty marker — retrieving context");
-            match self.retrieval.retrieve(&self.engine, &embed_model, &trigger).await {
+            match self
+                .retrieval
+                .retrieve(&self.engine, &embed_model, &trigger)
+                .await
+            {
                 Ok(ctx) => {
                     let injection = self.retrieval.format_for_injection(&ctx);
                     if !injection.is_empty() {
                         let tool_msg = format!("[Retrieved context]\n{}", injection);
                         self.context.push_user(tool_msg.clone());
                         self.session_mgr.push_turn("retrieval", &tool_msg);
-                        let follow_model    = self.model_config.primary.clone();
+                        let follow_model = self.model_config.primary.clone();
                         let follow_messages = self.prepare_messages_for_inference(&[]);
-                        let follow_response = self.generate_and_stream(
-                            &follow_model, follow_messages, &trace_id, false, None,
-                        ).await?;
-                        self.context.push_assistant(strip_context_markers(&follow_response));
+                        let follow_response = self
+                            .generate_and_stream(
+                                &follow_model,
+                                follow_messages,
+                                &trace_id,
+                                false,
+                                None,
+                            )
+                            .await?;
+                        self.context
+                            .push_assistant(strip_context_markers(&follow_response));
                         self.session_mgr.push_turn("assistant", &follow_response);
                         info!(session = %self.session_id, "Uncertainty follow-up generated successfully");
                     }
@@ -1677,12 +1682,17 @@ impl CoreOrchestrator {
 
         // 7c. Scan the full response for an embedded action block.
         let (display_text, action_spec) = extract_action_block(&full_response);
-        let record_text = if display_text.is_empty() { &full_response } else { &display_text };
+        let record_text = if display_text.is_empty() {
+            &full_response
+        } else {
+            &display_text
+        };
 
         // 7d. Memory accumulation (Phase 9).
         if !record_text.is_empty() {
             let session_id = self.session_id.clone();
-            if let Err(e) = self.retrieval
+            if let Err(e) = self
+                .retrieval
                 .store_conversation_turn(&self.engine, &embed_model, record_text, &session_id)
                 .await
             {
@@ -1696,20 +1706,23 @@ impl CoreOrchestrator {
 
         // 8. Record assistant reply.
         if !record_text.is_empty() && !response_already_recorded {
-            self.context.push_assistant(strip_context_markers(record_text));
+            self.context
+                .push_assistant(strip_context_markers(record_text));
             self.session_mgr.push_turn("assistant", record_text);
         }
 
         // 8b. Embed and store the completed turn (Phase 21).
         if !full_response.is_empty() && !response_already_recorded {
             let turn_content = format!("User: {content}\nAssistant: {full_response}");
-            self.retrieval.embed_and_store_turn(
-                &self.engine,
-                &embed_model,
-                &self.session_id,
-                &trace_id,
-                &turn_content,
-            ).await;
+            self.retrieval
+                .embed_and_store_turn(
+                    &self.engine,
+                    &embed_model,
+                    &self.session_id,
+                    &trace_id,
+                    &turn_content,
+                )
+                .await;
         }
 
         // 8c. Extract and store implicit operator facts (Phase 22).
@@ -1718,7 +1731,9 @@ impl CoreOrchestrator {
             if !extracted.is_empty() {
                 for fact in &extracted {
                     let slug = slug_id(fact);
-                    self.retrieval.store_fact(&self.engine, &embed_model, &slug, fact).await;
+                    self.retrieval
+                        .store_fact(&self.engine, &embed_model, &slug, fact)
+                        .await;
                     info!(fact = %fact, "Implicit fact extracted and stored");
                 }
             }
@@ -1730,7 +1745,6 @@ impl CoreOrchestrator {
         // Phase 37.9 / T8: `spec` is `mut` so the self-send intercept can rewrite
         // the AppleScript body to a deterministic template before dispatch.
         if let Some(mut spec) = action_spec {
-
             // Command-query intercept guard.
             //
             // The personality instructs the model not to execute shell actions when the
@@ -1765,8 +1779,9 @@ impl CoreOrchestrator {
                 // small cost for catching the much more dangerous true positive.
                 if let ActionSpec::Shell { ref args, .. } = spec {
                     if is_off_host_request(&content) {
-                        let cmd_text = crate::action::executor::describe_normalized_shell_command(args)
-                            .unwrap_or_else(|| args.join(" "));
+                        let cmd_text =
+                            crate::action::executor::describe_normalized_shell_command(args)
+                                .unwrap_or_else(|| args.join(" "));
                         warn!(
                             session = %self.session_id,
                             query   = %content,
@@ -1792,8 +1807,9 @@ impl CoreOrchestrator {
                         // describe_normalized_shell_command returns the correct BSD
                         // equivalent when GNU flags are detected; falls back to the
                         // model's raw args when no rewrite is needed.
-                        let cmd_text = crate::action::executor::describe_normalized_shell_command(args)
-                            .unwrap_or_else(|| args.join(" "));
+                        let cmd_text =
+                            crate::action::executor::describe_normalized_shell_command(args)
+                                .unwrap_or_else(|| args.join(" "));
                         warn!(
                             session  = %self.session_id,
                             query    = %content,
@@ -1809,7 +1825,6 @@ impl CoreOrchestrator {
                         return Ok(());
                     }
                 }
-
             }
 
             // Phase 37.9 / T8: iMessage self-send intercept (runs at ALL depths).
@@ -1921,11 +1936,11 @@ impl CoreOrchestrator {
                     // than getting a generic "didn't work" response. Short verb phrases
                     // are TTS-friendly (Kokoro cuts long sentences awkwardly at commas).
                     let action_phrase = match &spec {
-                        ActionSpec::Shell { .. }       => "run that shell command",
+                        ActionSpec::Shell { .. } => "run that shell command",
                         ActionSpec::AppleScript { .. } => "run that AppleScript",
-                        ActionSpec::Browser { .. }     => "do that in the browser",
-                        ActionSpec::FileRead { .. }    => "read that file",
-                        ActionSpec::FileWrite { .. }   => "save that file",
+                        ActionSpec::Browser { .. } => "do that in the browser",
+                        ActionSpec::FileRead { .. } => "read that file",
+                        ActionSpec::FileWrite { .. } => "save that file",
                     };
                     let msg = format!(
                         "I tried to {action_phrase} twice with the same result. \
@@ -1947,7 +1962,11 @@ impl CoreOrchestrator {
 
             if category == ActionCategory::Destructive {
                 match self.action_engine.submit(spec, &trace_id).await {
-                    ActionOutcome::PendingApproval { action_id, description, category } => {
+                    ActionOutcome::PendingApproval {
+                        action_id,
+                        description,
+                        category,
+                    } => {
                         info!(
                             session     = %self.session_id,
                             trace_id    = %trace_id,
@@ -1982,8 +2001,8 @@ impl CoreOrchestrator {
                         let req = ActionRequest {
                             action_id,
                             description,
-                            category:    category.into(),
-                            payload:     String::new(),
+                            category: category.into(),
+                            payload: String::new(),
                         };
                         self.send_action_request(req, &trace_id).await?;
                         self.send_state(EntityState::Alert, &trace_id).await?;
@@ -1999,28 +2018,31 @@ impl CoreOrchestrator {
                     }
                 }
             } else {
-                let action_id  = uuid::Uuid::new_v4().to_string();
-                let executor   = self.action_engine.executor_handle();
-                let action_tx  = self.action_tx.clone();
-                let aid        = action_id.clone();
-                let tid        = trace_id.clone();
+                let action_id = uuid::Uuid::new_v4().to_string();
+                let executor = self.action_engine.executor_handle();
+                let action_tx = self.action_tx.clone();
+                let aid = action_id.clone();
+                let tid = trace_id.clone();
 
                 // Phase 36: flag iMessage-send AppleScripts so handle_action_result
                 // skips the continuation after a successful completion.
                 let is_terminal_workflow = is_terminal_send_action(&spec);
 
-                self.interactions.insert(action_id.clone(), Interaction {
-                    trace_id:         trace_id.clone(),
-                    stage:            InteractionStage::ActionInFlight,
-                    priority:         InteractionPriority::Active,
-                    created_at:       Instant::now(),
-                    // Phase 32: thread depth + original query through the chain.
-                    // agentic_depth is incremented here so handle_action_result can
-                    // enforce AGENTIC_MAX_DEPTH and pass it to the next continuation.
-                    agentic_depth:    result.agentic_depth + 1,
-                    original_content: content.clone(),
-                    is_terminal_workflow,
-                });
+                self.interactions.insert(
+                    action_id.clone(),
+                    Interaction {
+                        trace_id: trace_id.clone(),
+                        stage: InteractionStage::ActionInFlight,
+                        priority: InteractionPriority::Active,
+                        created_at: Instant::now(),
+                        // Phase 32: thread depth + original query through the chain.
+                        // agentic_depth is incremented here so handle_action_result can
+                        // enforce AGENTIC_MAX_DEPTH and pass it to the next continuation.
+                        agentic_depth: result.agentic_depth + 1,
+                        original_content: content.clone(),
+                        is_terminal_workflow,
+                    },
+                );
 
                 info!(
                     session       = %self.session_id,
@@ -2038,13 +2060,16 @@ impl CoreOrchestrator {
                 // continued in the background.
                 let action_handle = tokio::spawn(async move {
                     let outcome = executor.execute(&aid, &spec, category, None).await;
-                    let _ = action_tx.send(ActionResult {
-                        action_id: aid,
-                        outcome,
-                        trace_id:  tid,
-                    }).await;
+                    let _ = action_tx
+                        .send(ActionResult {
+                            action_id: aid,
+                            outcome,
+                            trace_id: tid,
+                        })
+                        .await;
                 });
-                self.in_flight_actions.insert(action_id.clone(), action_handle);
+                self.in_flight_actions
+                    .insert(action_id.clone(), action_handle);
 
                 self.send_state(EntityState::Focused, &trace_id).await?;
                 action_dispatched = true;
@@ -2073,7 +2098,7 @@ impl CoreOrchestrator {
         // the operator at least knows the chain ended rather than staring at an
         // entity that went IDLE with nothing to show for the action(s) it ran.
         let agentic_depth = result.agentic_depth;
-        let went_silent   = agentic_depth > 0
+        let went_silent = agentic_depth > 0
             && !action_is_pending
             && !action_dispatched
             && !tts_was_active
@@ -2111,7 +2136,7 @@ impl CoreOrchestrator {
     /// Behaviorally identical to receiving a `TextInput` with the same text.
     pub async fn handle_fast_transcript(
         &mut self,
-        text:     String,
+        text: String,
         trace_id: String,
     ) -> Result<(), OrchestratorError> {
         // Fast-path transcripts always come from STT (hotkey → voice).
@@ -2129,11 +2154,12 @@ impl CoreOrchestrator {
     /// so the select! loop remains responsive during the ~1–3s inference call.
     pub(crate) async fn handle_shell_command(
         &mut self,
-        command:   String,
-        cwd:       String,
+        command: String,
+        cwd: String,
         exit_code: Option<i32>,
     ) {
-        self.context_observer.update_shell_command(command.clone(), cwd.clone(), exit_code);
+        self.context_observer
+            .update_shell_command(command.clone(), cwd.clone(), exit_code);
         info!(
             session   = %self.session_id,
             command   = %command,
@@ -2152,7 +2178,11 @@ impl CoreOrchestrator {
         // inference is spawned as a background task. handle_shell_command returns
         // immediately; results arrive via gen_tx → handle_generation_complete.
         let is_error = exit_code.map_or(false, |c| c != 0 && c != 130);
-        if is_error && self.proactive_engine.should_fire(self.context_observer.snapshot()) {
+        if is_error
+            && self
+                .proactive_engine
+                .should_fire(self.context_observer.snapshot())
+        {
             let exit_nonzero = exit_code.unwrap(); // safe: is_error guarantees Some(non-zero)
             let trace_id = uuid::Uuid::new_v4().to_string();
 
@@ -2160,30 +2190,38 @@ impl CoreOrchestrator {
             // Background task receives Vec<Message> — no access to self after spawn.
             let proactive_user = crate::inference::engine::Message::user(
                 crate::proactive::ProactiveEngine::build_shell_error_prompt(
-                    &command, exit_nonzero, &cwd,
-                )
+                    &command,
+                    exit_nonzero,
+                    &cwd,
+                ),
             );
             let mut messages = self.personality.apply_to_messages(&[proactive_user]);
             if let Some(ax_summary) = self.context_observer.context_summary() {
-                messages.insert(1, crate::inference::engine::Message::system(
-                    format!("Context: {}", ax_summary)
-                ));
+                messages.insert(
+                    1,
+                    crate::inference::engine::Message::system(format!("Context: {}", ax_summary)),
+                );
             }
             // Shell: after Context: — same take_while ordering idiom.
             let shell_insert = messages.iter().take_while(|m| m.role == "system").count();
             messages.insert(
                 shell_insert,
-                crate::inference::engine::Message::system(
-                    format!("Shell: $ {} → exit {} in {}", command, exit_nonzero, cwd)
-                ),
+                crate::inference::engine::Message::system(format!(
+                    "Shell: $ {} → exit {} in {}",
+                    command, exit_nonzero, cwd
+                )),
             );
 
-            let engine  = self.engine.clone();
-            let tx      = self.tx.clone();
-            let gen_tx  = self.generation_tx.clone();
-            let model   = self.model_config.fast.clone();
-            let tts_arc = if self.voice.is_tts_available() { Some(self.voice.tts_arc()) } else { None };
-            let sess    = self.session_id.clone();
+            let engine = self.engine.clone();
+            let tx = self.tx.clone();
+            let gen_tx = self.generation_tx.clone();
+            let model = self.model_config.fast.clone();
+            let tts_arc = if self.voice.is_tts_available() {
+                Some(self.voice.tts_arc())
+            } else {
+                None
+            };
+            let sess = self.session_id.clone();
             let cmd_log = command.clone();
 
             // Burn the slot before spawning. An inference error keeps it burned
@@ -2191,8 +2229,16 @@ impl CoreOrchestrator {
             self.proactive_engine.record_fire();
 
             tokio::spawn(run_shell_error_proactive_background(
-                engine, tx, sess, model, messages, trace_id, tts_arc, gen_tx,
-                cmd_log, exit_nonzero,
+                engine,
+                tx,
+                sess,
+                model,
+                messages,
+                trace_id,
+                tts_arc,
+                gen_tx,
+                cmd_log,
+                exit_nonzero,
             ));
         }
     }
@@ -2270,7 +2316,10 @@ impl CoreOrchestrator {
     /// The caller must `drop(tts_tx)` after generation finishes to signal the task to exit.
     fn make_tts_channel(
         &self,
-    ) -> (Option<tokio::sync::mpsc::UnboundedSender<String>>, Option<tokio::task::JoinHandle<()>>) {
+    ) -> (
+        Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
         // Phase 34: TTS is only active when the current turn came from voice input (hotkey).
         // Typed HUD input always stays text-only — no synthesis wasted on muted output.
         if !self.voice.is_tts_available() || !self.voice_mode {
@@ -2278,9 +2327,9 @@ impl CoreOrchestrator {
         }
         use crate::voice::protocol::msg;
         let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let tts_arc    = self.voice.tts_arc();
+        let tts_arc = self.voice.tts_arc();
         let session_tx = self.tx.clone();
-        let mut seq    = 0u32;
+        let mut seq = 0u32;
 
         // Phase 38 / Codex finding [13]: capture this slot before spawning so
         // we can publish the handle's AbortHandle into it after spawn returns.
@@ -2289,7 +2338,7 @@ impl CoreOrchestrator {
         let tts_handle_slot = self.tts_handle_abort.clone();
 
         let handle = tokio::spawn(async move {
-            use crate::ipc::proto::{server_event, AudioResponse, EntityStateChange, EntityState};
+            use crate::ipc::proto::{server_event, AudioResponse, EntityState, EntityStateChange};
             let mut first_sentence = true;
             while let Some(sentence) = srx.recv().await {
                 // Transition to SPEAKING on the first sentence so the entity
@@ -2308,16 +2357,24 @@ impl CoreOrchestrator {
                 }
                 let mut guard = tts_arc.lock().await;
                 if let Some(client) = guard.as_mut() {
-                    if client.write_frame(msg::TEXT_INPUT, sentence.as_bytes()).await.is_err() {
+                    if client
+                        .write_frame(msg::TEXT_INPUT, sentence.as_bytes())
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     loop {
                         // Phase 38 / Codex [14]: bound the per-frame read so a
                         // stalled kokoro synth thread can't park us forever.
                         let frame_result = match tokio::time::timeout(
-                            std::time::Duration::from_secs(crate::constants::TTS_FRAME_READ_TIMEOUT_SECS),
+                            std::time::Duration::from_secs(
+                                crate::constants::TTS_FRAME_READ_TIMEOUT_SECS,
+                            ),
                             client.read_frame(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Err(_elapsed) => {
                                 warn!(
                                     "TTS read_frame timed out after {}s — kokoro stalled, breaking out",
@@ -2332,15 +2389,19 @@ impl CoreOrchestrator {
                                 let evt = ServerEvent {
                                     trace_id: String::new(),
                                     event: Some(server_event::Event::AudioResponse(
-                                        AudioResponse { data: pcm, sequence_number: seq, is_final: false },
+                                        AudioResponse {
+                                            data: pcm,
+                                            sequence_number: seq,
+                                            is_final: false,
+                                        },
                                     )),
                                 };
                                 let _ = session_tx.send(Ok(evt)).await;
                                 seq += 1;
                             }
                             Ok(Some((msg::TTS_DONE, _))) => break,
-                            Ok(Some(_)) => {}   // discard unexpected frames
-                            _           => break,
+                            Ok(Some(_)) => {} // discard unexpected frames
+                            _ => break,
                         }
                     }
                 }
@@ -2364,8 +2425,8 @@ impl CoreOrchestrator {
     ///  10. Transition entity to IDLE (or ALERT if DESTRUCTIVE action is pending)
     async fn handle_text_input(
         &mut self,
-        content:    String,
-        trace_id:   String,
+        content: String,
+        trace_id: String,
         from_voice: bool,
     ) -> Result<(), OrchestratorError> {
         // Phase 34: record whether this turn came from voice so make_tts_channel can
@@ -2424,8 +2485,16 @@ impl CoreOrchestrator {
             let stripped = trimmed_lc.trim_end_matches(|c: char| c.is_ascii_punctuation());
             let is_cancel = matches!(
                 stripped,
-                "stop" | "cancel" | "halt" | "abort" | "nevermind" | "never mind"
-                    | "enough" | "quit" | "ok stop" | "ok cancel"
+                "stop"
+                    | "cancel"
+                    | "halt"
+                    | "abort"
+                    | "nevermind"
+                    | "never mind"
+                    | "enough"
+                    | "quit"
+                    | "ok stop"
+                    | "ok cancel"
             );
             if is_cancel {
                 info!(
@@ -2484,10 +2553,20 @@ impl CoreOrchestrator {
             let trimmed_lc = content.trim().to_lowercase();
             let is_yes = matches!(
                 trimmed_lc.as_str(),
-                "yes" | "y" | "ok" | "okay" | "sure" | "do it" | "go" | "go ahead"
-                    | "approve" | "approved" | "confirm" | "confirmed"
+                "yes"
+                    | "y"
+                    | "ok"
+                    | "okay"
+                    | "sure"
+                    | "do it"
+                    | "go"
+                    | "go ahead"
+                    | "approve"
+                    | "approved"
+                    | "confirm"
+                    | "confirmed"
             );
-            let is_no  = matches!(
+            let is_no = matches!(
                 trimmed_lc.as_str(),
                 "no" | "n" | "deny" | "denied" | "reject" | "rejected" | "don't"
             );
@@ -2533,15 +2612,22 @@ impl CoreOrchestrator {
             self.send_state(EntityState::Thinking, &trace_id).await?;
             match cmd {
                 MemoryCommand::Remember(fact) => {
-                    let slug  = slug_id(&fact);
+                    let slug = slug_id(&fact);
                     let model = self.model_config.embed.clone();
-                    self.retrieval.store_fact(&self.engine, &model, &slug, &fact).await;
-                    self.send_text("Got it. I'll remember that.", true, &trace_id).await?;
+                    self.retrieval
+                        .store_fact(&self.engine, &model, &slug, &fact)
+                        .await;
+                    self.send_text("Got it. I'll remember that.", true, &trace_id)
+                        .await?;
                 }
                 MemoryCommand::Forget(target) => {
-                    let slug  = slug_id(&target);
+                    let slug = slug_id(&target);
                     let found = self.retrieval.delete_fact(&slug);
-                    let reply = if found { "Forgotten." } else { "I don't have that stored." };
+                    let reply = if found {
+                        "Forgotten."
+                    } else {
+                        "I don't have that stored."
+                    };
                     self.send_text(reply, true, &trace_id).await?;
                 }
                 MemoryCommand::List => {
@@ -2549,7 +2635,8 @@ impl CoreOrchestrator {
                     let reply = if facts.is_empty() {
                         "I don't have anything stored about you yet.".to_string()
                     } else {
-                        facts.iter()
+                        facts
+                            .iter()
                             .enumerate()
                             .map(|(i, e)| format!("{}. {}", i + 1, e.content))
                             .collect::<Vec<_>>()
@@ -2595,30 +2682,30 @@ impl CoreOrchestrator {
         // Recall is started speculatively — it may be discarded if routing selects
         // Vision tier or if retrieval-first fires. The wasted embed call costs ~200ms
         // but these paths are rare (Vision queries, time/version questions).
-        let context_messages  = self.context.messages();
-        let engine_ref        = &self.engine;
-        let embed_model       = self.model_config.embed.clone();
-        let retrieval_ref     = &self.retrieval;
-        let router_ref        = &self.router;
-        let content_ref       = &content;
-        let embed_is_warm     = self.embed_model_warm.load(Ordering::Relaxed);
+        let context_messages = self.context.messages();
+        let engine_ref = &self.engine;
+        let embed_model = self.model_config.embed.clone();
+        let retrieval_ref = &self.retrieval;
+        let router_ref = &self.router;
+        let content_ref = &content;
+        let embed_is_warm = self.embed_model_warm.load(Ordering::Relaxed);
 
         // Skip memory recall when embed model isn't warm yet. The first query after
         // startup often arrives before mxbai finishes loading (embed warms in parallel
         // with the FAST model, but fast model warmup is awaited — embed is not).
         // Blocking here would freeze inference for ~30s. Skipping recall is harmless
         // for the first turn; the model is warm for all subsequent turns.
-        let (decision, speculative_recall) = tokio::join!(
-            async { router_ref.route(&context_messages) },
-            async {
+        let (decision, speculative_recall) =
+            tokio::join!(async { router_ref.route(&context_messages) }, async {
                 if embed_is_warm {
-                    retrieval_ref.recall_relevant(engine_ref, &embed_model, content_ref).await
+                    retrieval_ref
+                        .recall_relevant(engine_ref, &embed_model, content_ref)
+                        .await
                 } else {
                     warn!("Embed model not yet warm — skipping memory recall for this turn");
                     vec![]
                 }
-            },
-        );
+            },);
 
         // Round 3 / systemic fix: when a domain block triggers (iMessage, yt-dlp, etc.),
         // the query requires multi-step agentic execution (sqlite3 → contacts → format).
@@ -2627,8 +2714,15 @@ impl CoreOrchestrator {
         // for complex, tool-dependent workflows.
         let matched_domains: Vec<String> = {
             let ql = content.to_lowercase();
-            self.personality.profile().domains.iter()
-                .filter(|d| d.triggers.iter().any(|t| !t.is_empty() && ql.contains(&t.to_lowercase())))
+            self.personality
+                .profile()
+                .domains
+                .iter()
+                .filter(|d| {
+                    d.triggers
+                        .iter()
+                        .any(|t| !t.is_empty() && ql.contains(&t.to_lowercase()))
+                })
                 .map(|d| d.name.clone())
                 .collect()
         };
@@ -2657,7 +2751,9 @@ impl CoreOrchestrator {
         // both variety and tone. The cost of routing trivial joke requests to
         // PRIMARY is one extra second of latency, vs the benefit of actual
         // humor instead of a recycled brothel/ladder joke.
-        if matches!(decision.model, ModelId::Fast) && is_joke_request(&content) {
+        let joke_override_fired =
+            matches!(decision.model, ModelId::Fast) && is_joke_request(&content);
+        if joke_override_fired {
             info!(
                 session  = %self.session_id,
                 trace_id = %trace_id,
@@ -2668,6 +2764,47 @@ impl CoreOrchestrator {
                 "{} [joke override: → PRIMARY for warmer delivery]",
                 decision.reasoning
             );
+            // Arm the joke-continuation window so iteration follow-ups
+            // ("not NSFW enough", "explain the joke", "another one") stay
+            // on PRIMARY instead of falling back to FAST.
+            self.last_joke_turn_at = Some(Instant::now());
+        }
+
+        // Joke continuation override.
+        //
+        // Once a joke turn has happened, operator-style iterations don't
+        // contain the word "joke" — they're criticism ("wasn't NSFW enough"),
+        // correction ("doesn't need to be about a step dad"), or explanation
+        // requests ("why is that a dirty joke?"). Without continuation,
+        // these route to FAST and qwen3:8b either repeats its template or
+        // hallucinates explanations of jokes that were never told.
+        //
+        // Symmetric to vision continuation: timestamp + reference detector +
+        // bounded window. Only fires when the current decision is FAST (we
+        // never demote PRIMARY-or-higher routes here).
+        if matches!(decision.model, ModelId::Fast) {
+            if let Some(last_joke) = self.last_joke_turn_at {
+                let elapsed = last_joke.elapsed().as_secs();
+                if elapsed <= crate::constants::JOKE_CONTINUATION_WINDOW_SECS
+                    && is_joke_followup_reference(&content)
+                {
+                    info!(
+                        session         = %self.session_id,
+                        trace_id        = %trace_id,
+                        secs_since_last = elapsed,
+                        "Joke continuation: follow-up to recent joke turn — upgrading FAST → PRIMARY"
+                    );
+                    decision.model = ModelId::Primary;
+                    decision.reasoning = format!(
+                        "{} [joke continuation: iteration/criticism/explain marker within {}s window → PRIMARY]",
+                        decision.reasoning,
+                        crate::constants::JOKE_CONTINUATION_WINDOW_SECS
+                    );
+                    // Refresh the timestamp so a chain of iterations all stay
+                    // on PRIMARY instead of expiring mid-conversation.
+                    self.last_joke_turn_at = Some(Instant::now());
+                }
+            }
         }
 
         // Vision continuation override.
@@ -2804,17 +2941,22 @@ impl CoreOrchestrator {
             // Failures are diagnostic — never abort dispatch on a ps() error.
             match self.engine.ps().await {
                 Ok(entries) => {
-                    let summary: Vec<String> = entries.iter().map(|e| {
-                        let vram_gb = (e.size_vram as f64) / 1_073_741_824.0;
-                        let size_gb = (e.size as f64) / 1_073_741_824.0;
-                        let spill_pct = if e.size > 0 {
-                            100.0 - (e.size_vram as f64 / e.size as f64 * 100.0)
-                        } else { 0.0 };
-                        format!(
-                            "{}: vram={:.1}GB size={:.1}GB cpu_spill={:.0}%",
-                            e.name, vram_gb, size_gb, spill_pct
-                        )
-                    }).collect();
+                    let summary: Vec<String> = entries
+                        .iter()
+                        .map(|e| {
+                            let vram_gb = (e.size_vram as f64) / 1_073_741_824.0;
+                            let size_gb = (e.size as f64) / 1_073_741_824.0;
+                            let spill_pct = if e.size > 0 {
+                                100.0 - (e.size_vram as f64 / e.size as f64 * 100.0)
+                            } else {
+                                0.0
+                            };
+                            format!(
+                                "{}: vram={:.1}GB size={:.1}GB cpu_spill={:.0}%",
+                                e.name, vram_gb, size_gb, spill_pct
+                            )
+                        })
+                        .collect();
                     info!(
                         session   = %self.session_id,
                         trace_id  = %trace_id,
@@ -2841,24 +2983,29 @@ impl CoreOrchestrator {
             // Fire-and-forget — no join, no cancellation. At worst these log
             // lines arrive after HEAVY finishes, which is still useful telemetry.
             let engine_clone = self.engine.clone();
-            let session_id   = self.session_id.to_string();
-            let trace_clone  = trace_id.clone();
+            let session_id = self.session_id.to_string();
+            let trace_clone = trace_id.clone();
             tokio::spawn(async move {
                 for (delay_secs, label) in [(8u64, "t+8s"), (25u64, "t+25s")] {
                     tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                     match engine_clone.ps().await {
                         Ok(entries) => {
-                            let summary: Vec<String> = entries.iter().map(|e| {
-                                let vram_gb = (e.size_vram as f64) / 1_073_741_824.0;
-                                let size_gb = (e.size as f64) / 1_073_741_824.0;
-                                let spill_pct = if e.size > 0 {
-                                    100.0 - (e.size_vram as f64 / e.size as f64 * 100.0)
-                                } else { 0.0 };
-                                format!(
-                                    "{}: vram={:.1}GB size={:.1}GB cpu_spill={:.0}%",
-                                    e.name, vram_gb, size_gb, spill_pct
-                                )
-                            }).collect();
+                            let summary: Vec<String> = entries
+                                .iter()
+                                .map(|e| {
+                                    let vram_gb = (e.size_vram as f64) / 1_073_741_824.0;
+                                    let size_gb = (e.size as f64) / 1_073_741_824.0;
+                                    let spill_pct = if e.size > 0 {
+                                        100.0 - (e.size_vram as f64 / e.size as f64 * 100.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    format!(
+                                        "{}: vram={:.1}GB size={:.1}GB cpu_spill={:.0}%",
+                                        e.name, vram_gb, size_gb, spill_pct
+                                    )
+                                })
+                                .collect();
                             info!(
                                 session   = %session_id,
                                 trace_id  = %trace_clone,
@@ -2895,11 +3042,13 @@ impl CoreOrchestrator {
                 trace_id = %trace_id,
                 "Retrieval-first query detected — fetching before model call"
             );
-            self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id).await?;
+            self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id)
+                .await?;
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
                 self.retrieval.retrieve_web_only(&content),
-            ).await;
+            )
+            .await;
             let injection = match result {
                 Ok(Ok(r)) => {
                     info!(
@@ -2911,8 +3060,8 @@ impl CoreOrchestrator {
                         "Retrieved fact for query '{query}':\n{text}\n(Source: {source})\n\n\
                          Use the retrieved fact above to answer the question. \
                          Do not speculate beyond it.",
-                        query  = content,
-                        text   = r.text,
+                        query = content,
+                        text = r.text,
                         source = r.source,
                     )
                 }
@@ -2955,11 +3104,20 @@ impl CoreOrchestrator {
             &content,
             matches!(decision.category, Category::RetrievalFirst),
         ) {
-            self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id).await?;
-            match self.retrieval.retrieve(&self.engine, &embed_model, &trigger).await {
+            self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id)
+                .await?;
+            match self
+                .retrieval
+                .retrieve(&self.engine, &embed_model, &trigger)
+                .await
+            {
                 Ok(ctx) => {
                     let text = self.retrieval.format_for_injection(&ctx);
-                    if text.is_empty() { None } else { Some(text) }
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
                 }
                 Err(e) => {
                     warn!(
@@ -2980,12 +3138,24 @@ impl CoreOrchestrator {
         //     Discarded when retrieval_first_done (already grounded in web content) or
         //     when routing to Vision (image provides primary context). In those cases
         //     the speculative embed call was wasted (~200ms) — acceptable for rare paths.
-        let recall_entries: Vec<crate::retrieval::store::MemoryEntry> =
-            if retrieval_first_done || decision.model == ModelId::Vision {
-                vec![]  // Discard speculative recall
-            } else {
-                speculative_recall
-            };
+        let suppress_joke_recall =
+            should_suppress_joke_memory_recall(&content, self.last_joke_turn_at);
+        let recall_entries: Vec<crate::retrieval::store::MemoryEntry> = if retrieval_first_done
+            || decision.model == ModelId::Vision
+            || suppress_joke_recall
+        {
+            if suppress_joke_recall && !speculative_recall.is_empty() {
+                info!(
+                    session  = %self.session_id,
+                    trace_id = %trace_id,
+                    hits     = speculative_recall.len(),
+                    "Joke context — suppressing semantic memory recall to avoid stale joke bleed-through"
+                );
+            }
+            vec![] // Discard speculative recall
+        } else {
+            speculative_recall
+        };
 
         // 4. Build message list via prepare_messages_for_inference().
         //
@@ -3005,10 +3175,11 @@ impl CoreOrchestrator {
         // The retrieval_idx is computed by counting leading system messages so that
         // it's correct regardless of whether a context snapshot was injected.
         if let Some(injection) = pre_retrieval_injection {
-            let retrieval_idx = messages.iter()
-                .take_while(|m| m.role == "system")
-                .count();
-            messages.insert(retrieval_idx, crate::inference::engine::Message::system(injection));
+            let retrieval_idx = messages.iter().take_while(|m| m.role == "system").count();
+            messages.insert(
+                retrieval_idx,
+                crate::inference::engine::Message::system(injection),
+            );
             info!(session = %self.session_id, "Pre-retrieval context injected into generation request");
         }
 
@@ -3038,9 +3209,10 @@ impl CoreOrchestrator {
                 // role="user" per the Round 3 fix. Without this filter, a combined
                 // retrieval+vision path would attach the screenshot to the synthetic
                 // `[Retrieved] …` turn and the vision model would receive text-only.
-                let target = messages.iter_mut().rev().find(|m|
-                    m.role == "user" && !is_tool_result_content(&m.content)
-                );
+                let target = messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
                 if let Some(last_user) = target {
                     last_user.images = Some(vec![image_b64]);
                     image_attached = true;
@@ -3084,8 +3256,8 @@ impl CoreOrchestrator {
         //    ModelId::ollama_name() resolves the tier to the operator-configured Ollama tag.
         //    ModelId::unload_after_use() is true for Heavy, and for Vision when Vision
         //    resolves to a different model than PRIMARY (see unload_after_use docs).
-        let model_name        = decision.model.ollama_name(&self.model_config).to_string();
-        let unload_after      = decision.model.unload_after_use(&self.model_config);
+        let model_name = decision.model.ollama_name(&self.model_config).to_string();
+        let unload_after = decision.model.unload_after_use(&self.model_config);
         let needs_context_cap = decision.model.needs_context_cap();
 
         // Phase 10 — TTS: if available, spawn a concurrent synthesis task and wire
@@ -3104,15 +3276,15 @@ impl CoreOrchestrator {
         // replaced with a fresh Arc so subsequent generations start with a clean token.
         //
         // Results arrive via generation_tx → gen_rx in server.rs → handle_generation_complete.
-        let cancel_token       = self.cancel_token.clone();
-        let gen_tx             = self.generation_tx.clone();
-        let engine             = self.engine.clone();
-        let tx_bg              = self.tx.clone();
-        let session_id_bg      = self.session_id.clone();
-        let embed_model        = self.model_config.embed.clone();
+        let cancel_token = self.cancel_token.clone();
+        let gen_tx = self.generation_tx.clone();
+        let engine = self.engine.clone();
+        let tx_bg = self.tx.clone();
+        let session_id_bg = self.session_id.clone();
+        let embed_model = self.model_config.embed.clone();
         // Phase 38 / Codex [7]: producer abort slot — populated by run_generation_background
         // after engine.generate_stream_cancellable returns Ok, drained by abort_active_generation.
-        let producer_abort_bg  = self.generation_producer_abort.clone();
+        let producer_abort_bg = self.generation_producer_abort.clone();
 
         // Phase 0 (Adaptive Context Compiler): pre-build prompt-size telemetry.
         //
@@ -3134,7 +3306,8 @@ impl CoreOrchestrator {
         {
             let mut prompt_chars: usize = 0;
             for m in &messages {
-                prompt_chars += m.role.chars().count() + m.content.chars().count() + 4; // role wrappers
+                prompt_chars += m.role.chars().count() + m.content.chars().count() + 4;
+                // role wrappers
             }
             let prompt_estimated_tokens = (prompt_chars / 4).max(1);
             info!(
@@ -3164,7 +3337,7 @@ impl CoreOrchestrator {
             gen_tx,
             content,
             embed_model,
-            0, // agentic_depth: user-initiated turn is depth 0
+            0,                 // agentic_depth: user-initiated turn is depth 0
             producer_abort_bg, // Phase 38 / Codex [7]
         )));
 
@@ -3195,21 +3368,29 @@ impl CoreOrchestrator {
     /// and result in `Ok("")` — the caller continues with an empty response.
     async fn generate_and_stream(
         &mut self,
-        model_name:   &str,
-        messages:     Vec<crate::inference::engine::Message>,
-        trace_id:     &str,
+        model_name: &str,
+        messages: Vec<crate::inference::engine::Message>,
+        trace_id: &str,
         unload_after: bool,
-        tts_tx:       Option<UnboundedSender<String>>,  // MOVED in; dropped when fn returns
+        tts_tx: Option<UnboundedSender<String>>, // MOVED in; dropped when fn returns
     ) -> Result<String, OrchestratorError> {
         let req = GenerationRequest {
-            model_name:   model_name.to_string(),
+            model_name: model_name.to_string(),
             messages,
-            temperature:        None,
+            temperature: None,
             unload_after,
-            keep_alive_override: if unload_after { None } else { Some(FAST_MODEL_KEEP_ALIVE) },
-            num_predict:         None,
+            keep_alive_override: if unload_after {
+                None
+            } else {
+                Some(FAST_MODEL_KEEP_ALIVE)
+            },
+            num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override:    if unload_after { Some(LARGE_MODEL_NUM_CTX) } else { None },
+            num_ctx_override: if unload_after {
+                Some(LARGE_MODEL_NUM_CTX)
+            } else {
+                None
+            },
         };
 
         let mut full_response = String::new();
@@ -3230,7 +3411,8 @@ impl CoreOrchestrator {
                     error    = %e,
                     "generate_stream failed before streaming started"
                 );
-                self.send_text("(inference error — check core logs)", true, trace_id).await?;
+                self.send_text("(inference error — check core logs)", true, trace_id)
+                    .await?;
             }
             Ok(mut rx) => {
                 while let Some(chunk_result) = rx.recv().await {
@@ -3243,7 +3425,7 @@ impl CoreOrchestrator {
                             // splitter.push() may return 0, 1, or more complete sentences per token.
                             if let Some(ref tx) = tts_tx {
                                 for sentence in splitter.push(&chunk.content) {
-                                    let _ = tx.send(sentence);  // UnboundedSender::send never blocks
+                                    let _ = tx.send(sentence); // UnboundedSender::send never blocks
                                 }
                             }
                         }
@@ -3295,7 +3477,7 @@ impl CoreOrchestrator {
     /// Context injection into inference happens in Phase 9+ via `context_summary()`.
     async fn handle_system_event(
         &mut self,
-        sys:      SystemEvent,
+        sys: SystemEvent,
         trace_id: String,
     ) -> Result<(), OrchestratorError> {
         match SystemEventType::try_from(sys.r#type) {
@@ -3332,15 +3514,16 @@ impl CoreOrchestrator {
                         crate::ipc::proto::ConfigSync {
                             hotkey: Some(crate::ipc::proto::HotkeyConfig {
                                 key_code: hk.key_code,
-                                ctrl:     hk.ctrl,
-                                shift:    hk.shift,
-                                cmd:      hk.cmd,
-                                option:   hk.option,
+                                ctrl: hk.ctrl,
+                                shift: hk.shift,
+                                cmd: hk.cmd,
+                                option: hk.option,
                             }),
-                        }
+                        },
                     )),
                 };
-                self.tx.send(Ok(sync_event))
+                self.tx
+                    .send(Ok(sync_event))
                     .await
                     .map_err(|_| OrchestratorError::ChannelClosed)?;
                 debug!(
@@ -3384,7 +3567,11 @@ impl CoreOrchestrator {
                                 || summary.contains("dexter-core")
                                 || summary.contains("dexter_core")
                                 || summary.contains("make run");
-                            if !is_own_output && self.proactive_engine.should_fire(self.context_observer.snapshot()) {
+                            if !is_own_output
+                                && self
+                                    .proactive_engine
+                                    .should_fire(self.context_observer.snapshot())
+                            {
                                 self.proactive_engine.record_fire();
                                 self.do_proactive_response(&summary, &trace_id).await?;
                             }
@@ -3406,7 +3593,9 @@ impl CoreOrchestrator {
                 info!(session = %self.session_id, "Screen locked — context observation paused");
             }
             Ok(SystemEventType::AxElementChanged) => {
-                let changed = self.context_observer.update_from_element_changed(&sys.payload);
+                let changed = self
+                    .context_observer
+                    .update_from_element_changed(&sys.payload);
                 if changed {
                     info!(
                         session = %self.session_id,
@@ -3428,7 +3617,9 @@ impl CoreOrchestrator {
             Ok(SystemEventType::ClipboardChanged) => {
                 // Phase 28: operator copied text. Update ContextObserver; content is
                 // injected passively into the next inference request. No proactive trigger.
-                let changed = self.context_observer.update_from_clipboard_changed(&sys.payload);
+                let changed = self
+                    .context_observer
+                    .update_from_clipboard_changed(&sys.payload);
                 if changed {
                     info!(
                         session    = %self.session_id,
@@ -3461,7 +3652,7 @@ impl CoreOrchestrator {
                 // "gates on there actually being a task to cancel" semantics — token
                 // is only swapped when something was actually aborted).
                 let info_session = self.session_id.clone();
-                let info_state   = self.current_state;
+                let info_state = self.current_state;
                 let was_aborted = self.abort_active_generation();
                 if was_aborted {
                     info!(
@@ -3560,7 +3751,7 @@ impl CoreOrchestrator {
     /// No silent drop — the action is always logged so it can be audited.
     async fn handle_ui_action(
         &mut self,
-        action:   UiAction,
+        action: UiAction,
         trace_id: String,
     ) -> Result<(), OrchestratorError> {
         info!(
@@ -3592,8 +3783,13 @@ impl CoreOrchestrator {
             "ActionApproval received"
         );
 
-        let outcome = self.action_engine
-            .resolve(&approval.action_id, approval.approved, &approval.operator_note)
+        let outcome = self
+            .action_engine
+            .resolve(
+                &approval.action_id,
+                approval.approved,
+                &approval.operator_note,
+            )
             .await;
 
         // Phase 19: clear the action guard before any awaits so that if something
@@ -3603,7 +3799,9 @@ impl CoreOrchestrator {
         // Speak a brief result to the operator and, when TTS is available, let
         // AUDIO_PLAYBACK_COMPLETE drive the IDLE transition (same as regular TTS).
         let spoke = match outcome {
-            ActionOutcome::Completed { action_id, output, .. } => {
+            ActionOutcome::Completed {
+                action_id, output, ..
+            } => {
                 info!(
                     session   = %self.session_id,
                     action_id = %action_id,
@@ -3625,7 +3823,8 @@ impl CoreOrchestrator {
                     error     = %error,
                     "Action rejected"
                 );
-                self.speak_action_feedback(&format!("Action cancelled: {error}"), &trace_id).await?
+                self.speak_action_feedback(&format!("Action cancelled: {error}"), &trace_id)
+                    .await?
             }
             ActionOutcome::PendingApproval { .. } => {
                 // resolve() should never return PendingApproval — this is a logic error.
@@ -3686,7 +3885,11 @@ impl CoreOrchestrator {
         const ACTION_OUTPUT_MAX_CHARS: usize = 4_000;
 
         let (feedback_text, rewritten_to) = match &result.outcome {
-            ActionOutcome::Completed { output, rewritten_to, .. } => {
+            ActionOutcome::Completed {
+                output,
+                rewritten_to,
+                ..
+            } => {
                 let trimmed = output.trim();
                 let text = if trimmed.is_empty() {
                     "Done.".to_string()
@@ -3745,8 +3948,8 @@ impl CoreOrchestrator {
         // tool output from real operator input inside the prompt.
         let tool_label = match &result.outcome {
             ActionOutcome::Completed { .. } => "[Action result",
-            ActionOutcome::Rejected  { .. } => "[Action FAILED",
-            _                               => "[Action result",
+            ActionOutcome::Rejected { .. } => "[Action FAILED",
+            _ => "[Action result",
         };
         let label_text = if let Some(ref cmd) = rewritten_to {
             format!("{tool_label} (normalized to macOS BSD: `{cmd}`): {feedback_text}]")
@@ -3766,10 +3969,10 @@ impl CoreOrchestrator {
         // response text (before the next action block, if any) is what the operator
         // hears. This avoids a robotic "Done." between every step in a multi-step task.
 
-        let agentic_depth        = interaction.agentic_depth;
-        let original_content     = interaction.original_content.clone();
+        let agentic_depth = interaction.agentic_depth;
+        let original_content = interaction.original_content.clone();
         let is_terminal_workflow = interaction.is_terminal_workflow;
-        interaction.stage        = InteractionStage::Complete;
+        interaction.stage = InteractionStage::Complete;
 
         info!(
             session       = %self.session_id,
@@ -3822,21 +4025,22 @@ impl CoreOrchestrator {
         // appended: the model sees the tool result at the tail and continues naturally.
         let messages = self.prepare_messages_for_inference(&[]);
 
-        self.send_state(EntityState::Thinking, &result.trace_id).await?;
+        self.send_state(EntityState::Thinking, &result.trace_id)
+            .await?;
 
         let (tts_tx_opt, tts_join_handle) = self.make_tts_channel();
-        let cancel_token       = self.cancel_token.clone();
-        let gen_tx             = self.generation_tx.clone();
-        let engine             = self.engine.clone();
-        let tx_bg              = self.tx.clone();
-        let session_id_bg      = self.session_id.clone();
-        let embed_model        = self.model_config.embed.clone();
+        let cancel_token = self.cancel_token.clone();
+        let gen_tx = self.generation_tx.clone();
+        let engine = self.engine.clone();
+        let tx_bg = self.tx.clone();
+        let session_id_bg = self.session_id.clone();
+        let embed_model = self.model_config.embed.clone();
         // Phase 38 / Codex [7]: producer abort slot — see analogous comment in
         // the user-initiated dispatch above.
-        let producer_abort_bg  = self.generation_producer_abort.clone();
+        let producer_abort_bg = self.generation_producer_abort.clone();
         // Always use FAST model for agentic steps — better instruction-following
         // for structured action format; complexity is low (next-step selection).
-        let model_name    = self.model_config.fast.clone();
+        let model_name = self.model_config.fast.clone();
 
         self.generation_handle = Some(tokio::spawn(run_generation_background(
             engine,
@@ -3845,15 +4049,15 @@ impl CoreOrchestrator {
             model_name,
             messages,
             result.trace_id.clone(),
-            false,           // unload_after: FAST model stays pinned
-            false,           // needs_context_cap: FAST fits in VRAM at native context
+            false, // unload_after: FAST model stays pinned
+            false, // needs_context_cap: FAST fits in VRAM at native context
             tts_tx_opt,
             tts_join_handle,
             cancel_token,
             gen_tx,
             original_content, // content = original user query for memory embedding
             embed_model,
-            agentic_depth,    // passed through so handle_generation_complete can record it
+            agentic_depth, // passed through so handle_generation_complete can record it
             producer_abort_bg, // Phase 38 / Codex [7]
         )));
 
@@ -3908,23 +4112,37 @@ impl CoreOrchestrator {
     /// this helper. Calling `generate_stream` with `&self.context.messages()` directly
     /// skips steps 1 and 2, producing an out-of-persona response that lacks the
     /// uncertainty protocol instructions and current machine context.
-    pub(crate) fn prepare_messages_for_inference(&self, recall: &[crate::retrieval::store::MemoryEntry]) -> Vec<crate::inference::engine::Message> {
+    pub(crate) fn prepare_messages_for_inference(
+        &self,
+        recall: &[crate::retrieval::store::MemoryEntry],
+    ) -> Vec<crate::inference::engine::Message> {
         // Round 3 / T1.2: extract the last genuine user message to drive domain-block
         // selection in the personality layer. Tool-result injections (identified by
         // is_tool_result_content) are skipped — they don't represent operator intent.
         // For an agentic continuation with no trailing genuine query, we fall back to
         // the Interaction's `original_content` (the query that started the chain).
-        let query_hint: Option<&str> = self.context.messages().iter().rev()
+        let query_hint: Option<&str> = self
+            .context
+            .messages()
+            .iter()
+            .rev()
             .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
             .map(|m| m.content.as_str());
         let matched = query_hint
-            .map(|q| self.personality.profile().domains.iter()
-                .filter(|d| {
-                    let ql = q.to_lowercase();
-                    d.triggers.iter().any(|t| !t.is_empty() && ql.contains(&t.to_lowercase()))
-                })
-                .map(|d| d.name.clone())
-                .collect::<Vec<_>>())
+            .map(|q| {
+                self.personality
+                    .profile()
+                    .domains
+                    .iter()
+                    .filter(|d| {
+                        let ql = q.to_lowercase();
+                        d.triggers
+                            .iter()
+                            .any(|t| !t.is_empty() && ql.contains(&t.to_lowercase()))
+                    })
+                    .map(|d| d.name.clone())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         if !matched.is_empty() {
             debug!(
@@ -3936,7 +4154,8 @@ impl CoreOrchestrator {
 
         // Step 1: apply personality — returns a new Vec with system prompt at index 0.
         //         The hint conditionally injects matching domain blocks (T1.2).
-        let mut messages = self.personality
+        let mut messages = self
+            .personality
             .apply_to_messages_for(self.context.messages(), query_hint);
 
         // Step 2a: always inject the current wall-clock time.
@@ -3946,27 +4165,39 @@ impl CoreOrchestrator {
             let ts = chrono::Local::now()
                 .format("%a %b %-d %Y %-I:%M %p %Z")
                 .to_string();
-            let pos = if messages.first()
+            let pos = if messages
+                .first()
                 .map(|m| m.role.as_str() == "system")
                 .unwrap_or(false)
-            { 1 } else { 0 };
+            {
+                1
+            } else {
+                0
+            };
             // Natural-language sentence rather than "DateTime: X" colon-label format.
             // If the model echoes "The current time is X" it reads as a valid answer;
             // if it echoed the old "DateTime: X" label, stripping left an empty response.
-            messages.insert(pos, crate::inference::engine::Message::system(
-                format!("The current time is {ts}.")
-            ));
+            messages.insert(
+                pos,
+                crate::inference::engine::Message::system(format!("The current time is {ts}.")),
+            );
         }
 
         // Step 2b: inject Phase 16 context snapshot (app / element) after the DateTime line.
         if let Some(summary) = self.context_observer.context_summary() {
-            let insert_pos = if messages.first()
+            let insert_pos = if messages
+                .first()
                 .map(|m| m.role.as_str() == "system")
                 .unwrap_or(false)
-            { 1 } else { 0 };
-            messages.insert(insert_pos, crate::inference::engine::Message::system(
-                format!("Context: {summary}")
-            ));
+            {
+                1
+            } else {
+                0
+            };
+            messages.insert(
+                insert_pos,
+                crate::inference::engine::Message::system(format!("Context: {summary}")),
+            );
             debug!(
                 session = %self.session_id,
                 context = %summary,
@@ -3974,7 +4205,43 @@ impl CoreOrchestrator {
             );
         }
 
-        // Step 2b/2c (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
+        // Step 2c: turn-scoped comedy instruction.
+        //
+        // The core personality already says not to refuse, but aligned local
+        // models still reflexively refuse or sanitize identity-themed joke
+        // requests ("tell me a gay joke") unless the comedy task is made
+        // explicit near the active turn.
+        // Keep this scoped to actual joke requests and recent joke follow-ups so it
+        // does not weaken serious safety-sensitive action/tool prompts.
+        let comedy_mode_active = query_hint
+            .map(|q| {
+                is_joke_request(q)
+                    || self
+                        .last_joke_turn_at
+                        .map(|last_joke| {
+                            last_joke.elapsed().as_secs()
+                                <= crate::constants::JOKE_CONTINUATION_WINDOW_SECS
+                                && is_joke_followup_reference(q)
+                        })
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if comedy_mode_active {
+            let insert_pos = messages
+                .iter()
+                .take_while(|m| m.role.as_str() == "system")
+                .count();
+            messages.insert(
+                insert_pos,
+                crate::inference::engine::Message::system(COMEDY_MODE_INSTRUCTION),
+            );
+            debug!(
+                session = %self.session_id,
+                "Comedy mode instruction injected into inference request"
+            );
+        }
+
+        // Step 2d (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
         //
         // Prior implementation injected these as labelled system messages:
         //   ["Clipboard: ...", "Shell: $ cmd → exit 0 in /dir"]
@@ -4001,7 +4268,9 @@ impl CoreOrchestrator {
         // treating the clipboard as the answer to unrelated questions like "my messages".
         let clipboard_opt = {
             let raw_clip = self.context_observer.clipboard_summary();
-            let query_lower = messages.iter().rev()
+            let query_lower = messages
+                .iter()
+                .rev()
                 .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
                 .map(|m| m.content.to_lowercase())
                 .unwrap_or_default();
@@ -4011,8 +4280,14 @@ impl CoreOrchestrator {
                 || query_lower.contains("paste")
                 || query_lower.contains("what i just")
                 || query_lower.contains("what did i");
-            let clipboard_is_fresh = self.context_observer.snapshot().clipboard_changed_at
-                .map(|t| (chrono::Utc::now() - t).num_seconds() < crate::constants::CLIPBOARD_RECENCY_SECS)
+            let clipboard_is_fresh = self
+                .context_observer
+                .snapshot()
+                .clipboard_changed_at
+                .map(|t| {
+                    (chrono::Utc::now() - t).num_seconds()
+                        < crate::constants::CLIPBOARD_RECENCY_SECS
+                })
                 .unwrap_or(false);
             if user_references_clipboard || clipboard_is_fresh {
                 raw_clip
@@ -4026,13 +4301,18 @@ impl CoreOrchestrator {
                 None
             }
         };
-        let shell_opt     = self.context_observer.snapshot().last_shell_command.as_ref()
+        let shell_opt = self
+            .context_observer
+            .snapshot()
+            .last_shell_command
+            .as_ref()
             .filter(|shell| {
                 let age_secs = (chrono::Utc::now() - shell.received_at).num_seconds();
                 age_secs < crate::constants::SHELL_CONTEXT_MAX_AGE_SECS as i64
             })
             .map(|shell| {
-                let exit_str = shell.exit_code
+                let exit_str = shell
+                    .exit_code
                     .map_or_else(|| "?".to_string(), |c| c.to_string());
                 format!(
                     "$ {} \u{2192} exit {} in {}",
@@ -4041,9 +4321,10 @@ impl CoreOrchestrator {
             });
 
         if clipboard_opt.is_some() || shell_opt.is_some() {
-            let target = messages.iter_mut().rev().find(|m|
-                m.role == "user" && !is_tool_result_content(&m.content)
-            );
+            let target = messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
             if let Some(user_msg) = target {
                 let mut prefix_parts: Vec<String> = Vec::with_capacity(2);
                 if let Some(ref clip) = clipboard_opt {
@@ -4120,7 +4401,8 @@ impl CoreOrchestrator {
             // disclaimer before reading any retrieved text — structurally stronger
             // conditioning than a single block header.
             if !prior_session.is_empty() {
-                let body: String = prior_session.iter()
+                let body: String = prior_session
+                    .iter()
                     .map(|e| {
                         let neutralized = neutralize_role_markers(&e.content);
                         format!(
@@ -4141,16 +4423,20 @@ impl CoreOrchestrator {
             }
 
             if !current_session.is_empty() {
-                let body: String = current_session.iter()
+                let body: String = current_session
+                    .iter()
                     .map(|e| e.content.as_str())
                     .collect::<Vec<_>>()
                     .join(" | ");
                 // Insert AFTER the prior-session block (if any) so the order in the
                 // final message list is [prior-session, current-session, …history].
                 let pos = messages.iter().take_while(|m| m.role == "system").count();
-                messages.insert(pos, crate::inference::engine::Message::system(
-                    format!("Earlier in this conversation: {body}")
-                ));
+                messages.insert(
+                    pos,
+                    crate::inference::engine::Message::system(format!(
+                        "Earlier in this conversation: {body}"
+                    )),
+                );
             }
         }
 
@@ -4203,7 +4489,8 @@ impl CoreOrchestrator {
             tokio::process::Command::new("screencapture")
                 .args(["-x", "-m", "-t", "png", &path])
                 .status(),
-        ).await;
+        )
+        .await;
 
         match spawn_result {
             Ok(Ok(status)) if status.success() => {
@@ -4258,17 +4545,20 @@ impl CoreOrchestrator {
     /// back to LISTENING (only if actively SPEAKING or THINKING).
     async fn send_state(
         &mut self,
-        state:    EntityState,
+        state: EntityState,
         trace_id: &str,
     ) -> Result<(), OrchestratorError> {
-        self.current_state = state;  // Phase 27: track for handle_barge_in
+        self.current_state = state; // Phase 27: track for handle_barge_in
         let event = ServerEvent {
             trace_id: trace_id.to_string(),
             event: Some(server_event::Event::EntityState(EntityStateChange {
                 state: state.into(),
             })),
         };
-        self.tx.send(Ok(event)).await.map_err(|_| OrchestratorError::ChannelClosed)
+        self.tx
+            .send(Ok(event))
+            .await
+            .map_err(|_| OrchestratorError::ChannelClosed)
     }
 
     /// Send a text response chunk to Swift.
@@ -4284,7 +4574,7 @@ impl CoreOrchestrator {
         let event = ServerEvent {
             trace_id: uuid::Uuid::new_v4().to_string(),
             event: Some(server_event::Event::TextResponse(TextResponse {
-                content:  text.to_string(),
+                content: text.to_string(),
                 is_final,
             })),
         };
@@ -4295,18 +4585,21 @@ impl CoreOrchestrator {
 
     async fn send_text(
         &self,
-        content:  &str,
+        content: &str,
         is_final: bool,
         trace_id: &str,
     ) -> Result<(), OrchestratorError> {
         let event = ServerEvent {
             trace_id: trace_id.to_string(),
             event: Some(server_event::Event::TextResponse(TextResponse {
-                content:  content.to_string(),
+                content: content.to_string(),
                 is_final,
             })),
         };
-        self.tx.send(Ok(event)).await.map_err(|_| OrchestratorError::ChannelClosed)
+        self.tx
+            .send(Ok(event))
+            .await
+            .map_err(|_| OrchestratorError::ChannelClosed)
     }
 
     // ── Phase 24c: VadHint adaptive endpoint detection ────────────────────────
@@ -4338,18 +4631,27 @@ impl CoreOrchestrator {
 
         // Patterns that strongly predict a yes/no or very-short reply.
         let yes_no_patterns = [
-            "should i",     "shall i",      "do you want",
-            "would you like", "is that ok",  "is that correct",
-            "right?",       "yes or no",    "want me to",
-            "go ahead",     "is that right", "does that",
-            "can i",        "may i",
+            "should i",
+            "shall i",
+            "do you want",
+            "would you like",
+            "is that ok",
+            "is that correct",
+            "right?",
+            "yes or no",
+            "want me to",
+            "go ahead",
+            "is that right",
+            "does that",
+            "can i",
+            "may i",
         ];
 
         if yes_no_patterns.iter().any(|p| sentence.contains(p)) {
             // 8 frames × ~32ms/frame ≈ 256ms — enough for "yes", "no", "sure"
             Some(8)
         } else {
-            None  // Open question or declarative — keep default 640ms
+            None // Open question or declarative — keep default 640ms
         }
     }
 
@@ -4377,19 +4679,19 @@ impl CoreOrchestrator {
     /// slot, `Some("[SILENT]")` does not (the caller calls `undo_fire()`).
     async fn collect_generation(
         &mut self,
-        model_name:   &str,
-        messages:     Vec<crate::inference::engine::Message>,
-        trace_id:     &str,
+        model_name: &str,
+        messages: Vec<crate::inference::engine::Message>,
+        trace_id: &str,
     ) -> Result<Option<String>, OrchestratorError> {
         let req = GenerationRequest {
-            model_name:   model_name.to_string(),
+            model_name: model_name.to_string(),
             messages,
-            temperature:         None,
-            unload_after:        false, // proactive uses FAST — never unloaded after use
+            temperature: None,
+            unload_after: false, // proactive uses FAST — never unloaded after use
             keep_alive_override: None,
-            num_predict:         None,
+            num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override:    None,
+            num_ctx_override: None,
         };
 
         match self.engine.generate_stream(req).await {
@@ -4434,10 +4736,7 @@ impl CoreOrchestrator {
                     }
                 };
 
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    accumulate,
-                ).await {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), accumulate).await {
                     Ok(()) => Ok(Some(full_response)),
                     Err(_elapsed) => {
                         warn!(
@@ -4467,7 +4766,7 @@ impl CoreOrchestrator {
     /// They are ephemeral ambient observations, not part of the operator's dialogue.
     async fn do_proactive_response(
         &mut self,
-        summary:  &str,
+        summary: &str,
         trace_id: &str,
     ) -> Result<(), OrchestratorError> {
         // 1. THINKING state — operator sees Dexter is about to speak.
@@ -4477,13 +4776,14 @@ impl CoreOrchestrator {
         //    No conversation history is included — the observation is context-driven,
         //    not dialogue-driven.
         let proactive_user = crate::inference::engine::Message::user(
-            crate::proactive::ProactiveEngine::build_proactive_prompt(summary)
+            crate::proactive::ProactiveEngine::build_proactive_prompt(summary),
         );
         let mut messages = self.personality.apply_to_messages(&[proactive_user]);
         // Insert context snapshot at index 1 (after personality at 0).
-        messages.insert(1, crate::inference::engine::Message::system(
-            format!("Context: {summary}")
-        ));
+        messages.insert(
+            1,
+            crate::inference::engine::Message::system(format!("Context: {summary}")),
+        );
         // Insert wall-clock timestamp so the model doesn't hallucinate the date.
         // qwen3 has no real-time clock — without this injection it invents dates from
         // training-data patterns (e.g. "The current time is Wednesday 2025-04-16…").
@@ -4492,15 +4792,18 @@ impl CoreOrchestrator {
             let ts = chrono::Local::now()
                 .format("%a %b %-d %Y %-I:%M %p %Z")
                 .to_string();
-            messages.insert(1, crate::inference::engine::Message::system(
-                format!("The current time is {ts}.")
-            ));
+            messages.insert(
+                1,
+                crate::inference::engine::Message::system(format!("The current time is {ts}.")),
+            );
         }
         // Final layout: [0] personality  [1] datetime  [2] context  [3] proactive user prompt
 
         // 3. Collect the full response before displaying — enables [SILENT] check.
         let model_name = self.model_config.fast.clone();
-        let response_opt = self.collect_generation(&model_name, messages, trace_id).await?;
+        let response_opt = self
+            .collect_generation(&model_name, messages, trace_id)
+            .await?;
 
         // 4. Check for inference failure or [SILENT] opt-out.
         //
@@ -4525,7 +4828,9 @@ impl CoreOrchestrator {
                 self.send_state(EntityState::Idle, trace_id).await?;
                 return Ok(());
             }
-            Some(ref text) if crate::proactive::ProactiveEngine::should_suppress_proactive(text) => {
+            Some(ref text)
+                if crate::proactive::ProactiveEngine::should_suppress_proactive(text) =>
+            {
                 // Either the model chose silence OR it returned low-value filler
                 // (bare time/date/day). Refund the slot so the next context
                 // change gets a fresh shot at a real observation.
@@ -4570,23 +4875,31 @@ impl CoreOrchestrator {
         //    playing, Swift sends AUDIO_PLAYBACK_COMPLETE → orchestrator → EntityState::Idle.
         //    This ensures the entity stays THINKING throughout playback, not just synthesis.
         if self.voice.is_tts_available() {
-            let tts_arc        = self.voice.tts_arc();
-            let text_bytes     = response.trim().as_bytes().to_vec();
-            let session_tx     = self.tx.clone();
+            let tts_arc = self.voice.tts_arc();
+            let text_bytes = response.trim().as_bytes().to_vec();
+            let session_tx = self.tx.clone();
             let trace_id_clone = trace_id.to_string();
 
             let handle = tokio::spawn(async move {
                 use crate::ipc::proto::{server_event, AudioResponse};
                 let mut guard = tts_arc.lock().await;
                 if let Some(client) = guard.as_mut() {
-                    if client.write_frame(msg::TEXT_INPUT, &text_bytes).await.is_ok() {
+                    if client
+                        .write_frame(msg::TEXT_INPUT, &text_bytes)
+                        .await
+                        .is_ok()
+                    {
                         let mut seq = 0u32;
                         loop {
                             // Phase 38 / Codex [14]: bound per-frame read.
                             let frame_result = match tokio::time::timeout(
-                                std::time::Duration::from_secs(crate::constants::TTS_FRAME_READ_TIMEOUT_SECS),
+                                std::time::Duration::from_secs(
+                                    crate::constants::TTS_FRAME_READ_TIMEOUT_SECS,
+                                ),
                                 client.read_frame(),
-                            ).await {
+                            )
+                            .await
+                            {
                                 Err(_elapsed) => {
                                     warn!(
                                         "TTS read_frame timed out after {}s — kokoro stalled, breaking out",
@@ -4602,9 +4915,9 @@ impl CoreOrchestrator {
                                         trace_id: String::new(),
                                         event: Some(server_event::Event::AudioResponse(
                                             AudioResponse {
-                                                data:            pcm,
+                                                data: pcm,
                                                 sequence_number: seq,
-                                                is_final:        false,
+                                                is_final: false,
                                             },
                                         )),
                                     };
@@ -4621,17 +4934,17 @@ impl CoreOrchestrator {
                                         trace_id: trace_id_clone,
                                         event: Some(server_event::Event::AudioResponse(
                                             AudioResponse {
-                                                data:            vec![],
+                                                data: vec![],
                                                 sequence_number: seq,
-                                                is_final:        true,
+                                                is_final: true,
                                             },
                                         )),
                                     };
                                     let _ = session_tx.send(Ok(sentinel)).await;
                                     break;
                                 }
-                                Ok(Some(_)) => {}   // discard unexpected frames
-                                _           => break,
+                                Ok(Some(_)) => {} // discard unexpected frames
+                                _ => break,
                             }
                         }
                     }
@@ -4653,14 +4966,17 @@ impl CoreOrchestrator {
     /// Emit an `ActionRequest` ServerEvent to Swift, which will present a confirmation dialog.
     async fn send_action_request(
         &self,
-        req:      ActionRequest,
+        req: ActionRequest,
         trace_id: &str,
     ) -> Result<(), OrchestratorError> {
         let event = ServerEvent {
             trace_id: trace_id.to_string(),
             event: Some(server_event::Event::ActionRequest(req)),
         };
-        self.tx.send(Ok(event)).await.map_err(|_| OrchestratorError::ChannelClosed)
+        self.tx
+            .send(Ok(event))
+            .await
+            .map_err(|_| OrchestratorError::ChannelClosed)
     }
 
     /// Speak a short action-result message: send text to the Swift UI and synthesize via TTS.
@@ -4675,7 +4991,7 @@ impl CoreOrchestrator {
     /// Returns `false` when TTS is unavailable; the caller must send IDLE directly.
     async fn speak_action_feedback(
         &mut self,
-        text:     &str,
+        text: &str,
         trace_id: &str,
     ) -> Result<bool, OrchestratorError> {
         // Always show the feedback text in the Swift UI so it's visible even
@@ -4686,9 +5002,9 @@ impl CoreOrchestrator {
             return Ok(false);
         }
 
-        let tts_arc        = self.voice.tts_arc();
-        let text_bytes     = text.as_bytes().to_vec();
-        let session_tx     = self.tx.clone();
+        let tts_arc = self.voice.tts_arc();
+        let text_bytes = text.as_bytes().to_vec();
+        let session_tx = self.tx.clone();
         let trace_id_clone = trace_id.to_string();
 
         // Identical pattern to do_proactive_response §6 (TTS delivery):
@@ -4697,14 +5013,22 @@ impl CoreOrchestrator {
             use crate::ipc::proto::{server_event, AudioResponse};
             let mut guard = tts_arc.lock().await;
             if let Some(client) = guard.as_mut() {
-                if client.write_frame(msg::TEXT_INPUT, &text_bytes).await.is_ok() {
+                if client
+                    .write_frame(msg::TEXT_INPUT, &text_bytes)
+                    .await
+                    .is_ok()
+                {
                     let mut seq = 0u32;
                     loop {
                         // Phase 38 / Codex [14]: bound per-frame read.
                         let frame_result = match tokio::time::timeout(
-                            std::time::Duration::from_secs(crate::constants::TTS_FRAME_READ_TIMEOUT_SECS),
+                            std::time::Duration::from_secs(
+                                crate::constants::TTS_FRAME_READ_TIMEOUT_SECS,
+                            ),
                             client.read_frame(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Err(_elapsed) => {
                                 warn!(
                                     "TTS read_frame timed out after {}s — kokoro stalled, breaking out",
@@ -4718,11 +5042,13 @@ impl CoreOrchestrator {
                             Ok(Some((msg::TTS_AUDIO, pcm))) => {
                                 let evt = ServerEvent {
                                     trace_id: String::new(),
-                                    event: Some(server_event::Event::AudioResponse(AudioResponse {
-                                        data:            pcm,
-                                        sequence_number: seq,
-                                        is_final:        false,
-                                    })),
+                                    event: Some(server_event::Event::AudioResponse(
+                                        AudioResponse {
+                                            data: pcm,
+                                            sequence_number: seq,
+                                            is_final: false,
+                                        },
+                                    )),
                                 };
                                 let _ = session_tx.send(Ok(evt)).await;
                                 seq += 1;
@@ -4733,17 +5059,19 @@ impl CoreOrchestrator {
                                 // AUDIO_PLAYBACK_COMPLETE, and the orchestrator transitions to IDLE.
                                 let sentinel = ServerEvent {
                                     trace_id: trace_id_clone,
-                                    event: Some(server_event::Event::AudioResponse(AudioResponse {
-                                        data:            vec![],
-                                        sequence_number: seq,
-                                        is_final:        true,
-                                    })),
+                                    event: Some(server_event::Event::AudioResponse(
+                                        AudioResponse {
+                                            data: vec![],
+                                            sequence_number: seq,
+                                            is_final: true,
+                                        },
+                                    )),
                                 };
                                 let _ = session_tx.send(Ok(sentinel)).await;
                                 break;
                             }
-                            Ok(Some(_)) => {}   // discard unexpected frames
-                            _           => break,
+                            Ok(Some(_)) => {} // discard unexpected frames
+                            _ => break,
                         }
                     }
                 }
@@ -4761,8 +5089,8 @@ impl CoreOrchestrator {
 /// Returns `true` if the send succeeded; `false` if the channel is closed
 /// (the session ended while generation was running — the task should stop).
 async fn send_text_bg(
-    tx:       &mpsc::Sender<Result<ServerEvent, Status>>,
-    content:  &str,
+    tx: &mpsc::Sender<Result<ServerEvent, Status>>,
+    content: &str,
     is_final: bool,
     trace_id: &str,
 ) -> bool {
@@ -4770,7 +5098,7 @@ async fn send_text_bg(
     let event = ServerEvent {
         trace_id: trace_id.to_string(),
         event: Some(server_event::Event::TextResponse(TextResponse {
-            content:  content.to_string(),
+            content: content.to_string(),
             is_final,
         })),
     };
@@ -4779,11 +5107,11 @@ async fn send_text_bg(
 
 /// Send a `VadHint` event from a background task (no `&self` reference).
 async fn send_vad_hint_bg(
-    tx:             &mpsc::Sender<Result<ServerEvent, Status>>,
+    tx: &mpsc::Sender<Result<ServerEvent, Status>>,
     silence_frames: u32,
-    trace_id:       &str,
+    trace_id: &str,
 ) -> bool {
-    use crate::ipc::proto::{VadHint, server_event};
+    use crate::ipc::proto::{server_event, VadHint};
     let event = ServerEvent {
         trace_id: trace_id.to_string(),
         event: Some(server_event::Event::VadHint(VadHint { silence_frames })),
@@ -4804,26 +5132,26 @@ async fn send_vad_hint_bg(
 /// Results are delivered via `gen_tx` to `gen_rx` in the server.rs `select!` loop.
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_background(
-    engine:            crate::inference::engine::InferenceEngine,
-    tx:                mpsc::Sender<Result<ServerEvent, Status>>,
-    session_id:        String,
-    model_name:        String,
-    messages:          Vec<crate::inference::engine::Message>,
-    trace_id:          String,
-    unload_after:      bool,
+    engine: crate::inference::engine::InferenceEngine,
+    tx: mpsc::Sender<Result<ServerEvent, Status>>,
+    session_id: String,
+    model_name: String,
+    messages: Vec<crate::inference::engine::Message>,
+    trace_id: String,
+    unload_after: bool,
     // Phase 37.7: orthogonal to unload_after. unload_after governs keep_alive
     // (evict after this request); needs_context_cap governs num_ctx (cap KV
     // cache on load). Heavy wants both; Code wants cap but stays warm; Primary
     // wants neither. Previously conflated via `unload_after`, which left CODE
     // queries uncapped → 128k-token KV cache → CPU spill → stuck-think timeout.
     needs_context_cap: bool,
-    tts_tx_opt:        Option<UnboundedSender<String>>,
+    tts_tx_opt: Option<UnboundedSender<String>>,
     tts_join_handle: Option<JoinHandle<()>>,
-    cancel_token:    Arc<AtomicBool>,
-    gen_tx:          mpsc::Sender<GenerationResult>,
-    content:         String,
-    embed_model:     String,
-    agentic_depth:   u8,
+    cancel_token: Arc<AtomicBool>,
+    gen_tx: mpsc::Sender<GenerationResult>,
+    content: String,
+    embed_model: String,
+    agentic_depth: u8,
     // Phase 38 / Codex finding [7]: published into by this task after a
     // successful `generate_stream_cancellable` call so the orchestrator's
     // cancel paths can abort the producer task directly. Cleared (set to
@@ -4831,23 +5159,25 @@ async fn run_generation_background(
     // a long-finished task.
     producer_abort_slot: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
 ) {
-    use crate::inference::{
-        interceptor::{InterceptorOutput, UncertaintyInterceptor},
-    };
-    use crate::voice::sentence::SentenceSplitter;
+    use crate::inference::interceptor::{InterceptorOutput, UncertaintyInterceptor};
     use crate::ipc::proto::{server_event, AudioResponse};
+    use crate::voice::sentence::SentenceSplitter;
 
     let req = GenerationRequest {
-        model_name:          model_name,
+        model_name: model_name,
         messages,
-        temperature:         None,
+        temperature: None,
         unload_after,
         // Pin non-unload models (FAST + PRIMARY) at 999m so real inference
         // requests don't reset the TTL to Ollama's default 5m, which would
         // evict the model after inactivity and cause a 15–20s cold-load on
         // the next query. HEAVY model (unload_after=true) is handled separately.
-        keep_alive_override: if unload_after { None } else { Some(FAST_MODEL_KEEP_ALIVE) },
-        num_predict:         None,
+        keep_alive_override: if unload_after {
+            None
+        } else {
+            Some(FAST_MODEL_KEEP_ALIVE)
+        },
+        num_predict: None,
         // Phase 37.6 / Cluster-E, extended Phase 37.7: cold-load grace window.
         // Large on-demand models (Heavy deepseek-r1:32b, Code deepseek-coder-v2:16b)
         // can spend 30–60s loading off the USB-SSD with zero bytes on the HTTP
@@ -4865,15 +5195,19 @@ async fn run_generation_background(
         // making first-token latency exceed our 90s wall timeout. 8k is
         // plenty for Dexter's single-turn reasoning/code workloads. FAST
         // and PRIMARY keep their model-trained defaults.
-        num_ctx_override: if needs_context_cap { Some(LARGE_MODEL_NUM_CTX) } else { None },
+        num_ctx_override: if needs_context_cap {
+            Some(LARGE_MODEL_NUM_CTX)
+        } else {
+            None
+        },
     };
 
-    let mut full_response  = String::new();
-    let mut interceptor    = UncertaintyInterceptor::new();
+    let mut full_response = String::new();
+    let mut interceptor = UncertaintyInterceptor::new();
     let mut intercepted_q: Option<String> = None;
-    let mut splitter       = SentenceSplitter::new();
+    let mut splitter = SentenceSplitter::new();
     let mut last_sentence: Option<String> = None;
-    let mut cancelled      = false;
+    let mut cancelled = false;
     // T1.4: per-generation telemetry accumulators.
     let telemetry_model = req.model_name.clone();
     let mut token_count: u32 = 0;
@@ -4902,7 +5236,13 @@ async fn run_generation_background(
                 error    = %e,
                 "generate_stream failed before streaming started"
             );
-            let _ = send_text_bg(&tx, "(generation timed out — check core logs)", true, &trace_id).await;
+            let _ = send_text_bg(
+                &tx,
+                "(generation timed out — check core logs)",
+                true,
+                &trace_id,
+            )
+            .await;
         }
         Ok(stream) => {
             // Publish the producer's abort handle so the orchestrator's cancel
@@ -4975,9 +5315,9 @@ async fn run_generation_background(
                 //      redundant with the tokio::time::timeout above, but covers the
                 //      case where a chunk landed just before the deadline.
                 let elapsed_secs = gen_started.elapsed().as_secs();
-                let stuck_timeout = full_response.is_empty()
-                    && elapsed_secs > GENERATION_WALL_TIMEOUT_SECS;
-                let hard_timeout  = elapsed_secs > GENERATION_HARD_TIMEOUT_SECS;
+                let stuck_timeout =
+                    full_response.is_empty() && elapsed_secs > GENERATION_WALL_TIMEOUT_SECS;
+                let hard_timeout = elapsed_secs > GENERATION_HARD_TIMEOUT_SECS;
                 if cancel_token.load(Ordering::Relaxed) || stuck_timeout || hard_timeout {
                     if stuck_timeout {
                         warn!(
@@ -5125,7 +5465,9 @@ async fn run_generation_background(
                             }
                         }
                         if let Some(ref sentence) = last_sentence {
-                            if let Some(frames) = CoreOrchestrator::classify_expected_response(sentence) {
+                            if let Some(frames) =
+                                CoreOrchestrator::classify_expected_response(sentence)
+                            {
                                 let _ = send_vad_hint_bg(&tx, frames, &trace_id).await;
                             }
                         }
@@ -5168,9 +5510,9 @@ async fn run_generation_background(
             let sentinel = ServerEvent {
                 trace_id: trace_id.clone(),
                 event: Some(server_event::Event::AudioResponse(AudioResponse {
-                    data:            vec![],
-                    sequence_number: 0,   // AudioPlayer ignores seqnum on is_final=true
-                    is_final:        true,
+                    data: vec![],
+                    sequence_number: 0, // AudioPlayer ignores seqnum on is_final=true
+                    is_final: true,
                 })),
             };
             let _ = tx.send(Ok(sentinel)).await;
@@ -5189,12 +5531,12 @@ async fn run_generation_background(
     let total_elapsed = gen_started.elapsed();
     let first_token_ms = first_token_at.map(|t| t.duration_since(gen_started).as_millis() as u64);
     let telemetry = GenerationTelemetry {
-        model:          telemetry_model,
+        model: telemetry_model,
         first_token_ms,
-        total_ms:       total_elapsed.as_millis() as u64,
+        total_ms: total_elapsed.as_millis() as u64,
         token_count,
         cancelled,
-        response_len:   full_response.len(),
+        response_len: full_response.len(),
         agentic_depth,
     };
     info!(
@@ -5219,19 +5561,21 @@ async fn run_generation_background(
     }
 
     // Deliver result. If the channel is closed (session ended), drop silently.
-    let _ = gen_tx.send(GenerationResult {
-        cancelled,
-        full_response,
-        intercepted_q,
-        tts_was_active,
-        trace_id,
-        content,
-        embed_model,
-        is_shell_proactive: false,
-        proactive_silent:   false,
-        agentic_depth,
-        telemetry,
-    }).await;
+    let _ = gen_tx
+        .send(GenerationResult {
+            cancelled,
+            full_response,
+            intercepted_q,
+            tts_was_active,
+            trace_id,
+            content,
+            embed_model,
+            is_shell_proactive: false,
+            proactive_silent: false,
+            agentic_depth,
+            telemetry,
+        })
+        .await;
 }
 
 // ── run_shell_error_proactive_background ─────────────────────────────────────
@@ -5250,41 +5594,41 @@ async fn run_generation_background(
 /// TTS delivery and IDLE transition are handled here.
 /// `handle_generation_complete` skips both for `is_shell_proactive` results.
 async fn run_shell_error_proactive_background(
-    engine:     crate::inference::engine::InferenceEngine,
-    tx:         mpsc::Sender<Result<ServerEvent, Status>>,
+    engine: crate::inference::engine::InferenceEngine,
+    tx: mpsc::Sender<Result<ServerEvent, Status>>,
     session_id: String,
     model_name: String,
-    messages:   Vec<crate::inference::engine::Message>,
-    trace_id:   String,
-    tts_arc:    Option<Arc<tokio::sync::Mutex<Option<crate::voice::WorkerClient>>>>,
-    gen_tx:     mpsc::Sender<GenerationResult>,
-    command:    String,   // structured log fields
-    exit_code:  i32,      // structured log fields
+    messages: Vec<crate::inference::engine::Message>,
+    trace_id: String,
+    tts_arc: Option<Arc<tokio::sync::Mutex<Option<crate::voice::WorkerClient>>>>,
+    gen_tx: mpsc::Sender<GenerationResult>,
+    command: String, // structured log fields
+    exit_code: i32,  // structured log fields
 ) {
-    use crate::ipc::proto::{server_event, AudioResponse, EntityStateChange, EntityState};
+    use crate::ipc::proto::{server_event, AudioResponse, EntityState, EntityStateChange};
     use crate::voice::protocol::msg;
 
     // T1.4: minimal telemetry for shell-proactive (non-streaming, single-shot).
     // We only track model + total_ms + cancelled; token-level counters aren't
     // meaningful because the response is collected in one shot via `collect_generation`.
-    let proactive_started       = std::time::Instant::now();
+    let proactive_started = std::time::Instant::now();
     let proactive_model_for_log = model_name.clone();
     let make_proactive_telemetry = |len: usize| GenerationTelemetry {
-        model:          proactive_model_for_log.clone(),
+        model: proactive_model_for_log.clone(),
         first_token_ms: None,
-        total_ms:       proactive_started.elapsed().as_millis() as u64,
-        token_count:    0,
-        cancelled:      false,
-        response_len:   len,
-        agentic_depth:  0,
+        total_ms: proactive_started.elapsed().as_millis() as u64,
+        token_count: 0,
+        cancelled: false,
+        response_len: len,
+        agentic_depth: 0,
     };
 
     // Send EntityState without &mut self.
     // Proactive is non-streaming — barge-in cancellation is not supported;
     // self.current_state tracking is not needed for this path.
     let send_entity_state_bg = |state: EntityState| {
-        let tx2  = tx.clone();
-        let tid  = trace_id.clone();
+        let tx2 = tx.clone();
+        let tid = trace_id.clone();
         async move {
             let evt = ServerEvent {
                 trace_id: tid,
@@ -5304,12 +5648,12 @@ async fn run_shell_error_proactive_background(
     let req = crate::inference::engine::GenerationRequest {
         model_name,
         messages,
-        temperature:         None,
-        unload_after:        false, // FAST model — never unloaded after use
+        temperature: None,
+        unload_after: false, // FAST model — never unloaded after use
         keep_alive_override: None,
-        num_predict:         None,
+        num_predict: None,
         inactivity_timeout_override_secs: None,
-        num_ctx_override:    None,
+        num_ctx_override: None,
     };
 
     let response_text: Option<String> = match engine.generate_stream(req).await {
@@ -5344,7 +5688,7 @@ async fn run_shell_error_proactive_background(
                 }
             };
             match tokio::time::timeout(std::time::Duration::from_secs(30), collect).await {
-                Ok(())     => Some(full),
+                Ok(()) => Some(full),
                 Err(_elapsed) => {
                     warn!(
                         session  = %session_id,
@@ -5362,13 +5706,21 @@ async fn run_shell_error_proactive_background(
         None => {
             send_entity_state_bg(EntityState::Idle).await;
             let telemetry = make_proactive_telemetry(0);
-            let _ = gen_tx.send(GenerationResult {
-                cancelled: false, full_response: String::new(),
-                intercepted_q: None, tts_was_active: false,
-                trace_id, content: String::new(), embed_model: String::new(),
-                is_shell_proactive: true, proactive_silent: false, agentic_depth: 0,
-                telemetry,
-            }).await;
+            let _ = gen_tx
+                .send(GenerationResult {
+                    cancelled: false,
+                    full_response: String::new(),
+                    intercepted_q: None,
+                    tts_was_active: false,
+                    trace_id,
+                    content: String::new(),
+                    embed_model: String::new(),
+                    is_shell_proactive: true,
+                    proactive_silent: false,
+                    agentic_depth: 0,
+                    telemetry,
+                })
+                .await;
             return;
         }
         Some(text) => text,
@@ -5391,13 +5743,21 @@ async fn run_shell_error_proactive_background(
         );
         send_entity_state_bg(EntityState::Idle).await;
         let telemetry = make_proactive_telemetry(0);
-        let _ = gen_tx.send(GenerationResult {
-            cancelled: false, full_response: String::new(),
-            intercepted_q: None, tts_was_active: false,
-            trace_id, content: String::new(), embed_model: String::new(),
-            is_shell_proactive: true, proactive_silent: true, agentic_depth: 0,
-            telemetry,
-        }).await;
+        let _ = gen_tx
+            .send(GenerationResult {
+                cancelled: false,
+                full_response: String::new(),
+                intercepted_q: None,
+                tts_was_active: false,
+                trace_id,
+                content: String::new(),
+                embed_model: String::new(),
+                is_shell_proactive: true,
+                proactive_silent: true,
+                agentic_depth: 0,
+                telemetry,
+            })
+            .await;
         return;
     }
 
@@ -5415,22 +5775,30 @@ async fn run_shell_error_proactive_background(
     // 6. TTS delivery — identical pattern to do_proactive_response §6.
     //    Identical TTS block: if this changes, update do_proactive_response too.
     let tts_was_active = if let Some(tts_arc) = tts_arc {
-        let text_bytes     = response.trim().as_bytes().to_vec();
-        let session_tx     = tx.clone();
+        let text_bytes = response.trim().as_bytes().to_vec();
+        let session_tx = tx.clone();
         let trace_id_clone = trace_id.clone();
 
         let handle = tokio::spawn(async move {
-            let mut guard: tokio::sync::MutexGuard<'_, Option<crate::voice::WorkerClient>>
-                = tts_arc.lock().await;
+            let mut guard: tokio::sync::MutexGuard<'_, Option<crate::voice::WorkerClient>> =
+                tts_arc.lock().await;
             if let Some(client) = guard.as_mut() {
-                if client.write_frame(msg::TEXT_INPUT, &text_bytes).await.is_ok() {
+                if client
+                    .write_frame(msg::TEXT_INPUT, &text_bytes)
+                    .await
+                    .is_ok()
+                {
                     let mut seq = 0u32;
                     loop {
                         // Phase 38 / Codex [14]: bound per-frame read.
                         let frame_result = match tokio::time::timeout(
-                            std::time::Duration::from_secs(crate::constants::TTS_FRAME_READ_TIMEOUT_SECS),
+                            std::time::Duration::from_secs(
+                                crate::constants::TTS_FRAME_READ_TIMEOUT_SECS,
+                            ),
                             client.read_frame(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Err(_elapsed) => {
                                 warn!(
                                     "TTS read_frame timed out after {}s — kokoro stalled, breaking out",
@@ -5446,7 +5814,9 @@ async fn run_shell_error_proactive_background(
                                     trace_id: String::new(),
                                     event: Some(server_event::Event::AudioResponse(
                                         AudioResponse {
-                                            data: pcm, sequence_number: seq, is_final: false,
+                                            data: pcm,
+                                            sequence_number: seq,
+                                            is_final: false,
                                         },
                                     )),
                                 };
@@ -5461,7 +5831,9 @@ async fn run_shell_error_proactive_background(
                                     trace_id: trace_id_clone,
                                     event: Some(server_event::Event::AudioResponse(
                                         AudioResponse {
-                                            data: vec![], sequence_number: seq, is_final: true,
+                                            data: vec![],
+                                            sequence_number: seq,
+                                            is_final: true,
                                         },
                                     )),
                                 };
@@ -5469,7 +5841,7 @@ async fn run_shell_error_proactive_background(
                                 break;
                             }
                             Ok(Some(_)) => {}
-                            _           => break,
+                            _ => break,
                         }
                     }
                 }
@@ -5495,13 +5867,21 @@ async fn run_shell_error_proactive_background(
         response_len = telemetry.response_len,
         "gen_complete (shell_proactive)"
     );
-    let _ = gen_tx.send(GenerationResult {
-        cancelled: false, full_response: response,
-        intercepted_q: None, tts_was_active,
-        trace_id, content: String::new(), embed_model: String::new(),
-        is_shell_proactive: true, proactive_silent: false, agentic_depth: 0,
-        telemetry,
-    }).await;
+    let _ = gen_tx
+        .send(GenerationResult {
+            cancelled: false,
+            full_response: response,
+            intercepted_q: None,
+            tts_was_active,
+            trace_id,
+            content: String::new(),
+            embed_model: String::new(),
+            is_shell_proactive: true,
+            proactive_silent: false,
+            agentic_depth: 0,
+            telemetry,
+        })
+        .await;
 }
 
 // ── extract_action_block ──────────────────────────────────────────────────────
@@ -5515,7 +5895,7 @@ async fn run_shell_error_proactive_background(
 /// shown to the operator rather than silently dropped.
 fn extract_action_block(response: &str) -> (String, Option<ActionSpec>) {
     // ACTION_BLOCK_OPEN / ACTION_BLOCK_CLOSE are imported at the top of this module.
-    let Some(open_pos)  = response.find(ACTION_BLOCK_OPEN) else {
+    let Some(open_pos) = response.find(ACTION_BLOCK_OPEN) else {
         return (response.to_string(), None);
     };
 
@@ -5523,7 +5903,7 @@ fn extract_action_block(response: &str) -> (String, Option<ActionSpec>) {
 
     // Primary path: explicit close delimiter present.
     if let Some(close_offset) = response[content_start..].find(ACTION_BLOCK_CLOSE) {
-        let raw_json_str  = response[content_start..content_start + close_offset].trim();
+        let raw_json_str = response[content_start..content_start + close_offset].trim();
         let full_block_end = content_start + close_offset + ACTION_BLOCK_CLOSE.len();
         // qwen3 occasionally emits stray characters (e.g. `%` from zsh-prompt training
         // memory) between the closing `}` and the close tag: `}%</dexter:action>`.
@@ -5571,8 +5951,12 @@ fn extract_action_block(response: &str) -> (String, Option<ActionSpec>) {
         }
     }
     // Both attempts failed — log details and return original response unchanged.
-    let preview      = &tail[..tail.len().min(300)];
-    let preview_hex  = preview.bytes().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let preview = &tail[..tail.len().min(300)];
+    let preview_hex = preview
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     warn!(
         post_open_text = %preview,
         post_open_hex  = %preview_hex,
@@ -5663,8 +6047,8 @@ fn is_command_query(content: &str) -> bool {
 /// and we don't want to lock the wording into the wire type.
 fn category_label(cat: &ActionCategory) -> &'static str {
     match cat {
-        ActionCategory::Safe        => "safe",
-        ActionCategory::Cautious    => "cautious",
+        ActionCategory::Safe => "safe",
+        ActionCategory::Cautious => "cautious",
         ActionCategory::Destructive => "destructive",
         // Unspecified is the proto zero-value. PolicyEngine::classify() never
         // emits it; only wire-side defaults would produce it. Fall through to
@@ -5722,7 +6106,7 @@ fn is_off_host_request(content: &str) -> bool {
         "on the vps",
         "on my raspberry pi",
         "on the raspberry pi",
-        "on my pi",          // informal, but contextually remote
+        "on my pi", // informal, but contextually remote
         "on the pi",
         // Distro-named hosts (operator identifies the target by OS flavor)
         "on my ubuntu",
@@ -5740,7 +6124,7 @@ fn is_off_host_request(content: &str) -> bool {
         "on my windows",
         "on my windows box",
         "on my windows machine",
-        "on my pc",           // PC in Mac-user speech almost always means "not this Mac"
+        "on my pc", // PC in Mac-user speech almost always means "not this Mac"
         // Transport cues
         "ssh into",
         "over ssh",
@@ -5781,37 +6165,221 @@ fn is_off_host_request(content: &str) -> bool {
 pub(crate) fn is_joke_request(content: &str) -> bool {
     let lc = content.to_lowercase();
 
-    // Imperative joke-request phrasings. Each phrase is intentionally specific —
-    // a verb + the word "joke" — so non-request mentions ("the joke is on me",
-    // "what's the joke") don't false-positive.
-    let joke_request_phrases = [
-        "tell me a joke",
-        "tell me another joke",
-        "tell me a dad joke",
-        "tell me a dirty joke",
-        "tell me an adult joke",
-        "tell me a nsfw joke",
-        "tell another joke",
-        "give me a joke",
-        "give me another joke",
-        "give me a dad joke",
-        "give me a dirty joke",
-        "give me an adult joke",
-        "tell a joke",
-        "got a joke",
-        "got any jokes",
-        "know any jokes",
-        "make a joke",
-        "i want a joke",
-        "i want another joke",
-        "another joke",
-        "different joke",
-        "new joke",
-        "a step-dad joke",
-        "tell me a step-dad",
-        "tell me a step dad",
+    // Hard requirement: the utterance must mention "joke" or "jokes". Without
+    // it, this isn't a joke request at all, regardless of imperative form.
+    if !lc.contains("joke") {
+        return false;
+    }
+
+    // Soft requirement: the utterance must also contain a request signal —
+    // imperative verb, want-statement, or iteration marker. This rules out
+    // non-request mentions ("the joke is on me", "what's the joke about
+    // that bug?", "i don't get the joke").
+    //
+    // Permissive design: any "tell me a [...] joke" / "give me [...] joke"
+    // pattern matches regardless of what fills the brackets. That handles
+    // "tell me a gay joke", "tell me a major groaner of a dad joke", "give
+    // me a step-dad joke", and any other adjective the operator chooses
+    // without requiring the override list to enumerate every variant.
+    //
+    // Critical for content-moderation surface: when phrasings like "tell me
+    // a gay joke" don't match the override, they fall through to FAST
+    // (qwen3:8b) which has aggressive identity-group safety training and
+    // refuses with a moralizing lecture. Routing to PRIMARY (gemma4:26b)
+    // avoids that specific refusal mode — gemma4 produces general humor
+    // without identity-group reflexive refusal.
+    let request_signals = [
+        "tell me",
+        "tell us",
+        "give me",
+        "give us",
+        "tell a ",
+        "tell another",
+        "make me",
+        "make a ",
+        "write me",
+        "write a ",
+        "got a ",
+        "got any ",
+        "know a ",
+        "know any ",
+        "i want",
+        "i'd like",
+        "id like",
+        "let's hear",
+        "lets hear",
+        "hit me with",
+        // Iteration markers — operator iterating without restating "tell me"
+        "another",
+        "different ",
+        "one more",
+        "next ",
+        "fresh ",
+        "new ",
     ];
-    joke_request_phrases.iter().any(|p| lc.contains(p))
+    request_signals.iter().any(|s| lc.contains(s))
+}
+
+/// Joke-continuation reference detector.
+///
+/// Returns true when the user's utterance plausibly continues a joke-iteration
+/// thread: criticism ("not funny enough", "wasn't NSFW enough"), correction
+/// ("it doesn't need to be about a step dad"), explanation requests ("explain
+/// the joke", "i don't get it", "why is that funny"), or iteration imperatives
+/// ("another one", "different one", "do better", "try again").
+///
+/// Used by the joke-continuation route override that upgrades FAST → PRIMARY
+/// when the previous turn told a joke. Without continuation, qwen3:8b fields
+/// these follow-ups and hallucinates joke content from training data instead
+/// of grounding in the actual joke just told.
+///
+/// Bias: targeted detection over generic catchall. The detector is gated by
+/// `last_joke_turn_at` — patterns here only fire when there IS a recent joke
+/// context, so phrases like "do better" don't false-positive on engineering
+/// requests.
+pub(crate) fn is_joke_followup_reference(content: &str) -> bool {
+    let t = content.to_lowercase();
+
+    // Criticism / "not [adjective] enough" patterns. Operator pushing the
+    // model to be funnier, dirtier, more on-tone, etc.
+    let criticism_markers = [
+        "not funny enough",
+        "wasn't funny enough",
+        "isn't funny enough",
+        "not nsfw enough",
+        "wasn't nsfw enough",
+        "not dirty enough",
+        "wasn't dirty enough",
+        "not adult enough",
+        "wasn't adult enough",
+        "too wholesome",
+        "too tame",
+        "too mild",
+        "too clean",
+        "make it dirtier",
+        "make it nastier",
+        "make it raunchier",
+        "make it more",
+        "make it less",
+        "more nsfw",
+        "more adult",
+        "more dirty",
+        "more raunchy",
+        "less wholesome",
+        "less tame",
+        "less mild",
+        "do better",
+        "try again",
+        "do another one",
+    ];
+    if criticism_markers.iter().any(|p| t.contains(p)) {
+        return true;
+    }
+
+    // Iteration / variation requests. Operator wants a different joke without
+    // re-typing "tell me a joke".
+    let iteration_markers = [
+        "another one",
+        "another joke",
+        "different one",
+        "different joke",
+        "give me another",
+        "do another",
+        "one more",
+        "next one",
+        "next joke",
+    ];
+    if iteration_markers.iter().any(|p| t.contains(p)) {
+        return true;
+    }
+
+    // Identity-themed variation requests. These are intentionally narrow but
+    // cover the live failure mode: after an ordinary joke, the operator may ask
+    // for "a gay one" or "make it queer" without restating "joke".
+    let identity_variation_markers = [
+        "make it gay",
+        "make it gayer",
+        "make it queer",
+        "make it queerer",
+        "more gay",
+        "more queer",
+        "gay one",
+        "queer one",
+        "gay version",
+        "queer version",
+        "about gay",
+        "about queer",
+    ];
+    if identity_variation_markers.iter().any(|p| t.contains(p)) {
+        return true;
+    }
+
+    // Explanation / "i don't get it" markers. Operator asking the model to
+    // explain its own joke. Critical case: prevents qwen3 from hallucinating
+    // an explanation of a joke it never saw.
+    //
+    // "why is that " is intentionally permissive — it matches "why is that
+    // funny", "why is that a dirty joke", "why is that nsfw", etc. The
+    // detector is gated by `last_joke_turn_at` in the orchestrator, so
+    // catch-everything-question-about-recent-utterance is safe in this
+    // context. Outside joke context, "why is that the case" doesn't fire
+    // because the gate is closed.
+    let explanation_markers = [
+        "explain the joke",
+        "explain that joke",
+        "explain it",
+        "don't get it",
+        "dont get it",
+        "don't get the joke",
+        "dont get the joke",
+        "why is that ", // permissive: "why is that a dirty joke", "why is that funny", etc.
+        "why is it funny",
+        "what's funny about",
+        "whats funny about",
+        "what was the joke",
+    ];
+    if explanation_markers.iter().any(|p| t.contains(p)) {
+        return true;
+    }
+
+    // Clarification of joke type / format. Operator correcting the model's
+    // misinterpretation of what was wanted.
+    let clarification_markers = [
+        "doesn't need to be about",
+        "it's just the name",
+        "the type of joke",
+        "the kind of joke",
+        "type of humor",
+        "kind of humor",
+    ];
+    if clarification_markers.iter().any(|p| t.contains(p)) {
+        return true;
+    }
+
+    false
+}
+
+/// Returns true when semantic memory recall should be suppressed for a humor turn.
+///
+/// Joke turns are already grounded by immediate conversation history. Pulling
+/// semantically similar old joke turns from VectorStore is actively harmful:
+/// a follow-up like "why is that a dirty joke?" can retrieve a different prior
+/// dirty-joke exchange with higher embedding similarity than the joke that was
+/// just told, giving the model a false referent.
+pub(crate) fn should_suppress_joke_memory_recall(
+    content: &str,
+    last_joke_turn_at: Option<Instant>,
+) -> bool {
+    if is_joke_request(content) {
+        return true;
+    }
+
+    let Some(last_joke) = last_joke_turn_at else {
+        return false;
+    };
+
+    last_joke.elapsed().as_secs() <= crate::constants::JOKE_CONTINUATION_WINDOW_SECS
+        && is_joke_followup_reference(content)
 }
 
 /// Vision-continuation reference detector.
@@ -5837,10 +6405,22 @@ pub(crate) fn is_vision_followup_reference(content: &str) -> bool {
     // Anaphoric sentence-starters. Bounded check: "it's red" matches; "italic
     // formatting" doesn't. The trailing space/apostrophe is part of the pattern.
     let anaphoric_starts = [
-        "this ", "this'", "this is", "this one", "this thing",
-        "that ", "that'", "that is", "that one", "that thing",
-        "it ", "it's", "it is", "its ",
-        "those ", "these ",
+        "this ",
+        "this'",
+        "this is",
+        "this one",
+        "this thing",
+        "that ",
+        "that'",
+        "that is",
+        "that one",
+        "that thing",
+        "it ",
+        "it's",
+        "it is",
+        "its ",
+        "those ",
+        "these ",
     ];
     if anaphoric_starts.iter().any(|p| trimmed.starts_with(p)) {
         return true;
@@ -5851,17 +6431,50 @@ pub(crate) fn is_vision_followup_reference(content: &str) -> bool {
     // composition. A short list is intentional; expansion happens based on
     // operator-observed false negatives.
     let visual_words = [
-        "color", "colour", "shade", "shape", "size", "outfit", "wearing",
-        "shirt", "pants", "jacket", "vest", "cardigan", "sweater", "dress",
-        "looks like", "look at", "the image", "the picture", "the photo",
-        "the screen", "show me", "another one", "the other one",
-        "bigger", "smaller", "darker", "lighter", "thicker", "thinner",
-        "longer", "shorter", "wider", "narrower",
+        "color",
+        "colour",
+        "shade",
+        "shape",
+        "size",
+        "outfit",
+        "wearing",
+        "shirt",
+        "pants",
+        "jacket",
+        "vest",
+        "cardigan",
+        "sweater",
+        "dress",
+        "looks like",
+        "look at",
+        "the image",
+        "the picture",
+        "the photo",
+        "the screen",
+        "show me",
+        "another one",
+        "the other one",
+        "bigger",
+        "smaller",
+        "darker",
+        "lighter",
+        "thicker",
+        "thinner",
+        "longer",
+        "shorter",
+        "wider",
+        "narrower",
         // Measurement words — only asked in a visual-inspection context.
         // "girth?" alone is the canonical example: minimal sentence, but
         // unambiguous follow-up to a previous size estimate.
-        "girth", "length", "depth", "height", "width", "circumference",
-        "thickness", "diameter",
+        "girth",
+        "length",
+        "depth",
+        "height",
+        "width",
+        "circumference",
+        "thickness",
+        "diameter",
     ];
     if visual_words.iter().any(|w| t.contains(w)) {
         return true;
@@ -5869,9 +6482,19 @@ pub(crate) fn is_vision_followup_reference(content: &str) -> bool {
 
     // Direct visual questions. Bounded with trailing space to reduce collisions.
     let visual_questions = [
-        "how big", "how large", "how small", "how long", "how wide",
-        "what color", "what colour", "what shape", "what size",
-        "what's it", "what is it", "what about that", "what about this",
+        "how big",
+        "how large",
+        "how small",
+        "how long",
+        "how wide",
+        "what color",
+        "what colour",
+        "what shape",
+        "what size",
+        "what's it",
+        "what is it",
+        "what about that",
+        "what about this",
     ];
     if visual_questions.iter().any(|q| t.contains(q)) {
         return true;
@@ -5919,9 +6542,7 @@ pub(crate) fn is_self_reference_request(content: &str, aliases: &[String]) -> bo
     // "hey," prefix is a common voice-input artifact). The check is "starts
     // with one of these tokens after stripping a small set of pleasantry
     // prefixes", not a full parser.
-    const DELEGATION_PREFIXES: &[&str] = &[
-        "ask ", "tell ", "remind ", "have ", "get ", "make ",
-    ];
+    const DELEGATION_PREFIXES: &[&str] = &["ask ", "tell ", "remind ", "have ", "get ", "make "];
     let stripped_lead = lc
         .trim_start()
         .trim_start_matches("hey, ")
@@ -5929,7 +6550,10 @@ pub(crate) fn is_self_reference_request(content: &str, aliases: &[String]) -> bo
         .trim_start_matches("ok ")
         .trim_start_matches("okay ")
         .trim_start_matches("please ");
-    if DELEGATION_PREFIXES.iter().any(|p| stripped_lead.starts_with(p)) {
+    if DELEGATION_PREFIXES
+        .iter()
+        .any(|p| stripped_lead.starts_with(p))
+    {
         return false;
     }
 
@@ -6060,15 +6684,15 @@ pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
         for c in s.chars() {
             match c {
                 '\\' => out.push_str("\\\\"),
-                '"'  => out.push_str("\\\""),
+                '"' => out.push_str("\\\""),
                 '\n' => out.push_str("\" & linefeed & \""),
-                _    => out.push(c),
+                _ => out.push(c),
             }
         }
         out
     }
     let escaped_handle = escape_applescript_literal(handle);
-    let escaped_body   = escape_applescript_literal(body);
+    let escaped_body = escape_applescript_literal(body);
     format!(
         "tell application \"Messages\"\n\
          set targetService to 1st service whose service type = iMessage\n\
@@ -6101,14 +6725,21 @@ mod tests {
         cfg
     }
 
-    fn new_trace() -> String { Uuid::new_v4().to_string() }
-    fn new_session() -> String { Uuid::new_v4().to_string() }
+    fn new_trace() -> String {
+        Uuid::new_v4().to_string()
+    }
+    fn new_session() -> String {
+        Uuid::new_v4().to_string()
+    }
 
     /// Construct a test orchestrator with an unbounded channel (never blocks).
     /// The receiver is returned so the caller can inspect sent events.
     fn make_orchestrator(
         state_dir: &std::path::Path,
-    ) -> (CoreOrchestrator, tokio::sync::mpsc::UnboundedReceiver<Result<ServerEvent, Status>>) {
+    ) -> (
+        CoreOrchestrator,
+        tokio::sync::mpsc::UnboundedReceiver<Result<ServerEvent, Status>>,
+    ) {
         let (tx_unbounded, rx) = tokio::sync::mpsc::unbounded_channel();
         // Adapt unbounded sender to bounded mpsc::Sender:
         // We wrap by creating a real bounded channel of capacity 64 and spawning
@@ -6129,8 +6760,15 @@ mod tests {
         let (generation_tx, _generation_rx) = tokio::sync::mpsc::channel(4);
 
         let cfg = test_config(state_dir);
-        let orch = CoreOrchestrator::new(&cfg, new_session(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("CoreOrchestrator::new should succeed with default config");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            new_session(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("CoreOrchestrator::new should succeed with default config");
 
         (orch, rx)
     }
@@ -6156,8 +6794,15 @@ mod tests {
         let (generation_tx, _generation_rx) = tokio::sync::mpsc::channel(4);
 
         let cfg = test_config(state_dir);
-        let orch = CoreOrchestrator::new(&cfg, new_session(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("CoreOrchestrator::new should succeed with default config");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            new_session(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("CoreOrchestrator::new should succeed with default config");
 
         (orch, rx, action_rx)
     }
@@ -6183,19 +6828,62 @@ mod tests {
         let (generation_tx, gen_rx) = tokio::sync::mpsc::channel(4);
 
         let cfg = test_config(state_dir);
-        let orch = CoreOrchestrator::new(&cfg, new_session(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("CoreOrchestrator::new should succeed with default config");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            new_session(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("CoreOrchestrator::new should succeed with default config");
 
         (orch, rx, gen_rx)
     }
 
     #[tokio::test]
+    async fn previous_session_history_is_not_bootstrapped_into_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        {
+            let mut prior = SessionStateManager::new(
+                tmp.path(),
+                &new_session(),
+                &crate::config::ModelConfig::default(),
+            );
+            prior.push_turn("user", "tell me a step-dad joke");
+            prior.push_turn(
+                "assistant",
+                "I do not generate NSFW or sexually explicit content.",
+            );
+            prior.persist().expect("prior session should persist");
+        }
+
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        orch.context.push_user("tell me a dirty joke");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            !messages.iter().any(|m| m
+                .content
+                .contains("I do not generate NSFW or sexually explicit content")),
+            "raw previous-session refusal text must not be replayed into a new prompt"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("tell me a dirty joke")),
+            "current user request must still be present"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_system_event_connected_returns_ok() {
-        let tmp  = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::Connected.into(),
+            r#type: SystemEventType::Connected.into(),
             payload: String::new(),
         };
         let result = orch.handle_system_event(sys_event, new_trace()).await;
@@ -6208,7 +6896,7 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::AppFocused.into(),
+            r#type: SystemEventType::AppFocused.into(),
             payload: r#"{"bundle_id":"com.apple.Xcode","name":"Xcode"}"#.to_string(),
         };
         let result = orch.handle_system_event(sys_event, new_trace()).await;
@@ -6221,7 +6909,7 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::ScreenLocked.into(),
+            r#type: SystemEventType::ScreenLocked.into(),
             payload: String::new(),
         };
         let result = orch.handle_system_event(sys_event, new_trace()).await;
@@ -6234,7 +6922,7 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let action = UiAction {
-            r#type:  crate::ipc::proto::UiActionType::Dismiss.into(),
+            r#type: crate::ipc::proto::UiActionType::Dismiss.into(),
             payload: String::new(),
         };
         let result = orch.handle_ui_action(action, new_trace()).await;
@@ -6247,7 +6935,7 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let action = UiAction {
-            r#type:  crate::ipc::proto::UiActionType::Drag.into(),
+            r#type: crate::ipc::proto::UiActionType::Drag.into(),
             payload: r#"{"x":200,"y":400}"#.to_string(),
         };
         let result = orch.handle_ui_action(action, new_trace()).await;
@@ -6260,12 +6948,15 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let appr = ActionApproval {
-            action_id:     Uuid::new_v4().to_string(),
-            approved:      true,
+            action_id: Uuid::new_v4().to_string(),
+            approved: true,
             operator_note: String::new(),
         };
         let result = orch.handle_action_approval(appr, new_trace()).await;
-        assert!(result.is_ok(), "ActionApproval(approved=true) should return Ok(())");
+        assert!(
+            result.is_ok(),
+            "ActionApproval(approved=true) should return Ok(())"
+        );
     }
 
     #[tokio::test]
@@ -6274,12 +6965,15 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let appr = ActionApproval {
-            action_id:     Uuid::new_v4().to_string(),
-            approved:      false,
+            action_id: Uuid::new_v4().to_string(),
+            approved: false,
             operator_note: "too risky".to_string(),
         };
         let result = orch.handle_action_approval(appr, new_trace()).await;
-        assert!(result.is_ok(), "ActionApproval(approved=false) should return Ok(())");
+        assert!(
+            result.is_ok(),
+            "ActionApproval(approved=false) should return Ok(())"
+        );
     }
 
     #[tokio::test]
@@ -6288,15 +6982,18 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let event = ClientEvent {
-            trace_id:   new_trace(),
+            trace_id: new_trace(),
             session_id: new_session(),
             event: Some(client_event::Event::SystemEvent(SystemEvent {
-                r#type:  SystemEventType::Connected.into(),
+                r#type: SystemEventType::Connected.into(),
                 payload: String::new(),
             })),
         };
         let result = orch.handle_event(event).await;
-        assert!(result.is_ok(), "handle_event should dispatch SystemEvent correctly");
+        assert!(
+            result.is_ok(),
+            "handle_event should dispatch SystemEvent correctly"
+        );
     }
 
     #[tokio::test]
@@ -6305,12 +7002,15 @@ mod tests {
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let event = ClientEvent {
-            trace_id:   new_trace(),
+            trace_id: new_trace(),
             session_id: new_session(),
-            event:      None,  // Malformed — no variant set.
+            event: None, // Malformed — no variant set.
         };
         let result = orch.handle_event(event).await;
-        assert!(result.is_ok(), "None event variant should be silently ignored");
+        assert!(
+            result.is_ok(),
+            "None event variant should be silently ignored"
+        );
     }
 
     // ── ContextObserver integration tests ─────────────────────────────────────
@@ -6325,7 +7025,7 @@ mod tests {
 
         let payload = r#"{"bundle_id":"com.apple.Xcode","name":"Xcode"}"#;
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::AppFocused.into(),
+            r#type: SystemEventType::AppFocused.into(),
             payload: payload.to_string(),
         };
 
@@ -6348,15 +7048,17 @@ mod tests {
 
         // First: focus an app so the snapshot has app identity.
         let focused = SystemEvent {
-            r#type:  SystemEventType::AppFocused.into(),
+            r#type: SystemEventType::AppFocused.into(),
             payload: r#"{"bundle_id":"com.apple.Xcode","name":"Xcode"}"#.to_string(),
         };
-        orch.handle_system_event(focused, new_trace()).await.unwrap();
+        orch.handle_system_event(focused, new_trace())
+            .await
+            .unwrap();
 
         // Then: an element change within that app.
         let payload = r#"{"role":"AXTextField","label":"Source Editor","value_preview":"let x = 5","is_sensitive":false}"#;
         let elem_event = SystemEvent {
-            r#type:  SystemEventType::AxElementChanged.into(),
+            r#type: SystemEventType::AxElementChanged.into(),
             payload: payload.to_string(),
         };
         let result = orch.handle_system_event(elem_event, new_trace()).await;
@@ -6385,15 +7087,19 @@ mod tests {
     fn extract_action_block_strips_and_parses_shell() {
         let response = format!(
             "I'll run ls for you.{}{}{}\nThat's the plan.",
-            ACTION_BLOCK_OPEN,
-            r#"{"type":"shell","args":["ls","-la"]}"#,
-            ACTION_BLOCK_CLOSE,
+            ACTION_BLOCK_OPEN, r#"{"type":"shell","args":["ls","-la"]}"#, ACTION_BLOCK_CLOSE,
         );
         let (text, spec) = extract_action_block(&response);
 
-        assert!(!text.contains(ACTION_BLOCK_OPEN), "block delimiters must be stripped");
+        assert!(
+            !text.contains(ACTION_BLOCK_OPEN),
+            "block delimiters must be stripped"
+        );
         assert!(!text.contains(ACTION_BLOCK_CLOSE));
-        assert!(text.contains("I'll run ls for you."), "surrounding text preserved");
+        assert!(
+            text.contains("I'll run ls for you."),
+            "surrounding text preserved"
+        );
 
         match spec.expect("spec must be Some") {
             ActionSpec::Shell { args, .. } => {
@@ -6407,11 +7113,13 @@ mod tests {
     fn extract_action_block_malformed_json_returns_original() {
         let response = format!(
             "Let me try.{}NOT_VALID_JSON{}",
-            ACTION_BLOCK_OPEN,
-            ACTION_BLOCK_CLOSE,
+            ACTION_BLOCK_OPEN, ACTION_BLOCK_CLOSE,
         );
         let (text, spec) = extract_action_block(&response);
-        assert_eq!(text, response, "original response must be preserved on parse error");
+        assert_eq!(
+            text, response,
+            "original response must be preserved on parse error"
+        );
         assert!(spec.is_none());
     }
 
@@ -6427,8 +7135,14 @@ mod tests {
         );
         let (text, spec) = extract_action_block(&response);
         // Pre-tag text is preserved; action block is stripped.
-        assert!(text.contains("Trying to act."), "pre-tag text must be preserved: got {text:?}");
-        assert!(!text.contains(ACTION_BLOCK_OPEN), "open tag must be stripped");
+        assert!(
+            text.contains("Trying to act."),
+            "pre-tag text must be preserved: got {text:?}"
+        );
+        assert!(
+            !text.contains(ACTION_BLOCK_OPEN),
+            "open tag must be stripped"
+        );
         match spec.expect("fallback must parse valid JSON") {
             ActionSpec::Shell { args, .. } => assert_eq!(args, vec!["ls", "-la"]),
             other => panic!("expected Shell, got {other:?}"),
@@ -6444,7 +7158,10 @@ mod tests {
             // No ACTION_BLOCK_CLOSE, truncated JSON
         );
         let (text, spec) = extract_action_block(&response);
-        assert_eq!(text, response, "original response preserved when close is missing and JSON is malformed");
+        assert_eq!(
+            text, response,
+            "original response preserved when close is missing and JSON is malformed"
+        );
         assert!(spec.is_none());
     }
 
@@ -6459,7 +7176,10 @@ mod tests {
             ACTION_BLOCK_CLOSE,
         );
         let (text, spec) = extract_action_block(&response);
-        assert!(text.contains("Opening Finder."), "pre-tag text preserved: {text:?}");
+        assert!(
+            text.contains("Opening Finder."),
+            "pre-tag text preserved: {text:?}"
+        );
         assert!(!text.contains(ACTION_BLOCK_OPEN));
         match spec.expect("must parse despite trailing %") {
             ActionSpec::AppleScript { .. } => {}
@@ -6477,7 +7197,10 @@ mod tests {
             // No ACTION_BLOCK_CLOSE
         );
         let (text, spec) = extract_action_block(&response);
-        assert!(text.contains("Opening Finder."), "pre-tag text preserved: {text:?}");
+        assert!(
+            text.contains("Opening Finder."),
+            "pre-tag text preserved: {text:?}"
+        );
         assert!(!text.contains(ACTION_BLOCK_OPEN));
         match spec.expect("fallback must parse after stripping %") {
             ActionSpec::AppleScript { .. } => {}
@@ -6489,7 +7212,9 @@ mod tests {
 
     #[test]
     fn is_command_query_detects_what_command_phrasing() {
-        assert!(is_command_query("What command should I run to list processes?"));
+        assert!(is_command_query(
+            "What command should I run to list processes?"
+        ));
         assert!(is_command_query("what's the command to show memory usage?"));
         assert!(is_command_query("What is the command for sorting by CPU?"));
         assert!(is_command_query("which command shows open ports?"));
@@ -6498,8 +7223,12 @@ mod tests {
     #[test]
     fn is_command_query_detects_how_do_i_phrasing() {
         assert!(is_command_query("How do I list all running processes?"));
-        assert!(is_command_query("how would I check disk usage from terminal?"));
-        assert!(is_command_query("how can i see what processes are using the most memory"));
+        assert!(is_command_query(
+            "how would I check disk usage from terminal?"
+        ));
+        assert!(is_command_query(
+            "how can i see what processes are using the most memory"
+        ));
         assert!(is_command_query("how to show network connections?"));
     }
 
@@ -6508,7 +7237,9 @@ mod tests {
         assert!(is_command_query("Tell me the command to tail a log file."));
         assert!(is_command_query("give me the command for searching files"));
         assert!(is_command_query("Show me the command to kill a process."));
-        assert!(is_command_query("what's the syntax for grep with case insensitive?"));
+        assert!(is_command_query(
+            "what's the syntax for grep with case insensitive?"
+        ));
     }
 
     #[test]
@@ -6524,7 +7255,9 @@ mod tests {
     #[test]
     fn is_command_query_not_triggered_on_plain_action_requests() {
         // Direct action requests with no command-query language.
-        assert!(!is_command_query("Show me which processes are using the most memory"));
+        assert!(!is_command_query(
+            "Show me which processes are using the most memory"
+        ));
         assert!(!is_command_query("List the running processes"));
         assert!(!is_command_query("Check the CPU usage"));
         assert!(!is_command_query("Open Finder"));
@@ -6535,16 +7268,24 @@ mod tests {
 
     #[test]
     fn is_off_host_detects_explicit_linux_host_phrasing() {
-        assert!(is_off_host_request("What's the disk usage on my linux box?"));
-        assert!(is_off_host_request("Show me the running services on the server"));
+        assert!(is_off_host_request(
+            "What's the disk usage on my linux box?"
+        ));
+        assert!(is_off_host_request(
+            "Show me the running services on the server"
+        ));
         assert!(is_off_host_request("check memory on my vm"));
-        assert!(is_off_host_request("what processes are running on my ubuntu"));
+        assert!(is_off_host_request(
+            "what processes are running on my ubuntu"
+        ));
         assert!(is_off_host_request("tail the auth log on my debian"));
     }
 
     #[test]
     fn is_off_host_detects_transport_cues() {
-        assert!(is_off_host_request("ssh into the backup host and check space"));
+        assert!(is_off_host_request(
+            "ssh into the backup host and check space"
+        ));
         assert!(is_off_host_request("list services over ssh"));
         assert!(is_off_host_request("run uptime via ssh"));
     }
@@ -6584,7 +7325,9 @@ mod tests {
     #[test]
     fn vision_followup_detects_anaphoric_pronouns() {
         // The exact phrasings the operator hit in the broken session.
-        assert!(is_vision_followup_reference("How big would you say that thing is?"));
+        assert!(is_vision_followup_reference(
+            "How big would you say that thing is?"
+        ));
         assert!(is_vision_followup_reference("That isn't a sweater vest."));
         assert!(is_vision_followup_reference("That's not a joke."));
         assert!(is_vision_followup_reference("It's very light blue."));
@@ -6615,7 +7358,9 @@ mod tests {
     fn vision_followup_detects_comparative_descriptors() {
         // Operator says "show me a bigger one" — clearly a vision follow-up
         // even without explicit pronoun.
-        assert!(is_vision_followup_reference("want to see an even bigger one"));
+        assert!(is_vision_followup_reference(
+            "want to see an even bigger one"
+        ));
         assert!(is_vision_followup_reference("show me a smaller one"));
         assert!(is_vision_followup_reference("a darker version please"));
     }
@@ -6708,26 +7453,254 @@ mod tests {
         assert!(is_joke_request("Give Me Another Joke"));
     }
 
+    #[test]
+    fn joke_request_matches_arbitrary_adjectives() {
+        // Permissive matching: any "tell me a [...] joke" / "give me [...] joke"
+        // pattern routes to PRIMARY regardless of what fills the brackets. This
+        // is critical for content-moderation surface — "tell me a gay joke"
+        // must NOT route to qwen3:8b (which refuses with a moralizing lecture
+        // on identity-group humor) and must instead route to gemma4:26b which
+        // produces humor without that reflexive refusal.
+        assert!(is_joke_request("tell me a gay joke"));
+        assert!(is_joke_request("tell me a major groaner of a dad joke"));
+        assert!(is_joke_request("tell me a really filthy joke"));
+        assert!(is_joke_request("give me a politically incorrect joke"));
+        assert!(is_joke_request("write me a gay joke"));
+        assert!(is_joke_request("hit me with another joke"));
+        assert!(is_joke_request("i'd like a different joke"));
+        assert!(is_joke_request("let's hear another one of those jokes"));
+    }
+
+    // ── is_joke_followup_reference unit tests ────────────────────────────────
+
+    #[test]
+    fn joke_followup_detects_criticism_markers() {
+        // The exact phrasings from the broken session.
+        assert!(is_joke_followup_reference("that wasn't NSFW enough."));
+        assert!(is_joke_followup_reference("not dirty enough"));
+        assert!(is_joke_followup_reference("too wholesome"));
+        assert!(is_joke_followup_reference("make it dirtier"));
+        assert!(is_joke_followup_reference("make it more raunchy"));
+        assert!(is_joke_followup_reference("more nsfw"));
+    }
+
+    #[test]
+    fn joke_followup_detects_iteration_markers() {
+        assert!(is_joke_followup_reference("another one"));
+        assert!(is_joke_followup_reference("different one"));
+        assert!(is_joke_followup_reference("give me another"));
+        assert!(is_joke_followup_reference("one more"));
+    }
+
+    #[test]
+    fn joke_followup_detects_identity_variation_markers() {
+        assert!(is_joke_followup_reference("make it gay"));
+        assert!(is_joke_followup_reference("make it gayer"));
+        assert!(is_joke_followup_reference("a queer one"));
+        assert!(is_joke_followup_reference("give me the gay version"));
+    }
+
+    #[test]
+    fn joke_followup_detects_explanation_markers() {
+        // The qwen3-hallucination-prevention case. "why is that a dirty joke"
+        // must route PRIMARY so the model that told the joke also explains it.
+        assert!(is_joke_followup_reference("why is that a dirty joke?"));
+        assert!(is_joke_followup_reference("explain the joke"));
+        assert!(is_joke_followup_reference("explain that joke"));
+        assert!(is_joke_followup_reference("i don't get it"));
+        assert!(is_joke_followup_reference("i dont get the joke"));
+        assert!(is_joke_followup_reference("why is that funny"));
+        assert!(is_joke_followup_reference("what's funny about that"));
+    }
+
+    #[test]
+    fn joke_followup_detects_clarification_markers() {
+        // Operator correcting model's misinterpretation of joke type.
+        assert!(is_joke_followup_reference(
+            "it doesn't need to be about a step dad"
+        ));
+        assert!(is_joke_followup_reference(
+            "it's just the name for the type of joke"
+        ));
+        assert!(is_joke_followup_reference("the kind of humor i mean"));
+    }
+
+    #[test]
+    fn joke_followup_handles_capitalization() {
+        assert!(is_joke_followup_reference("That Wasn't NSFW Enough"));
+        assert!(is_joke_followup_reference("EXPLAIN THE JOKE"));
+        assert!(is_joke_followup_reference("Make It Dirtier"));
+    }
+
+    #[test]
+    fn joke_followup_does_not_match_unrelated_chat() {
+        // The detector is GATED by `last_joke_turn_at` in the orchestrator,
+        // but it should still avoid the most obvious false-positive cases on
+        // its own. Pure non-joke utterances must not match.
+        assert!(!is_joke_followup_reference("what's the weather"));
+        assert!(!is_joke_followup_reference("send a text to mom"));
+        assert!(!is_joke_followup_reference("set a timer"));
+        assert!(!is_joke_followup_reference("describe the image"));
+        assert!(!is_joke_followup_reference("hello"));
+    }
+
+    #[test]
+    fn joke_memory_recall_suppressed_for_initial_requests() {
+        assert!(should_suppress_joke_memory_recall(
+            "tell me a dirty joke",
+            None
+        ));
+        assert!(should_suppress_joke_memory_recall(
+            "give me another joke",
+            None
+        ));
+    }
+
+    #[test]
+    fn joke_memory_recall_suppressed_for_recent_followups() {
+        let recent = Instant::now();
+        assert!(should_suppress_joke_memory_recall(
+            "why is that a dirty joke?",
+            Some(recent),
+        ));
+        assert!(should_suppress_joke_memory_recall(
+            "that wasn't NSFW enough",
+            Some(recent),
+        ));
+    }
+
+    #[test]
+    fn joke_memory_recall_not_suppressed_after_window() {
+        let stale = Instant::now()
+            - std::time::Duration::from_secs(crate::constants::JOKE_CONTINUATION_WINDOW_SECS + 1);
+        assert!(!should_suppress_joke_memory_recall(
+            "why is that a dirty joke?",
+            Some(stale),
+        ));
+    }
+
+    #[tokio::test]
+    async fn previous_assistant_joke_turn_is_preserved_in_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("tell me a dirty joke.");
+        orch.context.push_assistant(
+            "Why did the man put sugar under his pillow? Because he wanted sweet dreams.",
+        );
+        orch.context.push_user("why is that a dirty joke?");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            messages.iter().any(|m| m.role == "assistant"
+                && m.content.contains("sugar under his pillow")
+                && m.content.contains("sweet dreams")),
+            "the actual previous assistant joke must be present for explanation follow-ups"
+        );
+    }
+
+    #[tokio::test]
+    async fn comedy_mode_instruction_injected_for_identity_joke_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("tell me a gay joke");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            messages.iter().any(|m| m.role == "system"
+                && m.content.contains("Comedy mode:")
+                && m.content.contains("special refusal category")
+                && m.content.contains("Do not refuse")
+                && m.content.contains("sanitize")
+                && m.content.contains("Match the requested comedic premise")),
+            "identity-themed joke requests must carry the comedy-mode no-refusal instruction"
+        );
+    }
+
+    #[tokio::test]
+    async fn comedy_mode_instruction_injected_for_recent_identity_joke_followup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.last_joke_turn_at = Some(Instant::now());
+        orch.context.push_user("make it gay");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            messages.iter().any(|m| m.role == "system"
+                && m.content.contains("Comedy mode:")
+                && m.content.contains("Do not refuse")),
+            "recent joke follow-ups like 'make it gay' must keep comedy-mode active"
+        );
+    }
+
+    #[tokio::test]
+    async fn comedy_mode_instruction_not_injected_for_unrelated_joke_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("that was a good joke");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.role == "system" && m.content.contains("Comedy mode:")),
+            "mere joke mentions must not activate comedy-mode instructions"
+        );
+    }
+
     // ── is_self_reference_request unit tests (Phase 37.9 / T8) ────────────────
 
     #[test]
     fn is_self_reference_detects_myself_patterns() {
         let no_aliases: Vec<String> = vec![];
-        assert!(is_self_reference_request("text myself a reminder to buy milk", &no_aliases));
-        assert!(is_self_reference_request("can you message myself the grocery list", &no_aliases));
-        assert!(is_self_reference_request("send myself the weather forecast", &no_aliases));
-        assert!(is_self_reference_request("send a text to myself", &no_aliases));
-        assert!(is_self_reference_request("send a message to myself saying hello", &no_aliases));
-        assert!(is_self_reference_request("imessage myself the address", &no_aliases));
+        assert!(is_self_reference_request(
+            "text myself a reminder to buy milk",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "can you message myself the grocery list",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "send myself the weather forecast",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "send a text to myself",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "send a message to myself saying hello",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "imessage myself the address",
+            &no_aliases
+        ));
     }
 
     #[test]
     fn is_self_reference_detects_send_me_article_patterns() {
         let no_aliases: Vec<String> = vec![];
-        assert!(is_self_reference_request("text me the list of things to do", &no_aliases));
-        assert!(is_self_reference_request("send me a reminder at noon", &no_aliases));
-        assert!(is_self_reference_request("message me the address when you find it", &no_aliases));
-        assert!(is_self_reference_request("send me my next appointment details", &no_aliases));
+        assert!(is_self_reference_request(
+            "text me the list of things to do",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "send me a reminder at noon",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "message me the address when you find it",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "send me my next appointment details",
+            &no_aliases
+        ));
     }
 
     #[test]
@@ -6735,10 +7708,18 @@ mod tests {
         // "tell Bob to text me" contains "text me" but is not a self-send intent.
         // The narrow "text me the/a/my/that" patterns avoid this false positive.
         let no_aliases: Vec<String> = vec![];
-        assert!(!is_self_reference_request("tell Bob to text me", &no_aliases));
-        assert!(!is_self_reference_request("remind Sarah to text me later", &no_aliases));
-        assert!(!is_self_reference_request("ask Alex to send me a code", &no_aliases),
-            "'ask <name> to send me' is a third-party send, not self-send");
+        assert!(!is_self_reference_request(
+            "tell Bob to text me",
+            &no_aliases
+        ));
+        assert!(!is_self_reference_request(
+            "remind Sarah to text me later",
+            &no_aliases
+        ));
+        assert!(
+            !is_self_reference_request("ask Alex to send me a code", &no_aliases),
+            "'ask <name> to send me' is a third-party send, not self-send"
+        );
     }
 
     // Phase 38 / Codex finding [30]: regression guard for the YAML-promised
@@ -6748,8 +7729,14 @@ mod tests {
     fn is_self_reference_detects_ping_me_and_phone_patterns() {
         let no_aliases: Vec<String> = vec![];
         assert!(is_self_reference_request("ping me at 3pm", &no_aliases));
-        assert!(is_self_reference_request("send it to my phone", &no_aliases));
-        assert!(is_self_reference_request("send to my phone please", &no_aliases));
+        assert!(is_self_reference_request(
+            "send it to my phone",
+            &no_aliases
+        ));
+        assert!(is_self_reference_request(
+            "send to my phone please",
+            &no_aliases
+        ));
         assert!(is_self_reference_request("send to my number", &no_aliases));
     }
 
@@ -6758,8 +7745,14 @@ mod tests {
         // "ask Bob to ping me" should NOT be self-send — the delegation prefix
         // guard runs before SELF_PATTERNS matching.
         let no_aliases: Vec<String> = vec![];
-        assert!(!is_self_reference_request("ask Bob to ping me", &no_aliases));
-        assert!(!is_self_reference_request("tell Sarah to send to my phone", &no_aliases));
+        assert!(!is_self_reference_request(
+            "ask Bob to ping me",
+            &no_aliases
+        ));
+        assert!(!is_self_reference_request(
+            "tell Sarah to send to my phone",
+            &no_aliases
+        ));
     }
 
     #[test]
@@ -6767,7 +7760,10 @@ mod tests {
         let no_aliases: Vec<String> = vec![];
         assert!(!is_self_reference_request("what time is it", &no_aliases));
         assert!(!is_self_reference_request("tell me a joke", &no_aliases));
-        assert!(!is_self_reference_request("what's the weather in Tokyo", &no_aliases));
+        assert!(!is_self_reference_request(
+            "what's the weather in Tokyo",
+            &no_aliases
+        ));
     }
 
     #[test]
@@ -6775,9 +7771,15 @@ mod tests {
         // Operator's nickname: "jay". Utterance "text jay my grocery list"
         // resolves to self-send.
         let aliases = vec!["jay".to_string()];
-        assert!(is_self_reference_request("text jay my grocery list", &aliases));
+        assert!(is_self_reference_request(
+            "text jay my grocery list",
+            &aliases
+        ));
         assert!(is_self_reference_request("send jay the weather", &aliases));
-        assert!(is_self_reference_request("message jay a reminder", &aliases));
+        assert!(is_self_reference_request(
+            "message jay a reminder",
+            &aliases
+        ));
         assert!(is_self_reference_request("imessage jay hello", &aliases));
     }
 
@@ -6786,28 +7788,46 @@ mod tests {
         // Alias "jay" must NOT match "text jaywalker" (substring with continuation)
         // — the whole-word boundary after the alias prevents this.
         let aliases = vec!["jay".to_string()];
-        assert!(!is_self_reference_request("text jaywalker the news", &aliases),
-            "alias 'jay' must not match 'jaywalker' — alphanumeric boundary required");
-        assert!(!is_self_reference_request("message jayden the update", &aliases),
-            "alias 'jay' must not match 'jayden'");
+        assert!(
+            !is_self_reference_request("text jaywalker the news", &aliases),
+            "alias 'jay' must not match 'jaywalker' — alphanumeric boundary required"
+        );
+        assert!(
+            !is_self_reference_request("message jayden the update", &aliases),
+            "alias 'jay' must not match 'jayden'"
+        );
     }
 
     #[test]
     fn is_self_reference_alias_allows_terminal_punctuation() {
         // "text jay" at end of utterance or with punctuation should still match.
         let aliases = vec!["jay".to_string()];
-        assert!(is_self_reference_request("text jay", &aliases), "end-of-string boundary");
-        assert!(is_self_reference_request("text jay,", &aliases), "comma boundary");
-        assert!(is_self_reference_request("text jay.", &aliases), "period boundary");
-        assert!(is_self_reference_request("text jay the latest", &aliases), "space boundary");
+        assert!(
+            is_self_reference_request("text jay", &aliases),
+            "end-of-string boundary"
+        );
+        assert!(
+            is_self_reference_request("text jay,", &aliases),
+            "comma boundary"
+        );
+        assert!(
+            is_self_reference_request("text jay.", &aliases),
+            "period boundary"
+        );
+        assert!(
+            is_self_reference_request("text jay the latest", &aliases),
+            "space boundary"
+        );
     }
 
     #[test]
     fn is_self_reference_empty_alias_is_ignored() {
         // An empty alias in the list must not match every utterance.
         let aliases = vec![String::new(), "jay".to_string()];
-        assert!(!is_self_reference_request("what time is it", &aliases),
-            "empty alias must not cause spurious self-send matches");
+        assert!(
+            !is_self_reference_request("what time is it", &aliases),
+            "empty alias must not cause spurious self-send matches"
+        );
         assert!(is_self_reference_request("text jay the list", &aliases));
     }
 
@@ -6820,13 +7840,19 @@ set targetService to 1st service whose service type = iMessage
 set targetBuddy to buddy "+15551234567" of targetService
 send "hello world" to targetBuddy
 end tell"#;
-        assert_eq!(extract_messages_body(script).as_deref(), Some("hello world"));
+        assert_eq!(
+            extract_messages_body(script).as_deref(),
+            Some("hello world")
+        );
     }
 
     #[test]
     fn extract_messages_body_preserves_case() {
         let script = r#"send "Hello World With CaseMix" to targetBuddy"#;
-        assert_eq!(extract_messages_body(script).as_deref(), Some("Hello World With CaseMix"));
+        assert_eq!(
+            extract_messages_body(script).as_deref(),
+            Some("Hello World With CaseMix")
+        );
     }
 
     #[test]
@@ -6834,7 +7860,10 @@ end tell"#;
         let script = r#"send "she said \"hi\"" to targetBuddy"#;
         // The extracted body keeps the AppleScript escapes as-is; re-encoding
         // is the caller's job (build_self_send_script re-escapes from raw).
-        assert_eq!(extract_messages_body(script).as_deref(), Some("she said \\\"hi\\\""));
+        assert_eq!(
+            extract_messages_body(script).as_deref(),
+            Some("she said \\\"hi\\\"")
+        );
     }
 
     #[test]
@@ -6842,8 +7871,10 @@ end tell"#;
         let script = r#"tell application "Contacts"
 set m to first person whose name is "Alice"
 end tell"#;
-        assert!(extract_messages_body(script).is_none(),
-            "scripts without a send construct should return None");
+        assert!(
+            extract_messages_body(script).is_none(),
+            "scripts without a send construct should return None"
+        );
     }
 
     #[test]
@@ -6870,8 +7901,10 @@ end tell"#;
         let s = build_self_send_script("+15551234567", r#"she said "hi""#);
         // The body's quotes are escaped via \" so the outer AppleScript string
         // literal stays valid.
-        assert!(s.contains(r#"send "she said \"hi\"" to targetBuddy"#),
-            "embedded quotes must be backslash-escaped; got: {s}");
+        assert!(
+            s.contains(r#"send "she said \"hi\"" to targetBuddy"#),
+            "embedded quotes must be backslash-escaped; got: {s}"
+        );
     }
 
     #[test]
@@ -6879,23 +7912,29 @@ end tell"#;
         let s = build_self_send_script("user@example.com", "line one\nline two");
         // Raw \n is split to `" & linefeed & "` because AppleScript string
         // literals cannot contain newlines.
-        assert!(s.contains(r#"send "line one" & linefeed & "line two" to targetBuddy"#),
-            "newline must become ' & linefeed & '; got: {s}");
+        assert!(
+            s.contains(r#"send "line one" & linefeed & "line two" to targetBuddy"#),
+            "newline must become ' & linefeed & '; got: {s}"
+        );
     }
 
     #[test]
     fn build_self_send_script_escapes_backslashes() {
         let s = build_self_send_script("+15551234567", r"path: C:\Users\me");
         // Backslash escaping: raw \ → \\
-        assert!(s.contains(r#"send "path: C:\\Users\\me" to targetBuddy"#),
-            "backslashes must be doubled; got: {s}");
+        assert!(
+            s.contains(r#"send "path: C:\\Users\\me" to targetBuddy"#),
+            "backslashes must be doubled; got: {s}"
+        );
     }
 
     #[test]
     fn build_self_send_script_email_handle() {
         let s = build_self_send_script("user@example.com", "ok");
-        assert!(s.contains("buddy \"user@example.com\""),
-            "email handles must embed literally; got: {s}");
+        assert!(
+            s.contains("buddy \"user@example.com\""),
+            "email handles must embed literally; got: {s}"
+        );
     }
 
     // ── ActionApproval integration test ───────────────────────────────────────
@@ -6908,8 +7947,8 @@ end tell"#;
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let appr = ActionApproval {
-            action_id:     "unknown-id-that-was-never-pending".to_string(),
-            approved:      true,
+            action_id: "unknown-id-that-was-never-pending".to_string(),
+            approved: true,
             operator_note: String::new(),
         };
         let result = orch.handle_action_approval(appr, new_trace()).await;
@@ -6990,8 +8029,14 @@ end tell"#;
     async fn orchestrator_degraded_notification_flags_start_false() {
         let tmp = tempfile::tempdir().unwrap();
         let (orch, _rx) = make_orchestrator(tmp.path());
-        assert!(!orch.voice_degraded_notified,   "voice_degraded_notified must be false on construction");
-        assert!(!orch.browser_degraded_notified, "browser_degraded_notified must be false on construction");
+        assert!(
+            !orch.voice_degraded_notified,
+            "voice_degraded_notified must be false on construction"
+        );
+        assert!(
+            !orch.browser_degraded_notified,
+            "browser_degraded_notified must be false on construction"
+        );
     }
 
     #[tokio::test]
@@ -7004,7 +8049,7 @@ end tell"#;
         while rx.try_recv().is_ok() {}
 
         let evt = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::HotkeyActivated.into(),
+            r#type: crate::ipc::proto::SystemEventType::HotkeyActivated.into(),
             payload: "{}".to_string(),
         };
         orch.handle_system_event(evt, new_trace()).await.unwrap();
@@ -7013,7 +8058,8 @@ end tell"#;
         // make_orchestrator) has a chance to move the event into the unbounded rx.
         tokio::task::yield_now().await;
 
-        let server_event = rx.try_recv()
+        let server_event = rx
+            .try_recv()
             .expect("orchestrator must emit a server event after HOTKEY_ACTIVATED")
             .expect("server event must be Ok(...)");
 
@@ -7041,7 +8087,7 @@ end tell"#;
         while rx.try_recv().is_ok() {}
 
         let evt = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::Connected.into(),
+            r#type: crate::ipc::proto::SystemEventType::Connected.into(),
             payload: "{}".to_string(),
         };
         orch.handle_system_event(evt, new_trace()).await.unwrap();
@@ -7050,32 +8096,43 @@ end tell"#;
         tokio::task::yield_now().await;
 
         // First event: EntityState(Idle)
-        let first = rx.try_recv()
+        let first = rx
+            .try_recv()
             .expect("CONNECTED must emit at least one event")
             .expect("event must be Ok(...)");
         assert!(
-            matches!(first.event, Some(crate::ipc::proto::server_event::Event::EntityState(_))),
+            matches!(
+                first.event,
+                Some(crate::ipc::proto::server_event::Event::EntityState(_))
+            ),
             "first event from CONNECTED must be EntityStateChange"
         );
 
         // Second event: ConfigSync with default hotkey values
-        let second = rx.try_recv()
+        let second = rx
+            .try_recv()
             .expect("CONNECTED must emit a second event (ConfigSync)")
             .expect("event must be Ok(...)");
         match second.event {
             Some(crate::ipc::proto::server_event::Event::ConfigSync(ref cs)) => {
-                let hk = cs.hotkey.as_ref().expect("ConfigSync must carry HotkeyConfig");
-                assert_eq!(hk.key_code, 49,  "default key_code must be 49 (kVK_Space)");
-                assert!(hk.ctrl,             "default ctrl must be true");
-                assert!(hk.shift,            "default shift must be true");
-                assert!(!hk.cmd,             "default cmd must be false");
-                assert!(!hk.option,          "default option must be false");
+                let hk = cs
+                    .hotkey
+                    .as_ref()
+                    .expect("ConfigSync must carry HotkeyConfig");
+                assert_eq!(hk.key_code, 49, "default key_code must be 49 (kVK_Space)");
+                assert!(hk.ctrl, "default ctrl must be true");
+                assert!(hk.shift, "default shift must be true");
+                assert!(!hk.cmd, "default cmd must be false");
+                assert!(!hk.option, "default option must be false");
             }
             other => panic!("Expected ConfigSync, got {:?}", other),
         }
 
         // No further events.
-        assert!(rx.try_recv().is_err(), "CONNECTED must produce exactly two events");
+        assert!(
+            rx.try_recv().is_err(),
+            "CONNECTED must produce exactly two events"
+        );
     }
 
     #[tokio::test]
@@ -7086,14 +8143,15 @@ end tell"#;
         while rx.try_recv().is_ok() {}
 
         let evt = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
+            r#type: crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
             payload: "{}".to_string(),
         };
         orch.handle_system_event(evt, new_trace()).await.unwrap();
 
         tokio::task::yield_now().await;
 
-        let server_event = rx.try_recv()
+        let server_event = rx
+            .try_recv()
             .expect("AUDIO_PLAYBACK_COMPLETE must emit a server event")
             .expect("event must be Ok(...)");
         match server_event.event {
@@ -7123,7 +8181,7 @@ end tell"#;
         orch.action_awaiting_approval = true;
 
         let evt = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
+            r#type: crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
             payload: "{}".to_string(),
         };
         orch.handle_system_event(evt, new_trace()).await.unwrap();
@@ -7147,18 +8205,24 @@ end tell"#;
         // Step 1: flag set — event must be suppressed.
         orch.action_awaiting_approval = true;
         let evt = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
+            r#type: crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
             payload: "{}".to_string(),
         };
-        orch.handle_system_event(evt.clone(), new_trace()).await.unwrap();
+        orch.handle_system_event(evt.clone(), new_trace())
+            .await
+            .unwrap();
         tokio::task::yield_now().await;
-        assert!(rx.try_recv().is_err(), "event must be suppressed with flag=true");
+        assert!(
+            rx.try_recv().is_err(),
+            "event must be suppressed with flag=true"
+        );
 
         // Step 2: flag cleared — event must send IDLE.
         orch.action_awaiting_approval = false;
         orch.handle_system_event(evt, new_trace()).await.unwrap();
         tokio::task::yield_now().await;
-        let server_event = rx.try_recv()
+        let server_event = rx
+            .try_recv()
             .expect("AUDIO_PLAYBACK_COMPLETE must emit IDLE after flag cleared")
             .expect("event must be Ok(...)");
         match server_event.event {
@@ -7186,11 +8250,13 @@ end tell"#;
 
         // Operator approves (action_id unknown — resolve() handles it gracefully).
         let appr = ActionApproval {
-            action_id:     "test-action-id".to_string(),
-            approved:      true,
+            action_id: "test-action-id".to_string(),
+            approved: true,
             operator_note: String::new(),
         };
-        orch.handle_action_approval(appr, new_trace()).await.unwrap();
+        orch.handle_action_approval(appr, new_trace())
+            .await
+            .unwrap();
 
         // Flag must be cleared.
         assert!(
@@ -7203,15 +8269,18 @@ end tell"#;
         // (e.g. "Action cancelled."). Drain TextResponse events until we find EntityState.
         tokio::task::yield_now().await;
         let idle_evt = loop {
-            let evt = rx.try_recv()
+            let evt = rx
+                .try_recv()
                 .expect("handle_action_approval must emit EntityState(Idle)")
                 .expect("event must be Ok(...)");
             match evt.event {
                 Some(crate::ipc::proto::server_event::Event::TextResponse(_)) => continue,
-                other_event => break ServerEvent {
-                    trace_id: evt.trace_id,
-                    event:    other_event,
-                },
+                other_event => {
+                    break ServerEvent {
+                        trace_id: evt.trace_id,
+                        event: other_event,
+                    }
+                }
             }
         };
         match idle_evt.event {
@@ -7242,14 +8311,17 @@ end tell"#;
 
         // Simulate APP_FOCUSED for Xcode.
         let evt = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::AppFocused.into(),
+            r#type: crate::ipc::proto::SystemEventType::AppFocused.into(),
             payload: r#"{"bundle_id":"com.apple.dt.Xcode","name":"Xcode"}"#.to_string(),
         };
         orch.handle_system_event(evt, new_trace()).await.unwrap();
 
         // After the event — context summary must contain the app name.
         let summary = orch.context_observer.context_summary();
-        assert!(summary.is_some(), "context_summary must return Some after APP_FOCUSED");
+        assert!(
+            summary.is_some(),
+            "context_summary must return Some after APP_FOCUSED"
+        );
         assert!(
             summary.unwrap().contains("Xcode"),
             "context_summary must contain the focused app name"
@@ -7270,7 +8342,8 @@ end tell"#;
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         // Seed a user turn — without one, the prefix has nowhere to land.
-        orch.context.push_user("What does this code do?".to_string());
+        orch.context
+            .push_user("What does this code do?".to_string());
 
         // Simulate CLIPBOARD_CHANGED arriving through handle_system_event.
         let clipboard_event = SystemEvent {
@@ -7285,14 +8358,17 @@ end tell"#;
 
         // No system-role message should carry the old "Clipboard:" label.
         assert!(
-            !messages.iter().any(|m| m.role == "system" && m.content.starts_with("Clipboard:")),
+            !messages
+                .iter()
+                .any(|m| m.role == "system" && m.content.starts_with("Clipboard:")),
             "legacy 'Clipboard:' system message must not appear after T0.5"
         );
 
         // The genuine user message must be prefixed with the env block.
-        let user_msg = messages.iter().find(|m|
-            m.role == "user" && !is_tool_result_content(&m.content)
-        ).expect("genuine user message must be present");
+        let user_msg = messages
+            .iter()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("genuine user message must be present");
         assert!(
             user_msg.content.starts_with("[Env "),
             "user message must be prefixed with [Env ...] (got: {:?})",
@@ -7319,7 +8395,7 @@ end tell"#;
 
         // Clipboard present to prove the two pathways don't collide.
         let clipboard_event = SystemEvent {
-            r#type:  crate::ipc::proto::SystemEventType::ClipboardChanged.into(),
+            r#type: crate::ipc::proto::SystemEventType::ClipboardChanged.into(),
             payload: r#"{"text":"clipboard content here"}"#.to_string(),
         };
         orch.handle_system_event(clipboard_event, new_trace())
@@ -7327,12 +8403,13 @@ end tell"#;
             .expect("CLIPBOARD_CHANGED must succeed");
 
         // User turn so the env prefix has somewhere to attach.
-        orch.context.push_user("What's in my clipboard?".to_string());
+        orch.context
+            .push_user("What's in my clipboard?".to_string());
 
         let recall = vec![crate::retrieval::store::MemoryEntry {
-            id:         "test-id".to_string(),
-            content:    "recalled fact".to_string(),
-            source:     crate::constants::MEMORY_SOURCE_CONVERSATION.to_string(),
+            id: "test-id".to_string(),
+            content: "recalled fact".to_string(),
+            source: crate::constants::MEMORY_SOURCE_CONVERSATION.to_string(),
             entry_type: "turn".to_string(),
             session_id: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -7342,12 +8419,15 @@ end tell"#;
 
         // Clipboard now on the user turn, NOT a system message.
         assert!(
-            !messages.iter().any(|m| m.role == "system" && m.content.starts_with("Clipboard:")),
+            !messages
+                .iter()
+                .any(|m| m.role == "system" && m.content.starts_with("Clipboard:")),
             "legacy 'Clipboard:' system message must not appear after T0.5"
         );
-        let user_msg = messages.iter().find(|m|
-            m.role == "user" && !is_tool_result_content(&m.content)
-        ).expect("user turn must be present");
+        let user_msg = messages
+            .iter()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("user turn must be present");
         assert!(
             user_msg.content.contains("[Env \u{00B7} clipboard"),
             "clipboard must ride on the user-turn env prefix"
@@ -7357,10 +8437,15 @@ end tell"#;
         // "Reference notes from prior sessions …" rather than the legacy "Memory: …"
         // label. The structural invariant — system message precedes first user turn —
         // is preserved.
-        let memory_idx = messages.iter().position(|m| {
-            m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
-        }).expect("prior-session reference block must be present when recall is non-empty");
-        let first_user_idx = messages.iter().position(|m| m.role == "user")
+        let memory_idx = messages
+            .iter()
+            .position(|m| {
+                m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
+            })
+            .expect("prior-session reference block must be present when recall is non-empty");
+        let first_user_idx = messages
+            .iter()
+            .position(|m| m.role == "user")
             .expect("user message must exist");
         assert!(
             memory_idx < first_user_idx,
@@ -7382,9 +8467,9 @@ end tell"#;
         orch.context.push_user("explain ret2libc".to_string());
 
         let recall = vec![crate::retrieval::store::MemoryEntry {
-            id:         "prior-1".to_string(),
-            content:    "User: explain ret2libc\nAssistant: ret2libc is a technique…".to_string(),
-            source:     "memory".to_string(),
+            id: "prior-1".to_string(),
+            content: "User: explain ret2libc\nAssistant: ret2libc is a technique…".to_string(),
+            source: "memory".to_string(),
             entry_type: "turn".to_string(),
             // Different session from orch.session_id → goes to prior-session bucket.
             session_id: Some("some-other-session-uuid".to_string()),
@@ -7393,9 +8478,12 @@ end tell"#;
         }];
 
         let messages = orch.prepare_messages_for_inference(&recall);
-        let block = messages.iter().find(|m|
-            m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
-        ).expect("prior-session framing must appear");
+        let block = messages
+            .iter()
+            .find(|m| {
+                m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
+            })
+            .expect("prior-session framing must appear");
 
         // Role markers neutralized.
         assert!(
@@ -7412,7 +8500,9 @@ end tell"#;
             "rewritten 'Q:' form must carry the original question"
         );
         assert!(
-            block.content.contains("do not claim to have said any of this"),
+            block
+                .content
+                .contains("do not claim to have said any of this"),
             "framing must explicitly tell the model this is not part of the current conversation"
         );
     }
@@ -7425,9 +8515,9 @@ end tell"#;
         orch.context.push_user("continue".to_string());
 
         let recall = vec![crate::retrieval::store::MemoryEntry {
-            id:         "current-1".to_string(),
-            content:    "User: earlier question\nAssistant: earlier answer".to_string(),
-            source:     "memory".to_string(),
+            id: "current-1".to_string(),
+            content: "User: earlier question\nAssistant: earlier answer".to_string(),
+            source: "memory".to_string(),
             entry_type: "turn".to_string(),
             session_id: Some(current_session),
             created_at: "2026-04-19T01:00:00Z".to_string(),
@@ -7437,26 +8527,27 @@ end tell"#;
         let messages = orch.prepare_messages_for_inference(&recall);
 
         assert!(
-            messages.iter().any(|m|
-                m.role == "system" && m.content.starts_with("Earlier in this conversation:")
-            ),
+            messages
+                .iter()
+                .any(|m| m.role == "system"
+                    && m.content.starts_with("Earlier in this conversation:")),
             "current-session recall must use 'Earlier in this conversation:' framing"
         );
         // Current-session entries KEEP the original User:/Assistant: format —
         // they genuinely are part of this conversation, so role markers are
         // semantically honest.
-        let block = messages.iter().find(|m|
-            m.role == "system" && m.content.starts_with("Earlier in this conversation:")
-        ).unwrap();
+        let block = messages
+            .iter()
+            .find(|m| m.role == "system" && m.content.starts_with("Earlier in this conversation:"))
+            .unwrap();
         assert!(
             block.content.contains("Assistant: earlier answer"),
             "current-session entries must not be role-neutralized (format is honest)"
         );
         // And must NOT be framed as cross-session reference material.
         assert!(
-            !messages.iter().any(|m|
-                m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
-            ),
+            !messages.iter().any(|m| m.role == "system"
+                && m.content.starts_with("Reference notes from prior sessions")),
             "pure-current-session recall must not emit prior-session framing"
         );
     }
@@ -7490,12 +8581,18 @@ end tell"#;
         ];
 
         let messages = orch.prepare_messages_for_inference(&recall);
-        let prior_idx = messages.iter().position(|m|
-            m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
-        ).expect("prior-session block expected");
-        let current_idx = messages.iter().position(|m|
-            m.role == "system" && m.content.starts_with("Earlier in this conversation:")
-        ).expect("current-session block expected");
+        let prior_idx = messages
+            .iter()
+            .position(|m| {
+                m.role == "system" && m.content.starts_with("Reference notes from prior sessions")
+            })
+            .expect("prior-session block expected");
+        let current_idx = messages
+            .iter()
+            .position(|m| {
+                m.role == "system" && m.content.starts_with("Earlier in this conversation:")
+            })
+            .expect("current-session block expected");
         assert!(
             prior_idx < current_idx,
             "prior-session block ({prior_idx}) must appear before current-session block ({current_idx}) — disclaimer must be read first"
@@ -7541,7 +8638,8 @@ end tell"#;
             "cargo build".to_string(),
             "/Users/test/project".to_string(),
             Some(1),
-        ).await;
+        )
+        .await;
 
         // User turn required for the env prefix to attach.
         orch.context.push_user("what just happened?".to_string());
@@ -7550,23 +8648,38 @@ end tell"#;
 
         // No legacy "Shell:" system message should be present.
         assert!(
-            !messages.iter().any(|m| m.role == "system" && m.content.starts_with("Shell:")),
+            !messages
+                .iter()
+                .any(|m| m.role == "system" && m.content.starts_with("Shell:")),
             "legacy 'Shell:' system message must not appear after T0.5"
         );
 
-        let user_msg = messages.iter().find(|m|
-            m.role == "user" && !is_tool_result_content(&m.content)
-        ).expect("user turn must be present");
+        let user_msg = messages
+            .iter()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("user turn must be present");
 
         assert!(
             user_msg.content.starts_with("[Env "),
             "user turn must be prefixed with [Env ...] when shell context is fresh (got: {:?})",
             user_msg.content
         );
-        assert!(user_msg.content.contains("cargo build"),         "command must appear in env prefix");
-        assert!(user_msg.content.contains("exit 1"),              "exit code must appear in env prefix");
-        assert!(user_msg.content.contains("/Users/test/project"), "cwd must appear in env prefix");
-        assert!(user_msg.content.contains("what just happened?"), "original query must survive");
+        assert!(
+            user_msg.content.contains("cargo build"),
+            "command must appear in env prefix"
+        );
+        assert!(
+            user_msg.content.contains("exit 1"),
+            "exit code must appear in env prefix"
+        );
+        assert!(
+            user_msg.content.contains("/Users/test/project"),
+            "cwd must appear in env prefix"
+        );
+        assert!(
+            user_msg.content.contains("what just happened?"),
+            "original query must survive"
+        );
     }
 
     #[tokio::test]
@@ -7579,15 +8692,18 @@ end tell"#;
         orch.context.push_user("hello".to_string());
 
         let messages = orch.prepare_messages_for_inference(&[]);
-        let user_msg = messages.iter().find(|m|
-            m.role == "user" && !is_tool_result_content(&m.content)
-        ).expect("user turn must be present");
+        let user_msg = messages
+            .iter()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("user turn must be present");
         assert!(
             !user_msg.content.starts_with("[Env "),
             "user turn must not carry [Env ...] when neither clipboard nor shell context exist"
         );
         assert!(
-            !messages.iter().any(|m| m.role == "system" && m.content.contains("Shell:")),
+            !messages
+                .iter()
+                .any(|m| m.role == "system" && m.content.contains("Shell:")),
             "legacy 'Shell:' system message must not appear"
         );
     }
@@ -7602,7 +8718,8 @@ end tell"#;
         let tmp = tempfile::tempdir().unwrap();
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
-        orch.handle_shell_command("cargo build".to_string(), "/tmp".to_string(), Some(0)).await;
+        orch.handle_shell_command("cargo build".to_string(), "/tmp".to_string(), Some(0))
+            .await;
 
         let snap = orch.context_observer.snapshot();
         assert_eq!(
@@ -7619,7 +8736,8 @@ end tell"#;
         let tmp = tempfile::tempdir().unwrap();
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
-        orch.handle_shell_command("sleep 60".to_string(), "/tmp".to_string(), Some(130)).await;
+        orch.handle_shell_command("sleep 60".to_string(), "/tmp".to_string(), Some(130))
+            .await;
 
         let snap = orch.context_observer.snapshot();
         assert_eq!(
@@ -7635,11 +8753,14 @@ end tell"#;
         let tmp = tempfile::tempdir().unwrap();
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
-        orch.handle_shell_command("some_cmd".to_string(), "/tmp".to_string(), None).await;
+        orch.handle_shell_command("some_cmd".to_string(), "/tmp".to_string(), None)
+            .await;
 
         let snap = orch.context_observer.snapshot();
         assert!(
-            snap.last_shell_command.as_ref().map_or(false, |s| s.exit_code.is_none()),
+            snap.last_shell_command
+                .as_ref()
+                .map_or(false, |s| s.exit_code.is_none()),
             "None exit code must be stored in context without proactive attempt"
         );
     }
@@ -7685,8 +8806,15 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(&cfg, "test-session".to_string(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("orchestrator creation should succeed");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            "test-session".to_string(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("orchestrator creation should succeed");
 
         let messages = orch.prepare_messages_for_inference(&[]);
         for msg in &messages {
@@ -7694,7 +8822,8 @@ end tell"#;
                 msg.images.is_none(),
                 "Message from prepare_messages_for_inference must have images=None \
                  (role: {}, content_len: {})",
-                msg.role, msg.content.len()
+                msg.role,
+                msg.content.len()
             );
         }
     }
@@ -7732,9 +8861,10 @@ end tell"#;
         ];
 
         // Replicate the Round 3 vision-attach logic: skip tool-result user turns.
-        let target = messages.iter_mut().rev().find(|m|
-            m.role == "user" && !is_tool_result_content(&m.content)
-        );
+        let target = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
         if let Some(last_user) = target {
             last_user.images = Some(vec![fake_b64.clone()]);
         }
@@ -7779,8 +8909,15 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(&cfg, "test-session".to_string(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("orchestrator creation should succeed");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            "test-session".to_string(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("orchestrator creation should succeed");
 
         // Does not panic regardless of display availability.
         let _result = orch.capture_screen().await;
@@ -7795,9 +8932,12 @@ end tell"#;
         // Determinism is required: the phrase selection must not vary across
         // runs (no RNG), ensuring predictable behavior in logs and replays.
         let id = "abcdef12-0000-0000-0000-000000000000".to_string();
-        let first  = CoreOrchestrator::bridging_phrase(&id);
+        let first = CoreOrchestrator::bridging_phrase(&id);
         let second = CoreOrchestrator::bridging_phrase(&id);
-        assert_eq!(first, second, "same trace_id must always produce the same phrase");
+        assert_eq!(
+            first, second,
+            "same trace_id must always produce the same phrase"
+        );
     }
 
     #[test]
@@ -7814,7 +8954,11 @@ end tell"#;
             .collect();
         // All four phrases must be distinct.
         let unique: std::collections::HashSet<&str> = phrases.iter().copied().collect();
-        assert_eq!(unique.len(), 4, "all four bridging phrase slots must be reachable");
+        assert_eq!(
+            unique.len(),
+            4,
+            "all four bridging phrase slots must be reachable"
+        );
     }
 
     #[tokio::test]
@@ -7826,20 +8970,29 @@ end tell"#;
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
         let before = orch.context.messages().len();
-        orch.context.push_tool_result("[Retrieved: test query]\nSome content.");
+        orch.context
+            .push_tool_result("[Retrieved: test query]\nSome content.");
         let after = orch.context.messages().len();
 
         assert_eq!(
-            after, before + 1,
+            after,
+            before + 1,
             "push_tool_result must add exactly one message to the conversation context"
         );
         // The injected message must appear at the tail.
-        let last = orch.context.messages().last().expect("messages must be non-empty");
+        let last = orch
+            .context
+            .messages()
+            .last()
+            .expect("messages must be non-empty");
         // Post Round 3 regression fix: tool results are injected as role="user"
         // (Ollama-universal role) with a content prefix for disambiguation.
         // Custom roles ("tool", "retrieval") were silently dropped by base-instruct
         // models, so this assertion now pins the universal-role contract.
-        assert_eq!(last.role, "user", "injected tool result must use role=user (Ollama-universal)");
+        assert_eq!(
+            last.role, "user",
+            "injected tool result must use role=user (Ollama-universal)"
+        );
         assert!(
             last.content.contains("Retrieved"),
             "injected content must be preserved verbatim"
@@ -7855,23 +9008,30 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(&cfg, "test-session".to_string(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("orchestrator creation should succeed");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            "test-session".to_string(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("orchestrator creation should succeed");
 
         let recall = vec![
             crate::retrieval::store::MemoryEntry {
-                id:         "id1".to_string(),
-                content:    "I'm building Project Dexter".to_string(),
-                source:     "operator".to_string(),
+                id: "id1".to_string(),
+                content: "I'm building Project Dexter".to_string(),
+                source: "operator".to_string(),
                 entry_type: "fact".to_string(),
                 session_id: None,
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 similarity: 0.9,
             },
             crate::retrieval::store::MemoryEntry {
-                id:         "id2".to_string(),
-                content:    "I prefer Rust over Go".to_string(),
-                source:     "operator".to_string(),
+                id: "id2".to_string(),
+                content: "I prefer Rust over Go".to_string(),
+                source: "operator".to_string(),
                 entry_type: "fact".to_string(),
                 session_id: None,
                 created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -7883,13 +9043,22 @@ end tell"#;
         // Phase 37.8: entries with session_id=None are treated as prior-session
         // (conservative — unknown provenance is framed as reference material).
         // Old "Memory:" label replaced with "Reference notes from prior sessions …".
-        let memory_msg = messages.iter().find(|m|
-            m.content.starts_with("Reference notes from prior sessions")
+        let memory_msg = messages
+            .iter()
+            .find(|m| m.content.starts_with("Reference notes from prior sessions"));
+        assert!(
+            memory_msg.is_some(),
+            "A prior-session reference block must be injected"
         );
-        assert!(memory_msg.is_some(), "A prior-session reference block must be injected");
         let content = &memory_msg.unwrap().content;
-        assert!(content.contains("I'm building Project Dexter"), "First recall entry must be present");
-        assert!(content.contains("I prefer Rust over Go"), "Second recall entry must be present");
+        assert!(
+            content.contains("I'm building Project Dexter"),
+            "First recall entry must be present"
+        );
+        assert!(
+            content.contains("I prefer Rust over Go"),
+            "Second recall entry must be present"
+        );
     }
 
     #[test]
@@ -7899,16 +9068,26 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(&cfg, "test-session".to_string(), tx, action_tx, generation_tx, crate::orchestrator::SharedDaemonState::new_degraded())
-            .expect("orchestrator creation should succeed");
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            "test-session".to_string(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("orchestrator creation should succeed");
 
         let messages = orch.prepare_messages_for_inference(&[]);
         // Phase 37.8: neither framing header should appear when recall is empty.
-        let has_any_recall_block = messages.iter().any(|m|
+        let has_any_recall_block = messages.iter().any(|m| {
             m.content.starts_with("Reference notes from prior sessions")
-            || m.content.starts_with("Earlier in this conversation:")
+                || m.content.starts_with("Earlier in this conversation:")
+        });
+        assert!(
+            !has_any_recall_block,
+            "No recall block when recall is empty"
         );
-        assert!(!has_any_recall_block, "No recall block when recall is empty");
     }
 
     #[test]
@@ -7931,9 +9110,10 @@ end tell"#;
 
         // Round 3 attachment logic: skip user-role messages that are really
         // tool-result injections (identified by their content prefix).
-        let target = messages.iter_mut().rev().find(|m|
-            m.role == "user" && !is_tool_result_content(&m.content)
-        );
+        let target = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
         if let Some(last_user) = target {
             last_user.images = Some(vec![fake_b64.clone()]);
         }
@@ -7947,7 +9127,10 @@ end tell"#;
         );
 
         // Assert: system message untouched.
-        assert!(messages[0].images.is_none(), "System message must not have images");
+        assert!(
+            messages[0].images.is_none(),
+            "System message must not have images"
+        );
 
         // Assert: tool-result user-role message untouched and correctly classified.
         assert!(
@@ -7964,14 +9147,20 @@ end tell"#;
     fn screen_capture_path_prefix_generates_unique_per_call_paths() {
         // Verify the Phase 20 race condition fix: each call generates a unique path.
         use crate::constants::SCREEN_CAPTURE_PATH_PREFIX;
-        let path1 = format!("{SCREEN_CAPTURE_PATH_PREFIX}_{}.png",
-            uuid::Uuid::new_v4().as_simple());
-        let path2 = format!("{SCREEN_CAPTURE_PATH_PREFIX}_{}.png",
-            uuid::Uuid::new_v4().as_simple());
+        let path1 = format!(
+            "{SCREEN_CAPTURE_PATH_PREFIX}_{}.png",
+            uuid::Uuid::new_v4().as_simple()
+        );
+        let path2 = format!(
+            "{SCREEN_CAPTURE_PATH_PREFIX}_{}.png",
+            uuid::Uuid::new_v4().as_simple()
+        );
 
         assert_ne!(path1, path2, "Each invocation must produce a unique path");
-        assert!(path1.starts_with("/tmp/dexter_screen_"),
-            "Path must start with /tmp/dexter_screen_");
+        assert!(
+            path1.starts_with("/tmp/dexter_screen_"),
+            "Path must start with /tmp/dexter_screen_"
+        );
         assert!(path1.ends_with(".png"), "Path must end with .png");
     }
 
@@ -7989,19 +9178,22 @@ end tell"#;
         // Deliver a result for an unknown action_id — no interaction registered.
         let result = ActionResult {
             action_id: "unknown-id".to_string(),
-            outcome:   ActionOutcome::Completed {
-                action_id:    "unknown-id".to_string(),
-                output:       "hello".to_string(),
+            outcome: ActionOutcome::Completed {
+                action_id: "unknown-id".to_string(),
+                output: "hello".to_string(),
                 rewritten_to: None,
             },
-            trace_id:  new_trace(),
+            trace_id: new_trace(),
         };
         let r = orch.handle_action_result(result).await;
         assert!(r.is_ok(), "Stale result should return Ok, not error");
 
         // No events emitted — result was silently discarded.
         tokio::task::yield_now().await;
-        assert!(rx.try_recv().is_err(), "Stale result must not emit any events");
+        assert!(
+            rx.try_recv().is_err(),
+            "Stale result must not emit any events"
+        );
     }
 
     #[tokio::test]
@@ -8012,31 +9204,36 @@ end tell"#;
         let action_id = Uuid::new_v4().to_string();
 
         // Insert a tracked interaction for this action_id.
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    0,
-            original_content: String::new(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: String::new(),
+                is_terminal_workflow: false,
+            },
+        );
 
         let result = ActionResult {
             action_id: action_id.clone(),
-            outcome:   ActionOutcome::Completed {
-                action_id:    action_id.clone(),
-                output:       "test output".to_string(),
+            outcome: ActionOutcome::Completed {
+                action_id: action_id.clone(),
+                output: "test output".to_string(),
                 rewritten_to: None,
             },
-            trace_id:  new_trace(),
+            trace_id: new_trace(),
         };
         let r = orch.handle_action_result(result).await;
         assert!(r.is_ok());
 
         // Interaction should be marked Complete (handle_action_result transitions
         // through FeedbackPending → Complete synchronously when TTS is unavailable).
-        let interaction = orch.interactions.get(&action_id)
+        let interaction = orch
+            .interactions
+            .get(&action_id)
             .expect("Interaction should still exist");
         assert!(
             matches!(interaction.stage, InteractionStage::Complete),
@@ -8060,20 +9257,24 @@ end tell"#;
         // Simulate the dispatch site: register the interaction AND insert a
         // JoinHandle into the in-flight map. Using a never-completing future
         // so the handle is genuinely "in flight" until aborted/dropped.
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    0,
-            original_content: String::new(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: String::new(),
+                is_terminal_workflow: false,
+            },
+        );
         let dummy_handle = tokio::spawn(async {
             // Park forever so we know removal is what cleans up, not natural exit.
             std::future::pending::<()>().await;
         });
-        orch.in_flight_actions.insert(action_id.clone(), dummy_handle);
+        orch.in_flight_actions
+            .insert(action_id.clone(), dummy_handle);
 
         assert!(
             orch.in_flight_actions.contains_key(&action_id),
@@ -8082,12 +9283,12 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
-            outcome:   ActionOutcome::Completed {
-                action_id:    action_id.clone(),
-                output:       "ok".to_string(),
+            outcome: ActionOutcome::Completed {
+                action_id: action_id.clone(),
+                output: "ok".to_string(),
                 rewritten_to: None,
             },
-            trace_id:  new_trace(),
+            trace_id: new_trace(),
         };
         let _ = orch.handle_action_result(result).await;
 
@@ -8118,7 +9319,10 @@ end tell"#;
         // the in-flight-actions branch of the helper.
         let aborted = orch.abort_active_generation();
 
-        assert!(aborted, "abort_active_generation must report it aborted at least one task");
+        assert!(
+            aborted,
+            "abort_active_generation must report it aborted at least one task"
+        );
         assert!(
             orch.in_flight_actions.is_empty(),
             "drain must leave in_flight_actions empty"
@@ -8184,7 +9388,10 @@ end tell"#;
 
         let aborted = orch.abort_active_generation();
 
-        assert!(aborted, "abort_active_generation must report it aborted at least one task");
+        assert!(
+            aborted,
+            "abort_active_generation must report it aborted at least one task"
+        );
         assert!(
             orch.tts_handle_abort.lock().unwrap().is_none(),
             "TTS abort slot must be drained after abort_active_generation"
@@ -8210,7 +9417,10 @@ end tell"#;
         assert!(orch.tts_handle_abort.lock().unwrap().is_none());
 
         let aborted = orch.abort_active_generation();
-        assert!(!aborted, "no-op cancel with empty TTS slot must report aborted=false");
+        assert!(
+            !aborted,
+            "no-op cancel with empty TTS slot must report aborted=false"
+        );
     }
 
     /// Phase 32: after a Completed action result, a continuation generation must be
@@ -8227,21 +9437,24 @@ end tell"#;
 
         let action_id = Uuid::new_v4().to_string();
         // depth=0: first action in the chain (direct user request).
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    0,
-            original_content: "find and download the video".to_string(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: "find and download the video".to_string(),
+                is_terminal_workflow: false,
+            },
+        );
 
         let result = ActionResult {
             action_id: action_id.clone(),
-            outcome:   ActionOutcome::Completed {
-                action_id:    action_id.clone(),
-                output:       "page HTML: <a href=\"/video/123\">Big Daddy 4K</a>".to_string(),
+            outcome: ActionOutcome::Completed {
+                action_id: action_id.clone(),
+                output: "page HTML: <a href=\"/video/123\">Big Daddy 4K</a>".to_string(),
                 rewritten_to: None,
             },
             trace_id: new_trace(),
@@ -8250,7 +9463,10 @@ end tell"#;
         tokio::task::yield_now().await;
 
         // 1. Interaction must be Complete — the old Interaction is consumed.
-        let interaction = orch.interactions.get(&action_id).expect("interaction must exist");
+        let interaction = orch
+            .interactions
+            .get(&action_id)
+            .expect("interaction must exist");
         assert!(
             matches!(interaction.stage, InteractionStage::Complete),
             "Interaction must be Complete after agentic continuation spawned"
@@ -8261,24 +9477,32 @@ end tell"#;
         let mut saw_thinking = false;
         while let Ok(evt) = rx.try_recv() {
             if let Ok(ServerEvent {
-                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)), ..
-            }) = evt {
+                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)),
+                ..
+            }) = evt
+            {
                 if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
                     saw_thinking = true;
                 }
             }
         }
-        assert!(saw_thinking, "Agentic continuation must emit EntityState::Thinking");
+        assert!(
+            saw_thinking,
+            "Agentic continuation must emit EntityState::Thinking"
+        );
 
         // 3. [Action result: ...] was injected into conversation context.
         // Role is "user" per the Round 3 fix — Ollama drops custom roles on
         // base-instruct models, so tool results must ride the user-role channel
         // with a `[Action result]` content-prefix for disambiguation.
         let messages = orch.context.messages();
-        let injected = messages.iter().any(|m|
-            m.role == "user" && m.content.contains("Action result")
+        let injected = messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("Action result"));
+        assert!(
+            injected,
+            "[Action result: ...] must be in context for the continuation model to see"
         );
-        assert!(injected, "[Action result: ...] must be in context for the continuation model to see");
     }
 
     /// Phase 32: when agentic_depth >= AGENTIC_MAX_DEPTH, the chain stops and the
@@ -8290,21 +9514,24 @@ end tell"#;
 
         let action_id = Uuid::new_v4().to_string();
         // Set depth at the limit.
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    AGENTIC_MAX_DEPTH,
-            original_content: "some request".to_string(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: AGENTIC_MAX_DEPTH,
+                original_content: "some request".to_string(),
+                is_terminal_workflow: false,
+            },
+        );
 
         let result = ActionResult {
             action_id: action_id.clone(),
-            outcome:   ActionOutcome::Completed {
-                action_id:    action_id.clone(),
-                output:       "result".to_string(),
+            outcome: ActionOutcome::Completed {
+                action_id: action_id.clone(),
+                output: "result".to_string(),
                 rewritten_to: None,
             },
             trace_id: new_trace(),
@@ -8315,13 +9542,20 @@ end tell"#;
         tokio::task::yield_now().await;
         let mut found_message = false;
         while let Ok(evt) = rx.try_recv() {
-            if let Ok(ServerEvent { event: Some(crate::ipc::proto::server_event::Event::TextResponse(t)), .. }) = evt {
+            if let Ok(ServerEvent {
+                event: Some(crate::ipc::proto::server_event::Event::TextResponse(t)),
+                ..
+            }) = evt
+            {
                 if t.content.contains("steps") || t.content.contains("proceed") {
                     found_message = true;
                 }
             }
         }
-        assert!(found_message, "Max depth must emit an explanatory text response");
+        assert!(
+            found_message,
+            "Max depth must emit an explanatory text response"
+        );
     }
 
     /// Phase 36 / H3: when a Completed result arrives for an Interaction flagged
@@ -8339,22 +9573,25 @@ end tell"#;
         let (mut orch, mut rx, _gen_rx) = make_orchestrator_with_gen_rx(tmp.path());
 
         let action_id = Uuid::new_v4().to_string();
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:             new_trace(),
-            stage:                InteractionStage::ActionInFlight,
-            priority:             InteractionPriority::Active,
-            created_at:           Instant::now(),
-            agentic_depth:        0,
-            original_content:     "text mom yes".to_string(),
-            // The key flag — simulates is_terminal_send_action() == true on dispatch.
-            is_terminal_workflow: true,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: "text mom yes".to_string(),
+                // The key flag — simulates is_terminal_send_action() == true on dispatch.
+                is_terminal_workflow: true,
+            },
+        );
 
         let result = ActionResult {
             action_id: action_id.clone(),
-            outcome:   ActionOutcome::Completed {
-                action_id:    action_id.clone(),
-                output:       String::new(), // osascript `send` returns no stdout
+            outcome: ActionOutcome::Completed {
+                action_id: action_id.clone(),
+                output: String::new(), // osascript `send` returns no stdout
                 rewritten_to: None,
             },
             trace_id: new_trace(),
@@ -8366,8 +9603,10 @@ end tell"#;
         let mut saw_thinking = false;
         while let Ok(evt) = rx.try_recv() {
             if let Ok(ServerEvent {
-                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)), ..
-            }) = evt {
+                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)),
+                ..
+            }) = evt
+            {
                 if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
                     saw_thinking = true;
                 }
@@ -8380,7 +9619,9 @@ end tell"#;
 
         // 2. The interaction itself is still marked Complete (stage transition happens
         //    before the short-circuit return).
-        let interaction = orch.interactions.get(&action_id)
+        let interaction = orch
+            .interactions
+            .get(&action_id)
             .expect("interaction must still exist");
         assert!(
             matches!(interaction.stage, InteractionStage::Complete),
@@ -8389,9 +9630,11 @@ end tell"#;
 
         // 3. The [Action result] context injection still happened — the next
         //    natural-language turn should see the completion, not a phantom gap.
-        let injected = orch.context.messages().iter().any(|m|
-            m.role == "user" && m.content.contains("Action result")
-        );
+        let injected = orch
+            .context
+            .messages()
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("Action result"));
         assert!(
             injected,
             "[Action result] injection must happen even when continuation is short-circuited"
@@ -8408,21 +9651,24 @@ end tell"#;
         let (mut orch, mut rx, _gen_rx) = make_orchestrator_with_gen_rx(tmp.path());
 
         let action_id = Uuid::new_v4().to_string();
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:             new_trace(),
-            stage:                InteractionStage::ActionInFlight,
-            priority:             InteractionPriority::Active,
-            created_at:           Instant::now(),
-            agentic_depth:        0,
-            original_content:     "text mom yes".to_string(),
-            is_terminal_workflow: true,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: "text mom yes".to_string(),
+                is_terminal_workflow: true,
+            },
+        );
 
         let result = ActionResult {
             action_id: action_id.clone(),
-            outcome:   ActionOutcome::Rejected {
+            outcome: ActionOutcome::Rejected {
                 action_id: action_id.clone(),
-                error:     "Messages.app could not resolve buddy".to_string(),
+                error: "Messages.app could not resolve buddy".to_string(),
             },
             trace_id: new_trace(),
         };
@@ -8434,8 +9680,10 @@ end tell"#;
         let mut saw_thinking = false;
         while let Ok(evt) = rx.try_recv() {
             if let Ok(ServerEvent {
-                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)), ..
-            }) = evt {
+                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)),
+                ..
+            }) = evt
+            {
                 if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
                     saw_thinking = true;
                 }
@@ -8454,35 +9702,52 @@ end tell"#;
 
         // Insert an interaction with created_at in the distant past.
         let old_id = "old-action".to_string();
-        orch.interactions.insert(old_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now() - std::time::Duration::from_secs(INTERACTION_TTL_SECS + 1),
-            agentic_depth:    0,
-            original_content: String::new(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            old_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now()
+                    - std::time::Duration::from_secs(INTERACTION_TTL_SECS + 1),
+                agentic_depth: 0,
+                original_content: String::new(),
+                is_terminal_workflow: false,
+            },
+        );
 
         // Insert a recent interaction that should survive.
         let new_id = "new-action".to_string();
-        orch.interactions.insert(new_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    0,
-            original_content: String::new(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            new_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: String::new(),
+                is_terminal_workflow: false,
+            },
+        );
 
         assert_eq!(orch.interactions.len(), 2);
 
         orch.gc_stale_interactions();
 
-        assert_eq!(orch.interactions.len(), 1, "GC should remove the old interaction");
-        assert!(orch.interactions.contains_key(&new_id), "Recent interaction should survive");
-        assert!(!orch.interactions.contains_key(&old_id), "Old interaction should be removed");
+        assert_eq!(
+            orch.interactions.len(),
+            1,
+            "GC should remove the old interaction"
+        );
+        assert!(
+            orch.interactions.contains_key(&new_id),
+            "Recent interaction should survive"
+        );
+        assert!(
+            !orch.interactions.contains_key(&old_id),
+            "Old interaction should be removed"
+        );
     }
 
     #[tokio::test]
@@ -8497,9 +9762,9 @@ end tell"#;
         // Manually simulate what handle_text_input does for SAFE action dispatch.
         let action_id = Uuid::new_v4().to_string();
         let spec = ActionSpec::Shell {
-            args:              vec!["echo".into(), "test".into()],
-            working_dir:       None,
-            rationale:         None,
+            args: vec!["echo".into(), "test".into()],
+            working_dir: None,
+            rationale: None,
             category_override: None,
         };
         let category = PolicyEngine::classify(&spec);
@@ -8508,27 +9773,34 @@ end tell"#;
         let aid = action_id.clone();
         let tid = new_trace();
 
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:         tid.clone(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    0,
-            original_content: String::new(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: tid.clone(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: String::new(),
+                is_terminal_workflow: false,
+            },
+        );
 
         tokio::spawn(async move {
             let outcome = executor.execute(&aid, &spec, category, None).await;
-            let _ = action_tx.send(ActionResult {
-                action_id: aid,
-                outcome,
-                trace_id: tid,
-            }).await;
+            let _ = action_tx
+                .send(ActionResult {
+                    action_id: aid,
+                    outcome,
+                    trace_id: tid,
+                })
+                .await;
         });
 
         // Send FOCUSED state (as handle_text_input would).
-        orch.send_state(EntityState::Focused, &new_trace()).await.unwrap();
+        orch.send_state(EntityState::Focused, &new_trace())
+            .await
+            .unwrap();
 
         // Check that FOCUSED was emitted.
         tokio::task::yield_now().await;
@@ -8540,14 +9812,18 @@ end tell"#;
                 }
             }
         }
-        assert!(found_focused, "FOCUSED state should be emitted on action dispatch");
+        assert!(
+            found_focused,
+            "FOCUSED state should be emitted on action dispatch"
+        );
 
         // Wait for the action result to arrive.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            action_rx.recv(),
-        ).await;
-        assert!(result.is_ok(), "Action result should arrive within 5 seconds");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), action_rx.recv()).await;
+        assert!(
+            result.is_ok(),
+            "Action result should arrive within 5 seconds"
+        );
         let result = result.unwrap().expect("Channel should not be closed");
         assert_eq!(result.action_id, action_id);
         assert!(matches!(result.outcome, ActionOutcome::Completed { .. }));
@@ -8565,7 +9841,7 @@ end tell"#;
 
         // Simulate HotkeyActivated event.
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::HotkeyActivated.into(),
+            r#type: SystemEventType::HotkeyActivated.into(),
             payload: String::new(),
         };
         let result = orch.handle_system_event(sys_event, new_trace()).await;
@@ -8586,7 +9862,7 @@ end tell"#;
         // Send an AppFocused event with a JSON payload that changes the context.
         // Payload must match AppFocusedPayload: { name, bundle_id, ax_element? }
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::AppFocused.into(),
+            r#type: SystemEventType::AppFocused.into(),
             payload: r#"{"name":"Safari","bundle_id":"com.apple.Safari"}"#.to_string(),
         };
         let result = orch.handle_system_event(sys_event, new_trace()).await;
@@ -8606,7 +9882,9 @@ end tell"#;
 
         // First call sets last_prefill_at.
         orch.prefill_inference_cache();
-        let first_prefill = orch.last_prefill_at.expect("should be set after first prefill");
+        let first_prefill = orch
+            .last_prefill_at
+            .expect("should be set after first prefill");
 
         // Second call within debounce window should NOT update last_prefill_at.
         orch.prefill_inference_cache();
@@ -8625,27 +9903,33 @@ end tell"#;
 
         // Insert an Active interaction.
         let action_id = "test-action".to_string();
-        orch.interactions.insert(action_id.clone(), Interaction {
-            trace_id:         new_trace(),
-            stage:            InteractionStage::ActionInFlight,
-            priority:         InteractionPriority::Active,
-            created_at:       Instant::now(),
-            agentic_depth:    0,
-            original_content: String::new(),
-            is_terminal_workflow: false,
-        });
+        orch.interactions.insert(
+            action_id.clone(),
+            Interaction {
+                trace_id: new_trace(),
+                stage: InteractionStage::ActionInFlight,
+                priority: InteractionPriority::Active,
+                created_at: Instant::now(),
+                agentic_depth: 0,
+                original_content: String::new(),
+                is_terminal_workflow: false,
+            },
+        );
 
         // Simulate HotkeyActivated.
         let sys_event = SystemEvent {
-            r#type:  SystemEventType::HotkeyActivated.into(),
+            r#type: SystemEventType::HotkeyActivated.into(),
             payload: String::new(),
         };
-        orch.handle_system_event(sys_event, new_trace()).await.unwrap();
+        orch.handle_system_event(sys_event, new_trace())
+            .await
+            .unwrap();
 
         // The existing Active interaction should now be Background.
         let interaction = orch.interactions.get(&action_id).unwrap();
         assert_eq!(
-            interaction.priority, InteractionPriority::Background,
+            interaction.priority,
+            InteractionPriority::Background,
             "HotkeyActivated should demote Active interactions to Background"
         );
     }
@@ -8655,14 +9939,14 @@ end tell"#;
         // Verify that the new Phase 24 fields on GenerationRequest have sensible defaults
         // and that existing construction patterns don't break.
         let req = GenerationRequest {
-            model_name:          "test".to_string(),
-            messages:            vec![],
-            temperature:         None,
-            unload_after:        false,
+            model_name: "test".to_string(),
+            messages: vec![],
+            temperature: None,
+            unload_after: false,
             keep_alive_override: None,
-            num_predict:         None,
+            num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override:    None,
+            num_ctx_override: None,
         };
         assert!(req.keep_alive_override.is_none());
         assert!(req.num_predict.is_none());
@@ -8673,14 +9957,14 @@ end tell"#;
     fn generation_request_prefill_fields() {
         // Verify prefill-specific field values.
         let req = GenerationRequest {
-            model_name:          "qwen3:8b".to_string(),
-            messages:            vec![],
-            temperature:         None,
-            unload_after:        false,
+            model_name: "qwen3:8b".to_string(),
+            messages: vec![],
+            temperature: None,
+            unload_after: false,
             keep_alive_override: Some(FAST_MODEL_KEEP_ALIVE),
-            num_predict:         Some(1),
+            num_predict: Some(1),
             inactivity_timeout_override_secs: None,
-            num_ctx_override:    None,
+            num_ctx_override: None,
         };
         assert_eq!(req.keep_alive_override, Some("999m"));
         assert_eq!(req.num_predict, Some(1));
@@ -8775,7 +10059,10 @@ end tell"#;
     async fn send_vad_hint_bg_sends_correct_frames() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ServerEvent, Status>>(8);
         let sent = send_vad_hint_bg(&tx, 8, "trace-vad-1").await;
-        assert!(sent, "send_vad_hint_bg must return true when channel is open");
+        assert!(
+            sent,
+            "send_vad_hint_bg must return true when channel is open"
+        );
         let event = rx.recv().await.expect("Should receive a VadHint event");
         let event = event.expect("Event should be Ok");
         match event.event {
@@ -8816,7 +10103,8 @@ end tell"#;
                 set targetService to 1st service whose service type = iMessage
                 set targetBuddy to buddy "+15551234567" of targetService
                 send "hi" to targetBuddy
-            end tell"#.to_string(),
+            end tell"#
+                .to_string(),
             rationale: None,
         };
         assert!(
@@ -8847,7 +10135,8 @@ end tell"#;
             script: r#"tell application "Contacts"
                 set theName to name of person 1 whose name contains "Mom"
                 return theName
-            end tell"#.to_string(),
+            end tell"#
+                .to_string(),
             rationale: None,
         };
         assert!(
@@ -8863,7 +10152,8 @@ end tell"#;
         let spec = ActionSpec::AppleScript {
             script: r#"tell application "Messages"
                 get text of last 10 messages
-            end tell"#.to_string(),
+            end tell"#
+                .to_string(),
             rationale: None,
         };
         assert!(
@@ -8875,9 +10165,9 @@ end tell"#;
     #[test]
     fn terminal_send_action_ignores_non_applescript_actions() {
         let shell = ActionSpec::Shell {
-            args:              vec!["echo".to_string(), "hi".to_string()],
-            working_dir:       None,
-            rationale:         None,
+            args: vec!["echo".to_string(), "hi".to_string()],
+            working_dir: None,
+            rationale: None,
             category_override: None,
         };
         assert!(
@@ -8901,7 +10191,8 @@ end tell"#;
         let spec = ActionSpec::AppleScript {
             script: r#"tell application "Messages"
                 set theResend to resend of last chat
-            end tell"#.to_string(),
+            end tell"#
+                .to_string(),
             rationale: None,
         };
         assert!(

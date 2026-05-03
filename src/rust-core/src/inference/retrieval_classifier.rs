@@ -89,33 +89,53 @@ mod tests {
     #[test]
     fn classifier_does_not_flag_datetime_queries() {
         // Time/date queries are answered via `date` shell action — no web retrieval.
-        assert!(!is_retrieval_first_query("what time is it?"),
-            "time query must NOT be retrieval-first (use shell date)");
-        assert!(!is_retrieval_first_query("What's the date today?"),
-            "date query must NOT be retrieval-first (use shell date)");
-        assert!(!is_retrieval_first_query("What year is it currently?"),
-            "year query must NOT be retrieval-first (use shell date)");
+        assert!(
+            !is_retrieval_first_query("what time is it?"),
+            "time query must NOT be retrieval-first (use shell date)"
+        );
+        assert!(
+            !is_retrieval_first_query("What's the date today?"),
+            "date query must NOT be retrieval-first (use shell date)"
+        );
+        assert!(
+            !is_retrieval_first_query("What year is it currently?"),
+            "year query must NOT be retrieval-first (use shell date)"
+        );
     }
 
     #[test]
     fn classifier_detects_version_query() {
-        assert!(is_retrieval_first_query("what is the latest version of rust?"),
-            "latest version query must be retrieval-first");
-        assert!(is_retrieval_first_query("latest version of xcode"),
-            "lowercase variant must be detected");
-        assert!(is_retrieval_first_query("Which version of swift is current?"),
-            "which version query must be retrieval-first");
+        assert!(
+            is_retrieval_first_query("what is the latest version of rust?"),
+            "latest version query must be retrieval-first"
+        );
+        assert!(
+            is_retrieval_first_query("latest version of xcode"),
+            "lowercase variant must be detected"
+        );
+        assert!(
+            is_retrieval_first_query("Which version of swift is current?"),
+            "which version query must be retrieval-first"
+        );
     }
 
     #[test]
     fn classifier_passes_non_retrieval_query() {
-        assert!(!is_retrieval_first_query("how does async rust work?"),
-            "conceptual query must NOT be retrieval-first");
-        assert!(!is_retrieval_first_query("explain the borrow checker"),
-            "explanation query must NOT be retrieval-first");
-        assert!(!is_retrieval_first_query("write me a function that sorts a vec"),
-            "code request must NOT be retrieval-first");
-        assert!(!is_retrieval_first_query("what is polymorphism"),
-            "definition query must NOT be retrieval-first");
+        assert!(
+            !is_retrieval_first_query("how does async rust work?"),
+            "conceptual query must NOT be retrieval-first"
+        );
+        assert!(
+            !is_retrieval_first_query("explain the borrow checker"),
+            "explanation query must NOT be retrieval-first"
+        );
+        assert!(
+            !is_retrieval_first_query("write me a function that sorts a vec"),
+            "code request must NOT be retrieval-first"
+        );
+        assert!(
+            !is_retrieval_first_query("what is polymorphism"),
+            "definition query must NOT be retrieval-first"
+        );
     }
 }

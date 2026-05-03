@@ -27,10 +27,7 @@
 /// );
 /// CREATE INDEX IF NOT EXISTS memory_created_at ON memory(created_at);
 /// ```
-use std::{
-    path::Path,
-    sync::Mutex,
-};
+use std::{path::Path, sync::Mutex};
 
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -46,9 +43,9 @@ use crate::constants::RETRIEVAL_EMBED_DIM;
 /// `similarity` is 0.0.
 #[allow(dead_code)] // Phase 10+ callers read entry_type, session_id, created_at
 pub struct MemoryEntry {
-    pub id:         String,
-    pub content:    String,
-    pub source:     String,
+    pub id: String,
+    pub content: String,
+    pub source: String,
     pub entry_type: String,
     pub session_id: Option<String>,
     pub created_at: String,
@@ -84,7 +81,9 @@ impl VectorStore {
     pub fn new(db_path: &Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(db_path)?;
         Self::apply_schema(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Open an in-memory SQLite DB. Data is not persisted — used by
@@ -92,7 +91,9 @@ impl VectorStore {
     pub fn in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         Self::apply_schema(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Apply the schema idempotently. Factored out to avoid duplication between
@@ -118,12 +119,12 @@ impl VectorStore {
     /// `created_at` is stamped with the current UTC time at insert time.
     pub fn insert(
         &self,
-        id:         &str,
-        content:    &str,
-        source:     &str,
+        id: &str,
+        content: &str,
+        source: &str,
         entry_type: &str,
         session_id: Option<&str>,
-        embedding:  &[f32],
+        embedding: &[f32],
     ) -> Result<(), rusqlite::Error> {
         let blob = embedding_to_blob(embedding);
         let created_at = Utc::now().to_rfc3339();
@@ -144,12 +145,12 @@ impl VectorStore {
     /// Used by Phase 21 `store_fact()` to update operator facts in place.
     pub fn upsert(
         &self,
-        id:         &str,
-        content:    &str,
-        source:     &str,
+        id: &str,
+        content: &str,
+        source: &str,
         entry_type: &str,
         session_id: Option<&str>,
-        embedding:  &[f32],
+        embedding: &[f32],
     ) -> Result<(), rusqlite::Error> {
         let blob = embedding_to_blob(embedding);
         let created_at = Utc::now().to_rfc3339();
@@ -179,8 +180,8 @@ impl VectorStore {
     pub fn search_source(
         &self,
         query_embedding: &[f32],
-        limit:           usize,
-        filter_source:   &str,
+        limit: usize,
+        filter_source: &str,
     ) -> Result<Vec<MemoryEntry>, rusqlite::Error> {
         let conn = self.conn.lock().expect("VectorStore mutex poisoned");
         let mut stmt = conn.prepare(
@@ -202,11 +203,24 @@ impl VectorStore {
                 ))
             })?
             .filter_map(|r| r.ok())
-            .map(|(id, content, source, entry_type, session_id, created_at, blob)| {
-                let row_emb = blob_to_embedding(&blob);
-                let sim = cosine_similarity(query_embedding, &row_emb);
-                (sim, MemoryEntry { id, content, source, entry_type, session_id, created_at, similarity: sim })
-            })
+            .map(
+                |(id, content, source, entry_type, session_id, created_at, blob)| {
+                    let row_emb = blob_to_embedding(&blob);
+                    let sim = cosine_similarity(query_embedding, &row_emb);
+                    (
+                        sim,
+                        MemoryEntry {
+                            id,
+                            content,
+                            source,
+                            entry_type,
+                            session_id,
+                            created_at,
+                            similarity: sim,
+                        },
+                    )
+                },
+            )
             .collect();
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -233,7 +247,7 @@ impl VectorStore {
     pub fn search_knowledge(
         &self,
         query_embedding: &[f32],
-        limit:           usize,
+        limit: usize,
     ) -> Result<Vec<MemoryEntry>, rusqlite::Error> {
         let conn = self.conn.lock().expect("VectorStore mutex poisoned");
         let mut stmt = conn.prepare(
@@ -256,11 +270,24 @@ impl VectorStore {
                 ))
             })?
             .filter_map(|r| r.ok())
-            .map(|(id, content, source, entry_type, session_id, created_at, blob)| {
-                let row_emb = blob_to_embedding(&blob);
-                let sim    = cosine_similarity(query_embedding, &row_emb);
-                (sim, MemoryEntry { id, content, source, entry_type, session_id, created_at, similarity: sim })
-            })
+            .map(
+                |(id, content, source, entry_type, session_id, created_at, blob)| {
+                    let row_emb = blob_to_embedding(&blob);
+                    let sim = cosine_similarity(query_embedding, &row_emb);
+                    (
+                        sim,
+                        MemoryEntry {
+                            id,
+                            content,
+                            source,
+                            entry_type,
+                            session_id,
+                            created_at,
+                            similarity: sim,
+                        },
+                    )
+                },
+            )
             .collect();
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -280,7 +307,7 @@ impl VectorStore {
     pub fn search(
         &self,
         query_embedding: &[f32],
-        limit:           usize,
+        limit: usize,
     ) -> Result<Vec<MemoryEntry>, rusqlite::Error> {
         let conn = self.conn.lock().expect("VectorStore mutex poisoned");
         let mut stmt = conn.prepare(
@@ -302,14 +329,24 @@ impl VectorStore {
                 ))
             })?
             .filter_map(|r| r.ok())
-            .map(|(id, content, source, entry_type, session_id, created_at, blob)| {
-                let row_emb = blob_to_embedding(&blob);
-                let sim = cosine_similarity(query_embedding, &row_emb);
-                (
-                    sim,
-                    MemoryEntry { id, content, source, entry_type, session_id, created_at, similarity: sim },
-                )
-            })
+            .map(
+                |(id, content, source, entry_type, session_id, created_at, blob)| {
+                    let row_emb = blob_to_embedding(&blob);
+                    let sim = cosine_similarity(query_embedding, &row_emb);
+                    (
+                        sim,
+                        MemoryEntry {
+                            id,
+                            content,
+                            source,
+                            entry_type,
+                            session_id,
+                            created_at,
+                            similarity: sim,
+                        },
+                    )
+                },
+            )
             .collect();
 
         // Sort descending by similarity — highest first.
@@ -324,11 +361,19 @@ impl VectorStore {
 /// Cosine similarity in \[−1, 1\]. Returns 0.0 if either vector is zero-norm,
 /// preventing NaN from propagating into similarity scores.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), RETRIEVAL_EMBED_DIM, "query embedding must be RETRIEVAL_EMBED_DIM");
-    let dot:  f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na:   f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb:   f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    debug_assert_eq!(
+        a.len(),
+        RETRIEVAL_EMBED_DIM,
+        "query embedding must be RETRIEVAL_EMBED_DIM"
+    );
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 /// Pack a `&[f32]` slice into a little-endian byte array (4 bytes per element).
@@ -345,7 +390,11 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 /// Panics if `blob.len() % 4 != 0` — an unaligned BLOB indicates data corruption
 /// and must not produce a silently wrong embedding.
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    assert_eq!(blob.len() % 4, 0, "embedding BLOB length must be a multiple of 4 bytes");
+    assert_eq!(
+        blob.len() % 4,
+        0,
+        "embedding BLOB length must be a multiple of 4 bytes"
+    );
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
@@ -381,7 +430,15 @@ mod tests {
         let store = VectorStore::in_memory().unwrap();
         // Can re-open (idempotent schema) — verified by calling insert without error.
         let emb = unit_vec(0);
-        store.insert("id-1", "hello", "session:s1", "conversation_turn", Some("s1"), &emb)
+        store
+            .insert(
+                "id-1",
+                "hello",
+                "session:s1",
+                "conversation_turn",
+                Some("s1"),
+                &emb,
+            )
             .expect("insert should succeed on a freshly created schema");
     }
 
@@ -389,27 +446,45 @@ mod tests {
     fn store_insert_and_search_finds_exact_match() {
         let store = VectorStore::in_memory().unwrap();
         let emb = unit_vec(5);
-        store.insert("id-a", "content a", "session:s", "conversation_turn", Some("s"), &emb).unwrap();
+        store
+            .insert(
+                "id-a",
+                "content a",
+                "session:s",
+                "conversation_turn",
+                Some("s"),
+                &emb,
+            )
+            .unwrap();
 
         let results = store.search(&emb, 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "id-a");
-        assert!((results[0].similarity - 1.0).abs() < 1e-5,
-            "self-search should return similarity ≈ 1.0, got {}", results[0].similarity);
+        assert!(
+            (results[0].similarity - 1.0).abs() < 1e-5,
+            "self-search should return similarity ≈ 1.0, got {}",
+            results[0].similarity
+        );
     }
 
     #[test]
     fn store_search_empty_db_returns_empty() {
         let store = VectorStore::in_memory().unwrap();
         let results = store.search(&unit_vec(0), 10).unwrap();
-        assert!(results.is_empty(), "search on empty DB must return empty Vec");
+        assert!(
+            results.is_empty(),
+            "search on empty DB must return empty Vec"
+        );
     }
 
     #[test]
     fn cosine_similarity_identical_returns_one() {
         let v = unit_vec(3);
         let sim = cosine_similarity(&v, &v);
-        assert!((sim - 1.0).abs() < 1e-6, "identical vectors → similarity 1.0, got {sim}");
+        assert!(
+            (sim - 1.0).abs() < 1e-6,
+            "identical vectors → similarity 1.0, got {sim}"
+        );
     }
 
     #[test]
@@ -417,7 +492,10 @@ mod tests {
         let a = unit_vec(0);
         let b = unit_vec(1);
         let sim = cosine_similarity(&a, &b);
-        assert!(sim.abs() < 1e-6, "orthogonal vectors → similarity 0.0, got {sim}");
+        assert!(
+            sim.abs() < 1e-6,
+            "orthogonal vectors → similarity 0.0, got {sim}"
+        );
     }
 
     #[test]
@@ -437,8 +515,12 @@ mod tests {
     fn vector_store_upsert_replaces_existing_content_by_id() {
         let store = VectorStore::in_memory().unwrap();
         let emb = vec![0.1f32; RETRIEVAL_EMBED_DIM];
-        store.insert("k1", "original", "test", "fact", None, &emb).unwrap();
-        store.upsert("k1", "updated", "test", "fact", None, &emb).unwrap();
+        store
+            .insert("k1", "original", "test", "fact", None, &emb)
+            .unwrap();
+        store
+            .upsert("k1", "updated", "test", "fact", None, &emb)
+            .unwrap();
         let results = store.search(&emb, 10).unwrap();
         assert_eq!(results.len(), 1, "upsert must not create a duplicate");
         assert_eq!(results[0].content, "updated", "upsert must replace content");
@@ -448,7 +530,9 @@ mod tests {
     fn vector_store_delete_returns_true_for_existing_id() {
         let store = VectorStore::in_memory().unwrap();
         let emb = vec![0.1f32; RETRIEVAL_EMBED_DIM];
-        store.insert("k1", "content", "test", "fact", None, &emb).unwrap();
+        store
+            .insert("k1", "content", "test", "fact", None, &emb)
+            .unwrap();
         assert!(store.delete("k1").unwrap());
         assert!(store.search(&emb, 10).unwrap().is_empty());
     }
@@ -463,8 +547,19 @@ mod tests {
     fn vector_store_search_source_filters_by_source_field() {
         let store = VectorStore::in_memory().unwrap();
         let emb = vec![0.5f32; RETRIEVAL_EMBED_DIM];
-        store.insert("m1", "memory content", "memory", "turn", None, &emb).unwrap();
-        store.insert("r1", "retrieval content", "retrieval", "document", None, &emb).unwrap();
+        store
+            .insert("m1", "memory content", "memory", "turn", None, &emb)
+            .unwrap();
+        store
+            .insert(
+                "r1",
+                "retrieval content",
+                "retrieval",
+                "document",
+                None,
+                &emb,
+            )
+            .unwrap();
 
         let memory_results = store.search_source(&emb, 10, "memory").unwrap();
         assert_eq!(memory_results.len(), 1);
@@ -483,55 +578,133 @@ mod tests {
         // B blends dimensions 0 and 1 — somewhat similar.
         // C is orthogonal to the query — zero similarity.
         let query = unit_vec(0);
-        let a_emb = blend(0, 1, 0.99, 0.14);   // mostly dimension 0 → high similarity
-        let b_emb = blend(0, 1, 0.5, 0.87);    // ~30° tilt → lower
-        let c_emb = unit_vec(2);                 // orthogonal → 0.0
+        let a_emb = blend(0, 1, 0.99, 0.14); // mostly dimension 0 → high similarity
+        let b_emb = blend(0, 1, 0.5, 0.87); // ~30° tilt → lower
+        let c_emb = unit_vec(2); // orthogonal → 0.0
 
-        store.insert("id-a", "A", "session:s", "conversation_turn", Some("s"), &a_emb).unwrap();
-        store.insert("id-b", "B", "session:s", "conversation_turn", Some("s"), &b_emb).unwrap();
-        store.insert("id-c", "C", "session:s", "conversation_turn", Some("s"), &c_emb).unwrap();
+        store
+            .insert(
+                "id-a",
+                "A",
+                "session:s",
+                "conversation_turn",
+                Some("s"),
+                &a_emb,
+            )
+            .unwrap();
+        store
+            .insert(
+                "id-b",
+                "B",
+                "session:s",
+                "conversation_turn",
+                Some("s"),
+                &b_emb,
+            )
+            .unwrap();
+        store
+            .insert(
+                "id-c",
+                "C",
+                "session:s",
+                "conversation_turn",
+                Some("s"),
+                &c_emb,
+            )
+            .unwrap();
 
         let results = store.search(&query, 3).unwrap();
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].id, "id-a", "A must rank first (most similar to query)");
-        assert!(results[0].similarity > results[1].similarity,
-            "ranked order must be strictly descending");
-        assert!(results[1].similarity >= results[2].similarity,
-            "ranked order must be descending (B ≥ C)");
+        assert_eq!(
+            results[0].id, "id-a",
+            "A must rank first (most similar to query)"
+        );
+        assert!(
+            results[0].similarity > results[1].similarity,
+            "ranked order must be strictly descending"
+        );
+        assert!(
+            results[1].similarity >= results[2].similarity,
+            "ranked order must be descending (B ≥ C)"
+        );
     }
 
     #[test]
     fn search_knowledge_returns_facts_and_web_pages_only() {
         let store = VectorStore::in_memory().unwrap();
-        let emb   = vec![0.5f32; RETRIEVAL_EMBED_DIM];
+        let emb = vec![0.5f32; RETRIEVAL_EMBED_DIM];
 
         // Insert one entry of each type.
-        store.insert("f1",  "a fact",     "operator",              "fact",             None, &emb).unwrap();
-        store.insert("w1",  "a web page", "web:https://example.com","web_page",         None, &emb).unwrap();
-        store.insert("t1",  "a turn",     "memory",                "turn",             None, &emb).unwrap();
-        store.insert("ct1", "conv turn",  "session:s1",            "conversation_turn",None, &emb).unwrap();
+        store
+            .insert("f1", "a fact", "operator", "fact", None, &emb)
+            .unwrap();
+        store
+            .insert(
+                "w1",
+                "a web page",
+                "web:https://example.com",
+                "web_page",
+                None,
+                &emb,
+            )
+            .unwrap();
+        store
+            .insert("t1", "a turn", "memory", "turn", None, &emb)
+            .unwrap();
+        store
+            .insert(
+                "ct1",
+                "conv turn",
+                "session:s1",
+                "conversation_turn",
+                None,
+                &emb,
+            )
+            .unwrap();
 
         let results = store.search_knowledge(&emb, 10).unwrap();
-        assert_eq!(results.len(), 2,
+        assert_eq!(
+            results.len(),
+            2,
             "search_knowledge must return exactly the fact + web_page entries; got {:?}",
-            results.iter().map(|e| e.entry_type.as_str()).collect::<Vec<_>>());
+            results
+                .iter()
+                .map(|e| e.entry_type.as_str())
+                .collect::<Vec<_>>()
+        );
         let types: Vec<&str> = results.iter().map(|e| e.entry_type.as_str()).collect();
-        assert!(types.contains(&"fact"),     "fact entry must be included");
-        assert!(types.contains(&"web_page"), "web_page entry must be included");
+        assert!(types.contains(&"fact"), "fact entry must be included");
+        assert!(
+            types.contains(&"web_page"),
+            "web_page entry must be included"
+        );
     }
 
     #[test]
     fn search_knowledge_excludes_conversation_turns_from_results() {
         let store = VectorStore::in_memory().unwrap();
-        let emb   = vec![0.5f32; RETRIEVAL_EMBED_DIM];
+        let emb = vec![0.5f32; RETRIEVAL_EMBED_DIM];
 
         // Only conversation turns — no facts or web pages.
-        store.insert("t1", "turn content",  "memory",     "turn",             None, &emb).unwrap();
-        store.insert("t2", "another turn",  "session:s1", "conversation_turn",None, &emb).unwrap();
+        store
+            .insert("t1", "turn content", "memory", "turn", None, &emb)
+            .unwrap();
+        store
+            .insert(
+                "t2",
+                "another turn",
+                "session:s1",
+                "conversation_turn",
+                None,
+                &emb,
+            )
+            .unwrap();
 
         let results = store.search_knowledge(&emb, 10).unwrap();
-        assert!(results.is_empty(),
+        assert!(
+            results.is_empty(),
             "search_knowledge must return empty when only turns are stored; got {} entries",
-            results.len());
+            results.len()
+        );
     }
 }

@@ -9,7 +9,6 @@
 /// The state directory layout is:
 ///   `~/.dexter/state/session_{YYYYMMDD_HHMMSS}_{uuid8}.json`  ← individual session files
 ///   `~/.dexter/state/latest.json`                              ← symlink to most recent
-
 pub mod state;
 
 // SessionError and SessionState are public API consumed by load_latest() callers and future

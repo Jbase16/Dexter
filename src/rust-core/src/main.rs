@@ -1,9 +1,10 @@
 mod action;
 mod browser;
-mod constants;
 mod config;
+mod constants;
 mod context_observer;
 mod inference;
+mod ipc;
 mod logging;
 mod memory;
 mod orchestrator;
@@ -13,7 +14,6 @@ mod retrieval;
 mod session;
 mod system;
 mod voice;
-mod ipc;
 
 use std::sync::Arc;
 
@@ -65,14 +65,15 @@ async fn main() -> Result<()> {
     // ── Session bootstrap log ─────────────────────────────────────────────────
     //
     // Load the previous session state and log key fields so the operator can see
-    // at a glance where the last session ended. If no previous session exists
-    // (first run, or state dir was cleared), this is a no-op.
+    // at a glance where the last session ended. This is observability only; the
+    // orchestrator intentionally starts each live conversation with a fresh prompt
+    // instead of replaying raw prior transcripts.
     if let Some(prev) = SessionStateManager::load_latest(&cfg.core.state_dir) {
         info!(
             prev_session_id = %prev.session_id,
             prev_phase      = %prev.build_phase.current,
             prev_turns      = prev.conversation_history.len(),
-            "Bootstrapped from previous session"
+            "Previous session state found"
         );
     }
 
@@ -121,9 +122,7 @@ async fn main() -> Result<()> {
         // Phase 38 / Codex finding [33]: honor the operator's configured
         // personality_path from ~/.dexter/config.toml. Previously this used the
         // compile-time constant directly, silently ignoring the config knob.
-        let layer = personality::PersonalityLayer::load_or_default_from(
-            &cfg.core.personality_path,
-        );
+        let layer = personality::PersonalityLayer::load_or_default_from(&cfg.core.personality_path);
         info!(
             personality_name    = %layer.profile().name,
             lora_adapter_loaded = layer.profile().lora_adapter_path.is_some(),

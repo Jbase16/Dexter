@@ -69,11 +69,8 @@ mod proto {
 }
 
 use proto::{
-    client_event,
-    dexter_service_client::DexterServiceClient,
-    server_event,
-    ActionApproval, ActionCategory, ClientEvent, EntityState, PingRequest,
-    TextInput,
+    client_event, dexter_service_client::DexterServiceClient, server_event, ActionApproval,
+    ActionCategory, ClientEvent, EntityState, PingRequest, TextInput,
 };
 
 const DEFAULT_SOCKET: &str = "/tmp/dexter.sock";
@@ -89,35 +86,37 @@ enum ApprovalPolicy {
 
 #[derive(Debug)]
 struct CliConfig {
-    socket_path:      String,
-    inputs:           Vec<String>,
-    from_voice:       bool,
-    quiet:            bool,
-    approval_policy:  ApprovalPolicy,
-    idle_timeout:     Duration,
+    socket_path: String,
+    inputs: Vec<String>,
+    from_voice: bool,
+    quiet: bool,
+    approval_policy: ApprovalPolicy,
+    idle_timeout: Duration,
 }
 
 fn parse_args() -> Result<CliConfig> {
-    let mut socket_path     = DEFAULT_SOCKET.to_string();
-    let mut from_voice      = false;
-    let mut quiet           = false;
+    let mut socket_path = DEFAULT_SOCKET.to_string();
+    let mut from_voice = false;
+    let mut quiet = false;
     let mut approval_policy = ApprovalPolicy::Deny;
-    let mut idle_timeout    = Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS);
+    let mut idle_timeout = Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS);
     let mut positional: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" | "-s" => {
-                socket_path = args.next()
+                socket_path = args
+                    .next()
                     .ok_or_else(|| anyhow!("--socket requires a path argument"))?;
             }
             "--from-voice" => from_voice = true,
             "--quiet" | "-q" => quiet = true,
             "--auto-approve" | "-y" => approval_policy = ApprovalPolicy::Approve,
-            "--auto-deny"    | "-n" => approval_policy = ApprovalPolicy::Deny,
+            "--auto-deny" | "-n" => approval_policy = ApprovalPolicy::Deny,
             "--idle-timeout" => {
-                let secs: u64 = args.next()
+                let secs: u64 = args
+                    .next()
                     .ok_or_else(|| anyhow!("--idle-timeout requires a seconds argument"))?
                     .parse()
                     .context("--idle-timeout: not a valid u64 seconds value")?;
@@ -160,7 +159,14 @@ fn parse_args() -> Result<CliConfig> {
         positional
     };
 
-    Ok(CliConfig { socket_path, inputs, from_voice, quiet, approval_policy, idle_timeout })
+    Ok(CliConfig {
+        socket_path,
+        inputs,
+        from_voice,
+        quiet,
+        approval_policy,
+        idle_timeout,
+    })
 }
 
 fn print_help() {
@@ -229,11 +235,17 @@ async fn main() -> Result<()> {
 
     // Liveness probe — same Ping the Swift client does on connect. Also confirms
     // the proto schema matches (mismatched .proto = different field IDs = decode fail).
-    let pong = client.ping(PingRequest {
-        trace_id: Uuid::new_v4().to_string(),
-    }).await.context("Ping failed — daemon may not be running, or socket path is wrong")?;
+    let pong = client
+        .ping(PingRequest {
+            trace_id: Uuid::new_v4().to_string(),
+        })
+        .await
+        .context("Ping failed — daemon may not be running, or socket path is wrong")?;
     if !cfg.quiet {
-        eprintln!("[connected — core version: {}]", pong.into_inner().core_version);
+        eprintln!(
+            "[connected — core version: {}]",
+            pong.into_inner().core_version
+        );
     }
 
     // Stable session ID for this CLI run — same lifecycle as Swift's
@@ -244,7 +256,9 @@ async fn main() -> Result<()> {
     // approach — a small buffered queue is enough since we drain the response
     // stream synchronously between sending events.
     let (tx, rx) = tokio::sync::mpsc::channel::<ClientEvent>(16);
-    let response = client.session(ReceiverStream::new(rx)).await
+    let response = client
+        .session(ReceiverStream::new(rx))
+        .await
         .context("session() RPC failed")?;
     let mut response_stream = response.into_inner();
 
@@ -256,14 +270,15 @@ async fn main() -> Result<()> {
         }
 
         let event = ClientEvent {
-            trace_id:   trace_id.clone(),
+            trace_id: trace_id.clone(),
             session_id: session_id.clone(),
             event: Some(client_event::Event::TextInput(TextInput {
-                content:    input.clone(),
+                content: input.clone(),
                 from_voice: cfg.from_voice,
             })),
         };
-        tx.send(event).await
+        tx.send(event)
+            .await
             .map_err(|_| anyhow!("session stream closed before TextInput could be sent"))?;
 
         // Drain server events until we see IDLE (turn complete) or hit the timeout.
@@ -282,18 +297,12 @@ async fn main() -> Result<()> {
 /// `Endpoint::from_static("http://localhost")` URI is a placeholder — tonic
 /// requires a valid HTTP/2 :authority header but doesn't use it for routing
 /// when the connector returns a UnixStream directly.
-async fn connect(
-    socket_path: &str,
-) -> Result<DexterServiceClient<tonic::transport::Channel>> {
+async fn connect(socket_path: &str) -> Result<DexterServiceClient<tonic::transport::Channel>> {
     let path = socket_path.to_string();
     let channel = Endpoint::from_static("http://localhost")
         .connect_with_connector(service_fn(move |_: tonic::transport::Uri| {
             let p = path.clone();
-            async move {
-                UnixStream::connect(p)
-                    .await
-                    .map(TokioIo::new)
-            }
+            async move { UnixStream::connect(p).await.map(TokioIo::new) }
         }))
         .await
         .context("tonic Channel connect failed")?;
@@ -309,10 +318,10 @@ async fn connect(
 /// action requests to stdout (unless `--quiet`), and replies to ActionRequests
 /// with an ActionApproval whose decision matches `cfg.approval_policy`.
 async fn run_turn(
-    response_stream:    &mut tonic::Streaming<proto::ServerEvent>,
-    tx:                 &tokio::sync::mpsc::Sender<ClientEvent>,
-    session_id:         &str,
-    cfg:                &CliConfig,
+    response_stream: &mut tonic::Streaming<proto::ServerEvent>,
+    tx: &tokio::sync::mpsc::Sender<ClientEvent>,
+    session_id: &str,
+    cfg: &CliConfig,
 ) -> Result<()> {
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
@@ -338,11 +347,16 @@ async fn run_turn(
         let next = tokio::time::timeout(cfg.idle_timeout, response_stream.next()).await;
         let event = match next {
             Err(_elapsed) => {
-                eprintln!("[idle timeout {}s — giving up on this turn]", cfg.idle_timeout.as_secs());
+                eprintln!(
+                    "[idle timeout {}s — giving up on this turn]",
+                    cfg.idle_timeout.as_secs()
+                );
                 return Ok(());
             }
             Ok(None) => {
-                if !cfg.quiet { eprintln!("[server closed session stream]"); }
+                if !cfg.quiet {
+                    eprintln!("[server closed session stream]");
+                }
                 return Ok(());
             }
             Ok(Some(Err(status))) => {
@@ -371,8 +385,7 @@ async fn run_turn(
             // any activity = turn done. IDLE BEFORE activity = the
             // session-open initial state, ignore it and keep listening.
             Some(server_event::Event::EntityState(s)) => {
-                let state = EntityState::try_from(s.state)
-                    .unwrap_or(EntityState::Unspecified);
+                let state = EntityState::try_from(s.state).unwrap_or(EntityState::Unspecified);
                 if !cfg.quiet {
                     writeln!(stdout_lock, "[STATE: {state:?}]")?;
                 }
@@ -394,7 +407,11 @@ async fn run_turn(
             Some(server_event::Event::AudioResponse(audio)) => {
                 if !cfg.quiet {
                     if audio.is_final {
-                        writeln!(stdout_lock, "[AUDIO: is_final sentinel after {} bytes streamed]", audio.data.len())?;
+                        writeln!(
+                            stdout_lock,
+                            "[AUDIO: is_final sentinel after {} bytes streamed]",
+                            audio.data.len()
+                        )?;
                     } else {
                         write!(stdout_lock, ".")?;
                         stdout_lock.flush()?;
@@ -407,8 +424,8 @@ async fn run_turn(
             // for a Swift dialog response that never arrives.
             Some(server_event::Event::ActionRequest(req)) => {
                 activity_seen = true;
-                let cat = ActionCategory::try_from(req.category)
-                    .unwrap_or(ActionCategory::Unspecified);
+                let cat =
+                    ActionCategory::try_from(req.category).unwrap_or(ActionCategory::Unspecified);
                 if !cfg.quiet {
                     writeln!(
                         stdout_lock,
@@ -418,10 +435,10 @@ async fn run_turn(
                 }
                 let approved = matches!(cfg.approval_policy, ApprovalPolicy::Approve);
                 let approval = ClientEvent {
-                    trace_id:   Uuid::new_v4().to_string(),
+                    trace_id: Uuid::new_v4().to_string(),
                     session_id: session_id.to_string(),
                     event: Some(client_event::Event::ActionApproval(ActionApproval {
-                        action_id:     req.action_id.clone(),
+                        action_id: req.action_id.clone(),
                         approved,
                         operator_note: format!(
                             "dexter-cli auto-{} (policy: {:?})",
@@ -430,8 +447,9 @@ async fn run_turn(
                         ),
                     })),
                 };
-                tx.send(approval).await
-                    .map_err(|_| anyhow!("session stream closed before ActionApproval could be sent"))?;
+                tx.send(approval).await.map_err(|_| {
+                    anyhow!("session stream closed before ActionApproval could be sent")
+                })?;
                 if !cfg.quiet {
                     writeln!(
                         stdout_lock,

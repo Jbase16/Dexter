@@ -26,10 +26,10 @@ use crate::constants::{CORE_VERSION, RETRIEVAL_MAX_CONTENT_CHARS, RETRIEVAL_WEB_
 /// The readable text extracted from a fetched web page.
 #[allow(dead_code)] // Phase 10+ callers read fetched_at for provenance display
 pub struct FetchResult {
-    pub url:        String,
-    pub title:      Option<String>,
+    pub url: String,
+    pub title: Option<String>,
     /// Extracted body text, ≤ `RETRIEVAL_MAX_CONTENT_CHARS` Unicode scalar values.
-    pub text:       String,
+    pub text: String,
     /// ISO8601 timestamp of when the page was fetched.
     pub fetched_at: String,
 }
@@ -69,7 +69,7 @@ impl WebRetriever {
         let html = response.text().await?;
         let (title, text) = extract_text(&html);
         Ok(FetchResult {
-            url:        url.to_string(),
+            url: url.to_string(),
             title,
             text,
             fetched_at: Utc::now().to_rfc3339(),
@@ -93,10 +93,12 @@ impl WebRetriever {
     /// wttr is slow.
     pub async fn fetch_plain(
         &self,
-        url:          &str,
+        url: &str,
         timeout_secs: u64,
     ) -> Result<FetchResult, reqwest::Error> {
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .timeout(Duration::from_secs(timeout_secs))
             .send()
             .await?;
@@ -105,8 +107,8 @@ impl WebRetriever {
         // Trim trailing whitespace/newlines that text endpoints often append.
         let text = text.trim().to_string();
         Ok(FetchResult {
-            url:        url.to_string(),
-            title:      None,
+            url: url.to_string(),
+            title: None,
             text,
             fetched_at: Utc::now().to_rfc3339(),
         })
@@ -146,10 +148,8 @@ fn extract_body(document: &Html) -> String {
     for tag in &candidates {
         let sel = Selector::parse(tag).unwrap();
         if let Some(root) = document.select(&sel).next() {
-            let noise_sels: Vec<Selector> = noise
-                .iter()
-                .map(|n| Selector::parse(n).unwrap())
-                .collect();
+            let noise_sels: Vec<Selector> =
+                noise.iter().map(|n| Selector::parse(n).unwrap()).collect();
 
             let text = filter_noise_descendants(root, &noise_sels);
             let text = normalize_whitespace(&text);
@@ -234,10 +234,14 @@ mod tests {
         </html>"#;
         let (title, text) = extract_text(html);
         assert_eq!(title.as_deref(), Some("Test Page"));
-        assert!(text.contains("article content"),
-            "article element must win over main; got: {text:?}");
-        assert!(!text.contains("main content"),
-            "main content must be absent when article is present; got: {text:?}");
+        assert!(
+            text.contains("article content"),
+            "article element must win over main; got: {text:?}"
+        );
+        assert!(
+            !text.contains("main content"),
+            "main content must be absent when article is present; got: {text:?}"
+        );
     }
 
     #[test]
@@ -250,8 +254,10 @@ mod tests {
             </body>
         </html>"#;
         let (_title, text) = extract_text(html);
-        assert!(text.contains("body paragraph"),
-            "should fall back to body text; got: {text:?}");
+        assert!(
+            text.contains("body paragraph"),
+            "should fall back to body text; got: {text:?}"
+        );
     }
 
     #[test]
@@ -269,13 +275,30 @@ mod tests {
             </body>
         </html>"#;
         let (_title, text) = extract_text(html);
-        assert!(text.contains("real content"),
-            "body text must be present; got: {text:?}");
-        assert!(!text.contains("var x"),    "script must be stripped; got: {text:?}");
-        assert!(!text.contains("color: red"), "style must be stripped; got: {text:?}");
-        assert!(!text.contains("nav link"), "nav must be stripped; got: {text:?}");
-        assert!(!text.contains("site header"), "header must be stripped; got: {text:?}");
-        assert!(!text.contains("footer text"), "footer must be stripped; got: {text:?}");
+        assert!(
+            text.contains("real content"),
+            "body text must be present; got: {text:?}"
+        );
+        assert!(
+            !text.contains("var x"),
+            "script must be stripped; got: {text:?}"
+        );
+        assert!(
+            !text.contains("color: red"),
+            "style must be stripped; got: {text:?}"
+        );
+        assert!(
+            !text.contains("nav link"),
+            "nav must be stripped; got: {text:?}"
+        );
+        assert!(
+            !text.contains("site header"),
+            "header must be stripped; got: {text:?}"
+        );
+        assert!(
+            !text.contains("footer text"),
+            "footer must be stripped; got: {text:?}"
+        );
     }
 
     #[test]

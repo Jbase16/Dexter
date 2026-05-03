@@ -60,26 +60,31 @@ pub const PERSONALITY_CONFIG_PATH: &str = "config/personality/default.yaml";
 ///
 /// Localhost HTTP only — TLS is never needed for a local Ollama instance, and
 /// reqwest is configured with `default-features = false` to omit TLS linkage.
-#[allow(dead_code)] pub const OLLAMA_BASE_URL: &str = "http://localhost:11434";
+#[allow(dead_code)]
+pub const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 
 /// Bidirectional chat endpoint. Supports both streaming (`stream: true`)
 /// and non-streaming (`stream: false`) responses. Also used for model unloading
 /// via `keep_alive: 0`.
-#[allow(dead_code)] pub const OLLAMA_CHAT_PATH: &str = "/api/chat";
+#[allow(dead_code)]
+pub const OLLAMA_CHAT_PATH: &str = "/api/chat";
 
 /// Embedding endpoint (Ollama ≥0.1.26).
 /// Response: `{"embeddings": [[f32, ...]]}` — plural outer array, always length 1
 /// for single-input requests. Do not use the legacy `/api/embeddings` (singular).
-#[allow(dead_code)] pub const OLLAMA_EMBED_PATH: &str = "/api/embed";
+#[allow(dead_code)]
+pub const OLLAMA_EMBED_PATH: &str = "/api/embed";
 
 /// Model inventory endpoint. Returns all downloaded models with metadata.
 /// This answers "is the model on disk?" — not "is it loaded into VRAM?"
 /// Use `/api/ps` (not implemented here) for the loaded-model query.
-#[allow(dead_code)] pub const OLLAMA_TAGS_PATH: &str = "/api/tags";
+#[allow(dead_code)]
+pub const OLLAMA_TAGS_PATH: &str = "/api/tags";
 
 /// Model download endpoint. Accepts a model name and streams NDJSON progress events.
 /// Only called when `InferenceConfig.auto_pull_missing_models = true`.
-#[allow(dead_code)] pub const OLLAMA_PULL_PATH: &str = "/api/pull";
+#[allow(dead_code)]
+pub const OLLAMA_PULL_PATH: &str = "/api/pull";
 
 /// Process-state endpoint. Returns the list of models currently loaded in VRAM/RAM,
 /// including `size_vram` (bytes actually resident on GPU) vs `size` (total bytes the
@@ -87,14 +92,16 @@ pub const PERSONALITY_CONFIG_PATH: &str = "config/personality/default.yaml";
 /// first-token latency will balloon from seconds to minutes. Used by the HEAVY
 /// dispatch diagnostics (Phase 37.6) to distinguish "failed to load" from
 /// "loaded partially" from "loaded but slow".
-#[allow(dead_code)] pub const OLLAMA_PS_PATH: &str = "/api/ps";
+#[allow(dead_code)]
+pub const OLLAMA_PS_PATH: &str = "/api/ps";
 
 /// Bounded mpsc channel capacity for inference event streams.
 ///
 /// 32 slots: enough to buffer a burst of tokens between the inference task and the
 /// gRPC sender task without stalling the generator, while keeping memory bounded.
 /// Phase 6 may tune this based on observed back-pressure patterns.
-#[allow(dead_code)] pub const INFERENCE_CHANNEL_CAPACITY: usize = 32;
+#[allow(dead_code)]
+pub const INFERENCE_CHANNEL_CAPACITY: usize = 32;
 
 // ── KV Cache Prefill (Phase 24) ────────────────────────────────────────────────
 
@@ -292,6 +299,30 @@ pub const PROACTIVE_USER_ACTIVE_WINDOW_SECS: u64 = 60;
 /// Smaller windows risk losing legitimate follow-ups; larger windows risk
 /// false-positive vision routes when the operator is no longer in image-mode.
 pub const VISION_CONTINUATION_WINDOW_SECS: u64 = 300;
+
+/// Joke-continuation window (seconds): how long after a successful joke turn
+/// follow-up utterances should re-route to PRIMARY for iteration.
+///
+/// Background: the joke-request override correctly upgrades "tell me a dad
+/// joke" → PRIMARY (gemma4:26b for variety/tone). But operator-style joke
+/// iteration ("that wasn't NSFW enough", "make it dirtier", "explain the
+/// joke", "different one") doesn't contain the word "joke" and falls back to
+/// FAST (qwen3:8b), which then either repeats its small joke repertoire or —
+/// worse — hallucinates explanations from training data ("Why is that dirty?
+/// Because the man is bringing a ladder to a brothel..." referring to a joke
+/// that was never actually told this session).
+///
+/// Fix: when a recent turn was a successful joke request AND the new
+/// utterance contains a joke-iteration marker (criticism, correction,
+/// "explain the joke", "another one"), upgrade to PRIMARY so the same model
+/// that told the joke can also iterate on it coherently.
+///
+/// Tuning: 180s (3 min) covers a normal joke-iteration session. Shorter than
+/// VISION_CONTINUATION_WINDOW_SECS (300s) because joke conversations tend to
+/// be shorter than image-discussion conversations — operators iterate 3-5
+/// times then move on. False-positive cost is low (PRIMARY handles non-joke
+/// follow-ups fine, just with ~1s extra latency).
+pub const JOKE_CONTINUATION_WINDOW_SECS: u64 = 180;
 
 /// Wall-clock timeout for the entire generation pipeline (seconds).
 ///
@@ -619,7 +650,6 @@ pub const SCREEN_CAPTURE_TIMEOUT_SECS: u64 = 5;
 /// value in its own `clipboardMaxChars` constant — keeping the value here prevents
 /// the two sides from drifting independently.
 pub const CLIPBOARD_MAX_CHARS: usize = 4_000;
-
 
 /// Clipboard content is only auto-injected into inference context when the
 /// clipboard was updated within this many seconds. Beyond this window, clipboard

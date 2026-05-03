@@ -93,41 +93,69 @@ mod tests {
     #[test]
     fn detect_remember_command_with_that_prefix() {
         let cmd = detect_memory_command("remember that my setup uses Apple Silicon");
-        assert_eq!(cmd, Some(MemoryCommand::Remember("my setup uses Apple Silicon".to_string())));
+        assert_eq!(
+            cmd,
+            Some(MemoryCommand::Remember(
+                "my setup uses Apple Silicon".to_string()
+            ))
+        );
     }
 
     #[test]
     fn detect_remember_command_without_that() {
         let cmd = detect_memory_command("remember I prefer dark mode");
-        assert_eq!(cmd, Some(MemoryCommand::Remember("I prefer dark mode".to_string())));
+        assert_eq!(
+            cmd,
+            Some(MemoryCommand::Remember("I prefer dark mode".to_string()))
+        );
     }
 
     #[test]
     fn detect_forget_command_strips_that_prefix() {
         let cmd = detect_memory_command("forget that I'm using Python 3.14");
-        assert_eq!(cmd, Some(MemoryCommand::Forget("I'm using Python 3.14".to_string())));
+        assert_eq!(
+            cmd,
+            Some(MemoryCommand::Forget("I'm using Python 3.14".to_string()))
+        );
     }
 
     #[test]
     fn detect_list_command_what_do_you_know() {
-        assert_eq!(detect_memory_command("what do you know about me?"), Some(MemoryCommand::List));
-        assert_eq!(detect_memory_command("what do you remember about me"), Some(MemoryCommand::List));
+        assert_eq!(
+            detect_memory_command("what do you know about me?"),
+            Some(MemoryCommand::List)
+        );
+        assert_eq!(
+            detect_memory_command("what do you remember about me"),
+            Some(MemoryCommand::List)
+        );
     }
 
     #[test]
     fn detect_no_memory_command_for_question_form() {
-        assert_eq!(detect_memory_command("remember the time we deployed that server?"), None);
+        assert_eq!(
+            detect_memory_command("remember the time we deployed that server?"),
+            None
+        );
         assert_eq!(detect_memory_command("remember when this broke?"), None);
         assert_eq!(detect_memory_command("how do you forget things?"), None);
-        assert_eq!(detect_memory_command("what is your favorite programming language?"), None);
+        assert_eq!(
+            detect_memory_command("what is your favorite programming language?"),
+            None
+        );
     }
 
     #[test]
     fn slug_id_is_deterministic_and_lowercase() {
         assert_eq!(slug_id("I'm building Dexter"), "i_m_building_dexter");
-        assert_eq!(slug_id("I'm building Dexter"), slug_id("I'm building Dexter"));
+        assert_eq!(
+            slug_id("I'm building Dexter"),
+            slug_id("I'm building Dexter")
+        );
         assert_eq!(slug_id(""), "");
-        assert!(slug_id("ANY CAPS INPUT").chars().all(|c| !c.is_uppercase()),
-            "slug_id output must be all-lowercase");
+        assert!(
+            slug_id("ANY CAPS INPUT").chars().all(|c| !c.is_uppercase()),
+            "slug_id output must be all-lowercase"
+        );
     }
 }

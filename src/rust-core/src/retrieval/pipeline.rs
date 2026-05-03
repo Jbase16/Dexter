@@ -21,11 +21,10 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::constants::{
-    LOCAL_RETRIEVAL_SKIP_WEB_THRESHOLD,
-    MEMORY_DB_FILENAME, MEMORY_EMBED_MAX_CHARS, MEMORY_RECALL_THRESHOLD, MEMORY_RECALL_TOP_N,
-    MEMORY_SOURCE_CONVERSATION, MEMORY_SOURCE_OPERATOR,
-    RETRIEVAL_EMBED_DIM, RETRIEVAL_MAX_MEMORY_HITS, RETRIEVAL_WEB_TIMEOUT_SECS,
-    RETRIEVAL_WTTR_TIMEOUT_SECS, UNCERTAINTY_MARKER,
+    LOCAL_RETRIEVAL_SKIP_WEB_THRESHOLD, MEMORY_DB_FILENAME, MEMORY_EMBED_MAX_CHARS,
+    MEMORY_RECALL_THRESHOLD, MEMORY_RECALL_TOP_N, MEMORY_SOURCE_CONVERSATION,
+    MEMORY_SOURCE_OPERATOR, RETRIEVAL_EMBED_DIM, RETRIEVAL_MAX_MEMORY_HITS,
+    RETRIEVAL_WEB_TIMEOUT_SECS, RETRIEVAL_WTTR_TIMEOUT_SECS, UNCERTAINTY_MARKER,
 };
 use crate::inference::engine::{EmbeddingRequest, InferenceEngine};
 
@@ -43,11 +42,11 @@ use super::web::{FetchResult, WebRetriever};
 #[derive(Debug, Clone)]
 pub struct RetrievalResult {
     /// The query string that was retrieved.
-    pub query:      String,
+    pub query: String,
     /// The primary text extracted from the retrieval source.
-    pub text:       String,
+    pub text: String,
     /// URL or source identifier for provenance logging.
-    pub source:     String,
+    pub source: String,
     /// Confidence score 0.0–1.0. 0.9 = AbstractText hit; 0.5 = raw body fallback.
     pub confidence: f32,
 }
@@ -67,7 +66,7 @@ impl RetrievalTrigger {
     /// Return the query string used to embed and search.
     pub fn query(&self) -> &str {
         match self {
-            Self::MemorySearch { query }      => query,
+            Self::MemorySearch { query } => query,
             Self::UncertaintyMarker { topic } => topic,
         }
     }
@@ -76,19 +75,19 @@ impl RetrievalTrigger {
 /// Retrieved context ready for injection into the generation request.
 #[allow(dead_code)] // Phase 10+ callers read query and trigger for audit/logging
 pub struct RetrievalContext {
-    pub query:       String,
+    pub query: String,
     pub memory_hits: Vec<MemoryEntry>,
     /// `Some` if a web fetch was attempted and succeeded. `None` on failure or
     /// when the query was satisfied by memory hits alone.
-    pub web_result:  Option<FetchResult>,
-    pub trigger:     RetrievalTrigger,
+    pub web_result: Option<FetchResult>,
+    pub trigger: RetrievalTrigger,
 }
 
 // ── RetrievalPipeline ─────────────────────────────────────────────────────────
 
 pub struct RetrievalPipeline {
     store: VectorStore,
-    web:   WebRetriever,
+    web: WebRetriever,
 }
 
 impl RetrievalPipeline {
@@ -100,7 +99,10 @@ impl RetrievalPipeline {
         let db_path = state_dir.join(MEMORY_DB_FILENAME);
         let store = VectorStore::new(&db_path)?;
         info!(path = %db_path.display(), "VectorStore opened");
-        Ok(Self { store, web: WebRetriever::default_timeout() })
+        Ok(Self {
+            store,
+            web: WebRetriever::default_timeout(),
+        })
     }
 
     /// In-memory fallback — data not persisted across restarts.
@@ -108,9 +110,11 @@ impl RetrievalPipeline {
     /// Used by `make_orchestrator()` in tests and when `new()` fails at startup.
     /// Opens an in-memory SQLite DB that is always available and always succeeds.
     pub fn new_degraded() -> Self {
-        let store = VectorStore::in_memory()
-            .expect("in-memory SQLite must always succeed");
-        Self { store, web: WebRetriever::new(RETRIEVAL_WEB_TIMEOUT_SECS) }
+        let store = VectorStore::in_memory().expect("in-memory SQLite must always succeed");
+        Self {
+            store,
+            web: WebRetriever::new(RETRIEVAL_WEB_TIMEOUT_SECS),
+        }
     }
 
     // ── Trigger detection (pure — no Ollama, no network) ─────────────────────
@@ -124,11 +128,13 @@ impl RetrievalPipeline {
     /// Pure function — no IO.
     pub fn detect_pre_trigger(
         &self,
-        user_message:       &str,
+        user_message: &str,
         is_retrieval_first: bool,
     ) -> Option<RetrievalTrigger> {
         if is_retrieval_first {
-            Some(RetrievalTrigger::MemorySearch { query: user_message.to_string() })
+            Some(RetrievalTrigger::MemorySearch {
+                query: user_message.to_string(),
+            })
         } else {
             None
         }
@@ -167,9 +173,9 @@ impl RetrievalPipeline {
     /// `embed_model_name` = `model_config.embed` (e.g. `"mxbai-embed-large"`).
     pub async fn retrieve(
         &mut self,
-        engine:           &InferenceEngine,
+        engine: &InferenceEngine,
         embed_model_name: &str,
-        trigger:          &RetrievalTrigger,
+        trigger: &RetrievalTrigger,
     ) -> Result<RetrievalContext, Box<dyn std::error::Error + Send + Sync>> {
         let query = trigger.query().to_string();
 
@@ -180,7 +186,10 @@ impl RetrievalPipeline {
             query
         );
         let embedding = engine
-            .embed(EmbeddingRequest { model_name: embed_model_name.to_string(), input: prefixed })
+            .embed(EmbeddingRequest {
+                model_name: embed_model_name.to_string(),
+                input: prefixed,
+            })
             .await?;
 
         // ── Step 2: search knowledge base ────────────────────────────────────────
@@ -194,7 +203,9 @@ impl RetrievalPipeline {
         // factual question in the same domain. Turns flow through recall_relevant()
         // at orchestrator step 3c; they belong in conversational context injection,
         // not in the retrieval pipeline's web-fetch gate.
-        let knowledge_hits = self.store.search_knowledge(&embedding, RETRIEVAL_MAX_MEMORY_HITS)?;
+        let knowledge_hits = self
+            .store
+            .search_knowledge(&embedding, RETRIEVAL_MAX_MEMORY_HITS)?;
         info!(
             trigger   = ?std::mem::discriminant(trigger),
             hits      = knowledge_hits.len(),
@@ -217,7 +228,8 @@ impl RetrievalPipeline {
         // Does NOT fall through when:
         //   - knowledge_hits is non-empty but all below threshold AND trigger is MemorySearch
         //     → Phase 9 behavior preserved: some local context is better than a DDG result
-        let has_confident_local = knowledge_hits.iter()
+        let has_confident_local = knowledge_hits
+            .iter()
             .any(|h| h.similarity >= LOCAL_RETRIEVAL_SKIP_WEB_THRESHOLD);
 
         let should_fetch_web = !has_confident_local
@@ -263,7 +275,7 @@ impl RetrievalPipeline {
             // [Retrieved: ...] context.
             let weather_result = match wttr {
                 Some(r) => Some(r),
-                None    => self.fetch_ddg(&query, embed_model_name, engine).await,
+                None => self.fetch_ddg(&query, embed_model_name, engine).await,
             };
             (weather_result, Vec::new())
         } else {
@@ -277,7 +289,12 @@ impl RetrievalPipeline {
 
         // field name `memory_hits` preserved for API compatibility; now contains only
         // authoritative knowledge entries (facts + cached web pages)
-        Ok(RetrievalContext { query, memory_hits: knowledge_hits, web_result, trigger: trigger.clone() })
+        Ok(RetrievalContext {
+            query,
+            memory_hits: knowledge_hits,
+            web_result,
+            trigger: trigger.clone(),
+        })
     }
 
     /// Web-only retrieval for the Phase 19 sentinel-interception path.
@@ -297,32 +314,37 @@ impl RetrievalPipeline {
         &self,
         query: &str,
     ) -> Result<RetrievalResult, Box<dyn std::error::Error + Send + Sync>> {
-        let encoded  = urlencoding_encode(query);
-        let api_url  = format!(
+        let encoded = urlencoding_encode(query);
+        let api_url = format!(
             "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
             encoded
         );
 
-        let fetch_result = self.web.fetch(&api_url).await
+        let fetch_result = self
+            .web
+            .fetch(&api_url)
+            .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         // Parse DDG JSON to extract AbstractText (the structured instant answer).
         // Prefer AbstractText over raw HTML — it's the concise factual answer.
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&fetch_result.text) {
-            let abstract_text = json.get("AbstractText")
+            let abstract_text = json
+                .get("AbstractText")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty());
 
             if let Some(text) = abstract_text {
-                let source = json.get("AbstractURL")
+                let source = json
+                    .get("AbstractURL")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .unwrap_or("https://duckduckgo.com")
                     .to_string();
                 info!(query = %query, source = %source, "retrieve_web_only: AbstractText hit");
                 return Ok(RetrievalResult {
-                    query:      query.to_string(),
-                    text:       text.to_string(),
+                    query: query.to_string(),
+                    text: text.to_string(),
                     source,
                     confidence: 0.9,
                 });
@@ -333,9 +355,9 @@ impl RetrievalPipeline {
         // Confidence 0.5 — raw DDG response body is less reliable than AbstractText.
         info!(query = %query, source = %fetch_result.url, "retrieve_web_only: raw body fallback");
         Ok(RetrievalResult {
-            query:      query.to_string(),
-            text:       fetch_result.text,
-            source:     fetch_result.url,
+            query: query.to_string(),
+            text: fetch_result.text,
+            source: fetch_result.url,
             confidence: 0.5,
         })
     }
@@ -349,7 +371,10 @@ impl RetrievalPipeline {
     pub fn format_for_injection(&self, ctx: &RetrievalContext) -> String {
         let mut out = String::new();
         for entry in &ctx.memory_hits {
-            out.push_str(&format!("[Retrieved: {}]\n{}\n\n", entry.source, entry.content));
+            out.push_str(&format!(
+                "[Retrieved: {}]\n{}\n\n",
+                entry.source, entry.content
+            ));
         }
         if let Some(web) = &ctx.web_result {
             let source = web.title.as_deref().unwrap_or(web.url.as_str());
@@ -365,20 +390,27 @@ impl RetrievalPipeline {
     /// prevent response delivery.
     pub async fn store_conversation_turn(
         &mut self,
-        engine:           &InferenceEngine,
+        engine: &InferenceEngine,
         embed_model_name: &str,
-        content:          &str,
-        session_id:       &str,
+        content: &str,
+        session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let embedding = engine
             .embed(EmbeddingRequest {
                 model_name: embed_model_name.to_string(),
-                input:      content.to_string(),
+                input: content.to_string(),
             })
             .await?;
-        let id     = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4().to_string();
         let source = format!("session:{}", session_id);
-        self.store.insert(&id, content, &source, "conversation_turn", Some(session_id), &embedding)?;
+        self.store.insert(
+            &id,
+            content,
+            &source,
+            "conversation_turn",
+            Some(session_id),
+            &embedding,
+        )?;
         Ok(())
     }
 
@@ -392,15 +424,18 @@ impl RetrievalPipeline {
     /// Returns an empty Vec on embedding failure (non-fatal, logged at warn).
     pub async fn recall_relevant(
         &self,
-        engine:      &InferenceEngine,
+        engine: &InferenceEngine,
         embed_model: &str,
-        query:       &str,
+        query: &str,
     ) -> Vec<crate::retrieval::store::MemoryEntry> {
-        let embedding = match engine.embed(crate::inference::engine::EmbeddingRequest {
-            model_name: embed_model.to_string(),
-            input: truncate_for_embed(query),
-        }).await {
-            Ok(e)  => e,
+        let embedding = match engine
+            .embed(crate::inference::engine::EmbeddingRequest {
+                model_name: embed_model.to_string(),
+                input: truncate_for_embed(query),
+            })
+            .await
+        {
+            Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Memory recall: embed failed — skipping recall injection");
                 return vec![];
@@ -408,16 +443,25 @@ impl RetrievalPipeline {
         };
 
         let mut results: Vec<crate::retrieval::store::MemoryEntry> = Vec::new();
-        if let Ok(turns) = self.store.search_source(&embedding, MEMORY_RECALL_TOP_N, MEMORY_SOURCE_CONVERSATION) {
+        if let Ok(turns) =
+            self.store
+                .search_source(&embedding, MEMORY_RECALL_TOP_N, MEMORY_SOURCE_CONVERSATION)
+        {
             results.extend(turns);
         }
-        if let Ok(facts) = self.store.search_source(&embedding, MEMORY_RECALL_TOP_N, MEMORY_SOURCE_OPERATOR) {
+        if let Ok(facts) =
+            self.store
+                .search_source(&embedding, MEMORY_RECALL_TOP_N, MEMORY_SOURCE_OPERATOR)
+        {
             results.extend(facts);
         }
 
         results.retain(|e| e.similarity >= MEMORY_RECALL_THRESHOLD);
-        results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity)
-            .unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(MEMORY_RECALL_TOP_N);
         results
     }
@@ -429,11 +473,11 @@ impl RetrievalPipeline {
     /// Non-fatal: embed or insert failures are logged at warn and ignored.
     pub async fn embed_and_store_turn(
         &self,
-        engine:      &InferenceEngine,
+        engine: &InferenceEngine,
         embed_model: &str,
-        session_id:  &str,
-        trace_id:    &str,
-        content:     &str,
+        session_id: &str,
+        trace_id: &str,
+        content: &str,
     ) {
         // NOTE: embed the truncated prefix but persist the full `content`.
         // mxbai-embed-large has a 512-token trained context; submitting more
@@ -441,11 +485,14 @@ impl RetrievalPipeline {
         // embedding only needs to capture "what is this turn about" for cosine
         // retrieval — head-truncation preserves the user question (highest
         // retrieval signal) while dropping the tail of long assistant answers.
-        let embedding = match engine.embed(crate::inference::engine::EmbeddingRequest {
-            model_name: embed_model.to_string(),
-            input: truncate_for_embed(content),
-        }).await {
-            Ok(e)  => e,
+        let embedding = match engine
+            .embed(crate::inference::engine::EmbeddingRequest {
+                model_name: embed_model.to_string(),
+                input: truncate_for_embed(content),
+            })
+            .await
+        {
+            Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Memory: embed failed — turn not stored");
                 return;
@@ -453,7 +500,12 @@ impl RetrievalPipeline {
         };
 
         if let Err(e) = self.store.insert(
-            trace_id, content, MEMORY_SOURCE_CONVERSATION, "turn", Some(session_id), &embedding,
+            trace_id,
+            content,
+            MEMORY_SOURCE_CONVERSATION,
+            "turn",
+            Some(session_id),
+            &embedding,
         ) {
             warn!(error = %e, "Memory: VectorStore insert failed — turn not stored");
         }
@@ -466,19 +518,22 @@ impl RetrievalPipeline {
     /// Non-fatal: embed or upsert failures are logged at warn and ignored.
     pub async fn store_fact(
         &self,
-        engine:      &InferenceEngine,
+        engine: &InferenceEngine,
         embed_model: &str,
-        slug:        &str,
-        content:     &str,
+        slug: &str,
+        content: &str,
     ) {
         // Same embed-context protection as embed_and_store_turn. Facts are
         // typically short, but an operator pasting a long "remember this"
         // blob would otherwise hit the same 400-rejection silent-drop path.
-        let embedding = match engine.embed(crate::inference::engine::EmbeddingRequest {
-            model_name: embed_model.to_string(),
-            input: truncate_for_embed(content),
-        }).await {
-            Ok(e)  => e,
+        let embedding = match engine
+            .embed(crate::inference::engine::EmbeddingRequest {
+                model_name: embed_model.to_string(),
+                input: truncate_for_embed(content),
+            })
+            .await
+        {
+            Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Memory: embed failed — fact not stored");
                 return;
@@ -486,7 +541,12 @@ impl RetrievalPipeline {
         };
 
         if let Err(e) = self.store.upsert(
-            slug, content, MEMORY_SOURCE_OPERATOR, "fact", None, &embedding,
+            slug,
+            content,
+            MEMORY_SOURCE_OPERATOR,
+            "fact",
+            None,
+            &embedding,
         ) {
             warn!(error = %e, "Memory: VectorStore upsert failed — fact not stored");
         }
@@ -506,7 +566,9 @@ impl RetrievalPipeline {
     /// Results are not sorted by relevance (caller formats them as a numbered list).
     pub fn list_facts(&self) -> Vec<crate::retrieval::store::MemoryEntry> {
         let zero = vec![0.0f32; RETRIEVAL_EMBED_DIM];
-        self.store.search_source(&zero, 1000, MEMORY_SOURCE_OPERATOR).unwrap_or_default()
+        self.store
+            .search_source(&zero, 1000, MEMORY_SOURCE_OPERATOR)
+            .unwrap_or_default()
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -546,7 +608,7 @@ impl RetrievalPipeline {
     async fn fetch_wttr(&self, location: Option<&str>) -> Option<FetchResult> {
         let url = match location {
             Some(loc) => format!("https://wttr.in/{}?format=3", urlencoding_encode(loc)),
-            None      => "https://wttr.in/?format=3".to_string(),
+            None => "https://wttr.in/?format=3".to_string(),
         };
         self.fetch_wttr_url(&url).await
     }
@@ -583,11 +645,11 @@ impl RetrievalPipeline {
                         info!(url = %url, body = %body, "wttr.in fast-path hit");
                     }
                     return Some(FetchResult {
-                        url:        r.url,
+                        url: r.url,
                         // Title shows up in `format_for_injection` as `[Retrieved: <title>]`,
                         // so name it something the model can quote naturally.
-                        title:      Some("wttr.in current conditions".to_string()),
-                        text:       body.to_string(),
+                        title: Some("wttr.in current conditions".to_string()),
+                        text: body.to_string(),
                         fetched_at: r.fetched_at,
                     });
                 }
@@ -636,7 +698,8 @@ impl RetrievalPipeline {
             return None;
         }
 
-        let urls: Vec<String> = locations.iter()
+        let urls: Vec<String> = locations
+            .iter()
             .map(|loc| format!("https://wttr.in/{}?format=3", urlencoding_encode(loc)))
             .collect();
 
@@ -685,20 +748,21 @@ impl RetrievalPipeline {
         Some(FetchResult {
             // Use the first successful URL as the provenance marker; the body
             // below contains all lines, so this is just for logging.
-            url:        source_urls.into_iter().next()
-                          .unwrap_or_else(|| "https://wttr.in/".to_string()),
-            title:      Some("wttr.in current conditions".to_string()),
-            text:       bodies.join("\n"),
-            fetched_at: latest_fetched_at
-                          .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            url: source_urls
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "https://wttr.in/".to_string()),
+            title: Some("wttr.in current conditions".to_string()),
+            text: bodies.join("\n"),
+            fetched_at: latest_fetched_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         })
     }
 
     async fn fetch_ddg(
         &mut self,
-        query:            &str,
+        query: &str,
         embed_model_name: &str,
-        engine:           &InferenceEngine,
+        engine: &InferenceEngine,
     ) -> Option<FetchResult> {
         let encoded = urlencoding_encode(query);
         let api_url = format!(
@@ -721,7 +785,9 @@ impl RetrievalPipeline {
         // the `text` field contains whatever text was in the body. For the DDG JSON
         // API response, this works acceptably — the JSON is compact and readable.
         // Try to parse the raw body as JSON to extract AbstractText specifically.
-        let result = self.try_parse_ddg_json(&fetch_result.text, query, embed_model_name, engine).await;
+        let result = self
+            .try_parse_ddg_json(&fetch_result.text, query, embed_model_name, engine)
+            .await;
         result.or(Some(fetch_result))
     }
 
@@ -730,29 +796,32 @@ impl RetrievalPipeline {
     /// or `None` if the response doesn't contain usable instant-answer content.
     async fn try_parse_ddg_json(
         &mut self,
-        body:             &str,
-        query:            &str,
+        body: &str,
+        query: &str,
         embed_model_name: &str,
-        engine:           &InferenceEngine,
+        engine: &InferenceEngine,
     ) -> Option<FetchResult> {
         let json: serde_json::Value = serde_json::from_str(body).ok()?;
 
         // Prefer AbstractText — it's the concise answer for most factual queries.
-        let abstract_text = json.get("AbstractText")
+        let abstract_text = json
+            .get("AbstractText")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
 
         if let Some(text) = abstract_text {
             let result = FetchResult {
-                url:        json.get("AbstractURL")
+                url: json
+                    .get("AbstractURL")
                     .and_then(|v| v.as_str())
                     .unwrap_or("https://duckduckgo.com")
                     .to_string(),
-                title:      Some(format!("DuckDuckGo: {}", query)),
-                text:       text.to_string(),
+                title: Some(format!("DuckDuckGo: {}", query)),
+                text: text.to_string(),
                 fetched_at: chrono::Utc::now().to_rfc3339(),
             };
-            self.cache_web_result(&result, embed_model_name, engine).await;
+            self.cache_web_result(&result, embed_model_name, engine)
+                .await;
             return Some(result);
         }
 
@@ -767,7 +836,8 @@ impl RetrievalPipeline {
 
         match self.web.fetch(first_url).await {
             Ok(result) => {
-                self.cache_web_result(&result, embed_model_name, engine).await;
+                self.cache_web_result(&result, embed_model_name, engine)
+                    .await;
                 Some(result)
             }
             Err(e) => {
@@ -781,21 +851,24 @@ impl RetrievalPipeline {
     /// Non-fatal — logs and ignores errors.
     async fn cache_web_result(
         &mut self,
-        result:           &FetchResult,
+        result: &FetchResult,
         embed_model_name: &str,
-        engine:           &InferenceEngine,
+        engine: &InferenceEngine,
     ) {
         let embed_res = engine
             .embed(EmbeddingRequest {
                 model_name: embed_model_name.to_string(),
-                input:      result.text.clone(),
+                input: result.text.clone(),
             })
             .await;
         match embed_res {
             Ok(embedding) => {
-                let id     = Uuid::new_v4().to_string();
+                let id = Uuid::new_v4().to_string();
                 let source = format!("web:{}", result.url);
-                if let Err(e) = self.store.insert(&id, &result.text, &source, "web_page", None, &embedding) {
+                if let Err(e) =
+                    self.store
+                        .insert(&id, &result.text, &source, "web_page", None, &embedding)
+                {
                     warn!(error = %e, "Failed to cache web result in VectorStore — non-fatal");
                 }
             }
@@ -815,10 +888,11 @@ fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             b' ' => out.push('+'),
-            b    => out.push_str(&format!("%{:02X}", b)),
+            b => out.push_str(&format!("%{:02X}", b)),
         }
     }
     out
@@ -841,10 +915,20 @@ fn urlencoding_encode(s: &str) -> String {
 pub(crate) fn is_weather_query(query: &str) -> bool {
     let q = query.to_lowercase();
     const PATTERNS: &[&str] = &[
-        "weather", "forecast", "temperature", "humidity",
-        "raining", "snowing", "cloudy", "sunny",
-        "how hot", "how cold", "how warm", "feels like outside",
-        "is it raining", "is it snowing",
+        "weather",
+        "forecast",
+        "temperature",
+        "humidity",
+        "raining",
+        "snowing",
+        "cloudy",
+        "sunny",
+        "how hot",
+        "how cold",
+        "how warm",
+        "feels like outside",
+        "is it raining",
+        "is it snowing",
     ];
     PATTERNS.iter().any(|p| q.contains(p))
 }
@@ -888,8 +972,15 @@ pub(crate) fn extract_weather_locations(query: &str) -> Vec<String> {
     let lower = query.to_lowercase();
     const PREPS: &[&str] = &[" in ", " at ", " for "];
     const TRAIL_NOISE: &[&str] = &[
-        " today", " tomorrow", " tonight", " right now", " now", " this week",
-        " this morning", " this afternoon", " this evening",
+        " today",
+        " tomorrow",
+        " tonight",
+        " right now",
+        " now",
+        " this week",
+        " this morning",
+        " this afternoon",
+        " this evening",
     ];
     const SPLITTERS: &[&str] = &[" and ", " or "];
 
@@ -917,20 +1008,25 @@ pub(crate) fn extract_weather_locations(query: &str) -> Vec<String> {
                     cleaned = cleaned.trim_end().to_string();
                 }
             }
-            if cleaned == before { break; }
+            if cleaned == before {
+                break;
+            }
         }
         cleaned
     };
 
-    let mut out:  Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for start in starts {
-        if start >= lower.len() { continue; }
+        if start >= lower.len() {
+            continue;
+        }
         let tail = &lower[start..];
 
         // Phrase ends at first clause boundary.
-        let end = tail.find(|c: char| matches!(c, '?' | '.' | ',' | '!' | '\n'))
+        let end = tail
+            .find(|c: char| matches!(c, '?' | '.' | ',' | '!' | '\n'))
             .unwrap_or(tail.len());
         let phrase = &tail[..end];
 
@@ -938,14 +1034,14 @@ pub(crate) fn extract_weather_locations(query: &str) -> Vec<String> {
         // Manual multi-delimiter split to avoid pulling in `regex` for this.
         let mut parts: Vec<&str> = vec![phrase];
         for splitter in SPLITTERS {
-            parts = parts.into_iter()
-                .flat_map(|p| p.split(splitter))
-                .collect();
+            parts = parts.into_iter().flat_map(|p| p.split(splitter)).collect();
         }
 
         for part in parts {
             let cleaned = strip_trailing_noise(part);
-            if cleaned.is_empty() { continue; }
+            if cleaned.is_empty() {
+                continue;
+            }
             if seen.insert(cleaned.clone()) {
                 out.push(cleaned);
             }
@@ -992,7 +1088,10 @@ mod tests {
     fn detect_pre_trigger_retrieval_first_returns_memory_search() {
         let p = make_pipeline();
         let trigger = p.detect_pre_trigger("what version of Python is installed?", true);
-        assert!(trigger.is_some(), "is_retrieval_first=true must return Some");
+        assert!(
+            trigger.is_some(),
+            "is_retrieval_first=true must return Some"
+        );
         let trigger = trigger.unwrap();
         assert!(
             matches!(trigger, RetrievalTrigger::MemorySearch { .. }),
@@ -1007,8 +1106,10 @@ mod tests {
     fn truncate_for_embed_passes_short_input_unchanged() {
         let short = "User: hi\nAssistant: hello";
         let out = truncate_for_embed(short);
-        assert_eq!(out, short,
-            "inputs ≤ MEMORY_EMBED_MAX_CHARS must round-trip byte-for-byte");
+        assert_eq!(
+            out, short,
+            "inputs ≤ MEMORY_EMBED_MAX_CHARS must round-trip byte-for-byte"
+        );
     }
 
     #[test]
@@ -1060,8 +1161,10 @@ mod tests {
         let input: String = std::iter::repeat_n(wave, MEMORY_EMBED_MAX_CHARS * 2).collect();
         let out = truncate_for_embed(&input);
         assert_eq!(out.chars().count(), MEMORY_EMBED_MAX_CHARS);
-        assert!(out.chars().all(|c| c == wave),
-            "every surviving char must be the intact emoji — no mid-codepoint split");
+        assert!(
+            out.chars().all(|c| c == wave),
+            "every surviving char must be the intact emoji — no mid-codepoint split"
+        );
     }
 
     // ── Phase 37.8: weather fast-path detection ───────────────────────────────
@@ -1087,19 +1190,40 @@ mod tests {
 
     #[test]
     fn extract_weather_location_handles_in_at_for_prepositions() {
-        assert_eq!(extract_weather_location("weather in Tokyo").as_deref(),       Some("tokyo"));
-        assert_eq!(extract_weather_location("forecast at Paris").as_deref(),      Some("paris"));
-        assert_eq!(extract_weather_location("weather for Buenos Aires").as_deref(), Some("buenos aires"));
+        assert_eq!(
+            extract_weather_location("weather in Tokyo").as_deref(),
+            Some("tokyo")
+        );
+        assert_eq!(
+            extract_weather_location("forecast at Paris").as_deref(),
+            Some("paris")
+        );
+        assert_eq!(
+            extract_weather_location("weather for Buenos Aires").as_deref(),
+            Some("buenos aires")
+        );
     }
 
     #[test]
     fn extract_weather_location_strips_trailing_time_qualifiers_and_punctuation() {
         // The classifier lowercases the input, so location comes out lowercase.
         // wttr.in is case-insensitive on the location path component.
-        assert_eq!(extract_weather_location("weather in Tokyo today?").as_deref(),     Some("tokyo"));
-        assert_eq!(extract_weather_location("weather in NYC tomorrow").as_deref(),     Some("nyc"));
-        assert_eq!(extract_weather_location("forecast for London right now").as_deref(), Some("london"));
-        assert_eq!(extract_weather_location("weather in Paris this evening!").as_deref(), Some("paris"));
+        assert_eq!(
+            extract_weather_location("weather in Tokyo today?").as_deref(),
+            Some("tokyo")
+        );
+        assert_eq!(
+            extract_weather_location("weather in NYC tomorrow").as_deref(),
+            Some("nyc")
+        );
+        assert_eq!(
+            extract_weather_location("forecast for London right now").as_deref(),
+            Some("london")
+        );
+        assert_eq!(
+            extract_weather_location("weather in Paris this evening!").as_deref(),
+            Some("paris")
+        );
     }
 
     #[test]
@@ -1146,7 +1270,7 @@ mod tests {
         // The production log's actual phrasing — two full clauses, each with
         // its own "in {city}". Each preposition hit is scanned independently.
         let got = extract_weather_locations(
-            "what's the weather in Tokyo? and what's the weather in Sacramento?"
+            "what's the weather in Tokyo? and what's the weather in Sacramento?",
         );
         assert_eq!(got, vec!["tokyo".to_string(), "sacramento".to_string()]);
     }
@@ -1162,9 +1286,8 @@ mod tests {
     fn extract_weather_locations_deduplicates_preserving_order() {
         // "weather in Tokyo. What about weather in Tokyo tomorrow?" must
         // collapse to one city, not send two identical wttr requests.
-        let got = extract_weather_locations(
-            "weather in Tokyo. What about weather in Tokyo tomorrow?"
-        );
+        let got =
+            extract_weather_locations("weather in Tokyo. What about weather in Tokyo tomorrow?");
         assert_eq!(got, vec!["tokyo".to_string()]);
     }
 
@@ -1201,7 +1324,10 @@ mod tests {
     fn detect_pre_trigger_chat_returns_none() {
         let p = make_pipeline();
         let trigger = p.detect_pre_trigger("write me a poem about rivers", false);
-        assert!(trigger.is_none(), "is_retrieval_first=false must return None");
+        assert!(
+            trigger.is_none(),
+            "is_retrieval_first=false must return None"
+        );
     }
 
     #[test]
@@ -1209,12 +1335,18 @@ mod tests {
         let p = make_pipeline();
         let response = "I'm not certain about X. Let me check that for you.";
         let trigger = p.detect_post_trigger(response);
-        assert!(trigger.is_some(), "uncertainty marker must trigger post-retrieval");
+        assert!(
+            trigger.is_some(),
+            "uncertainty marker must trigger post-retrieval"
+        );
         match trigger.unwrap() {
             RetrievalTrigger::UncertaintyMarker { topic } => {
                 assert_eq!(topic, "X", "topic must be extracted between marker and '.'");
             }
-            other => panic!("expected UncertaintyMarker, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected UncertaintyMarker, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1222,21 +1354,28 @@ mod tests {
     fn detect_post_trigger_no_marker_returns_none() {
         let p = make_pipeline();
         let response = "Python 3.14 is the latest version as of early 2026.";
-        assert!(p.detect_post_trigger(response).is_none(),
-            "clean response without UNCERTAINTY_MARKER must return None");
+        assert!(
+            p.detect_post_trigger(response).is_none(),
+            "clean response without UNCERTAINTY_MARKER must return None"
+        );
     }
 
     #[test]
     fn format_for_injection_empty_context_returns_empty_string() {
         let p = make_pipeline();
         let ctx = RetrievalContext {
-            query:       "test".to_string(),
+            query: "test".to_string(),
             memory_hits: vec![],
-            web_result:  None,
-            trigger:     RetrievalTrigger::MemorySearch { query: "test".to_string() },
+            web_result: None,
+            trigger: RetrievalTrigger::MemorySearch {
+                query: "test".to_string(),
+            },
         };
-        assert_eq!(p.format_for_injection(&ctx), "",
-            "no hits and no web result must produce empty string");
+        assert_eq!(
+            p.format_for_injection(&ctx),
+            "",
+            "no hits and no web result must produce empty string"
+        );
     }
 
     #[test]
@@ -1244,34 +1383,42 @@ mod tests {
         let p = make_pipeline();
         let ctx = RetrievalContext {
             query: "test".to_string(),
-            memory_hits: vec![
-                MemoryEntry {
-                    id:         "id-1".to_string(),
-                    content:    "remembered content".to_string(),
-                    source:     "session:s1".to_string(),
-                    entry_type: "conversation_turn".to_string(),
-                    session_id: Some("s1".to_string()),
-                    created_at: "2026-03-08T00:00:00Z".to_string(),
-                    similarity: 0.9,
-                },
-            ],
+            memory_hits: vec![MemoryEntry {
+                id: "id-1".to_string(),
+                content: "remembered content".to_string(),
+                source: "session:s1".to_string(),
+                entry_type: "conversation_turn".to_string(),
+                session_id: Some("s1".to_string()),
+                created_at: "2026-03-08T00:00:00Z".to_string(),
+                similarity: 0.9,
+            }],
             web_result: Some(FetchResult {
-                url:        "https://example.com".to_string(),
-                title:      Some("Example Page".to_string()),
-                text:       "web content here".to_string(),
+                url: "https://example.com".to_string(),
+                title: Some("Example Page".to_string()),
+                text: "web content here".to_string(),
                 fetched_at: "2026-03-08T00:00:00Z".to_string(),
             }),
-            trigger: RetrievalTrigger::MemorySearch { query: "test".to_string() },
+            trigger: RetrievalTrigger::MemorySearch {
+                query: "test".to_string(),
+            },
         };
         let formatted = p.format_for_injection(&ctx);
-        assert!(formatted.contains("remembered content"),
-            "memory hit content must appear in output");
-        assert!(formatted.contains("session:s1"),
-            "memory hit source must appear in output");
-        assert!(formatted.contains("web content here"),
-            "web result text must appear in output");
-        assert!(formatted.contains("Example Page"),
-            "web result title must appear in output");
+        assert!(
+            formatted.contains("remembered content"),
+            "memory hit content must appear in output"
+        );
+        assert!(
+            formatted.contains("session:s1"),
+            "memory hit source must appear in output"
+        );
+        assert!(
+            formatted.contains("web content here"),
+            "web result text must appear in output"
+        );
+        assert!(
+            formatted.contains("Example Page"),
+            "web result title must appear in output"
+        );
     }
 
     #[test]
@@ -1287,11 +1434,12 @@ mod tests {
         // Insert a conversation turn — the contamination source after Phase 21.
         // The embedding is identical to the query so similarity = 1.0, the worst-case
         // scenario for the old search() call: maximum similarity guaranteeing inclusion.
-        pipeline.store
+        pipeline
+            .store
             .insert(
                 "turn-contamination",
                 "User: what Python frameworks are good? Assistant: FastAPI.",
-                "memory",  // MEMORY_SOURCE_CONVERSATION
+                "memory", // MEMORY_SOURCE_CONVERSATION
                 "turn",
                 None,
                 &emb,
@@ -1299,7 +1447,8 @@ mod tests {
             .expect("insert must succeed on in-memory store");
 
         // search_knowledge() must exclude the turn and return empty.
-        let results = pipeline.store
+        let results = pipeline
+            .store
             .search_knowledge(&emb, 10)
             .expect("search_knowledge must not error");
 
@@ -1307,7 +1456,10 @@ mod tests {
             results.is_empty(),
             "search_knowledge must exclude entry_type='turn'; got {} entries with types: {:?}",
             results.len(),
-            results.iter().map(|e| e.entry_type.as_str()).collect::<Vec<_>>(),
+            results
+                .iter()
+                .map(|e| e.entry_type.as_str())
+                .collect::<Vec<_>>(),
         );
     }
 

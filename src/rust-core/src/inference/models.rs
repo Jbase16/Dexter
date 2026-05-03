@@ -66,24 +66,24 @@ impl ModelId {
     /// `"qwen3:8b"`. This is passed verbatim to Ollama in request bodies.
     pub fn ollama_name<'a>(&self, cfg: &'a ModelConfig) -> &'a str {
         match self {
-            ModelId::Fast    => &cfg.fast,
+            ModelId::Fast => &cfg.fast,
             ModelId::Primary => &cfg.primary,
-            ModelId::Heavy   => &cfg.heavy,
-            ModelId::Code    => &cfg.code,
-            ModelId::Vision  => &cfg.vision,
-            ModelId::Embed   => &cfg.embed,
+            ModelId::Heavy => &cfg.heavy,
+            ModelId::Code => &cfg.code,
+            ModelId::Vision => &cfg.vision,
+            ModelId::Embed => &cfg.embed,
         }
     }
 
     /// Human-readable tier name for logging and display. Does not change with config.
     pub fn tier_name(&self) -> &'static str {
         match self {
-            ModelId::Fast    => "fast",
+            ModelId::Fast => "fast",
             ModelId::Primary => "primary",
-            ModelId::Heavy   => "heavy",
-            ModelId::Code    => "code",
-            ModelId::Vision  => "vision",
-            ModelId::Embed   => "embed",
+            ModelId::Heavy => "heavy",
+            ModelId::Code => "code",
+            ModelId::Vision => "vision",
+            ModelId::Embed => "embed",
         }
     }
 
@@ -109,9 +109,9 @@ impl ModelId {
     /// request, not via a separate API call.
     pub fn unload_after_use(&self, cfg: &ModelConfig) -> bool {
         match self {
-            ModelId::Heavy  => true,
+            ModelId::Heavy => true,
             ModelId::Vision => cfg.vision != cfg.primary,
-            _               => false,
+            _ => false,
         }
     }
 
@@ -191,12 +191,12 @@ mod tests {
     #[test]
     fn ollama_name_resolves_all_tiers() {
         let cfg = default_cfg();
-        assert_eq!(ModelId::Fast.ollama_name(&cfg),    "qwen3:8b");
+        assert_eq!(ModelId::Fast.ollama_name(&cfg), "qwen3:8b");
         assert_eq!(ModelId::Primary.ollama_name(&cfg), "gemma4:26b");
-        assert_eq!(ModelId::Heavy.ollama_name(&cfg),   "deepseek-r1:32b");
-        assert_eq!(ModelId::Code.ollama_name(&cfg),    "deepseek-coder-v2:16b");
-        assert_eq!(ModelId::Vision.ollama_name(&cfg),  "gemma4:26b");
-        assert_eq!(ModelId::Embed.ollama_name(&cfg),   "mxbai-embed-large");
+        assert_eq!(ModelId::Heavy.ollama_name(&cfg), "deepseek-r1:32b");
+        assert_eq!(ModelId::Code.ollama_name(&cfg), "deepseek-coder-v2:16b");
+        assert_eq!(ModelId::Vision.ollama_name(&cfg), "gemma4:26b");
+        assert_eq!(ModelId::Embed.ollama_name(&cfg), "mxbai-embed-large");
     }
 
     #[test]
@@ -214,9 +214,14 @@ mod tests {
         // cold reload on the next chat turn. Vision must piggyback on PRIMARY's
         // keep-alive in that configuration.
         let cfg = default_cfg();
-        assert_eq!(cfg.vision, cfg.primary, "default config must alias vision to primary");
-        assert!(!ModelId::Vision.unload_after_use(&cfg),
-            "aliased Vision must NOT unload — would evict warm PRIMARY");
+        assert_eq!(
+            cfg.vision, cfg.primary,
+            "default config must alias vision to primary"
+        );
+        assert!(
+            !ModelId::Vision.unload_after_use(&cfg),
+            "aliased Vision must NOT unload — would evict warm PRIMARY"
+        );
     }
 
     #[test]
@@ -227,8 +232,10 @@ mod tests {
         let mut cfg = default_cfg();
         cfg.vision = "qwen3-vl:8b".to_string();
         assert_ne!(cfg.vision, cfg.primary);
-        assert!(ModelId::Vision.unload_after_use(&cfg),
-            "distinct Vision model must unload — mutual exclusion with Heavy");
+        assert!(
+            ModelId::Vision.unload_after_use(&cfg),
+            "distinct Vision model must unload — mutual exclusion with Heavy"
+        );
     }
 
     #[test]
@@ -246,8 +253,10 @@ mod tests {
         // dispatch or Ollama allocates 20–32 GiB of KV cache and CPU-spills.
         // Previously the predicate was conflated with `unload_after_use`, which
         // excluded Code (stays warm but still has a 163k native context).
-        assert!(ModelId::Heavy.needs_context_cap(),
-            "Heavy (deepseek-r1:32b, 131k native) must be capped");
+        assert!(
+            ModelId::Heavy.needs_context_cap(),
+            "Heavy (deepseek-r1:32b, 131k native) must be capped"
+        );
         assert!(ModelId::Code.needs_context_cap(),
             "Code (deepseek-coder-v2:16b, 163k native) must be capped — regression guard for CODE stuck-think timeout");
     }
@@ -270,22 +279,53 @@ mod tests {
         // are independent. Heavy: both true. Code: cap but no unload. Primary/Fast:
         // neither. Pin the full truth table so future refactors can't re-conflate.
         let cfg = default_cfg();
-        assert_eq!((ModelId::Heavy.unload_after_use(&cfg),   ModelId::Heavy.needs_context_cap()),   (true,  true));
-        assert_eq!((ModelId::Code.unload_after_use(&cfg),    ModelId::Code.needs_context_cap()),    (false, true));
-        assert_eq!((ModelId::Primary.unload_after_use(&cfg), ModelId::Primary.needs_context_cap()), (false, false));
-        assert_eq!((ModelId::Fast.unload_after_use(&cfg),    ModelId::Fast.needs_context_cap()),    (false, false));
+        assert_eq!(
+            (
+                ModelId::Heavy.unload_after_use(&cfg),
+                ModelId::Heavy.needs_context_cap()
+            ),
+            (true, true)
+        );
+        assert_eq!(
+            (
+                ModelId::Code.unload_after_use(&cfg),
+                ModelId::Code.needs_context_cap()
+            ),
+            (false, true)
+        );
+        assert_eq!(
+            (
+                ModelId::Primary.unload_after_use(&cfg),
+                ModelId::Primary.needs_context_cap()
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            (
+                ModelId::Fast.unload_after_use(&cfg),
+                ModelId::Fast.needs_context_cap()
+            ),
+            (false, false)
+        );
     }
 
     #[test]
     fn tier_names_are_lowercase_ascii() {
         let all = [
-            ModelId::Fast, ModelId::Primary, ModelId::Heavy,
-            ModelId::Code, ModelId::Vision,  ModelId::Embed,
+            ModelId::Fast,
+            ModelId::Primary,
+            ModelId::Heavy,
+            ModelId::Code,
+            ModelId::Vision,
+            ModelId::Embed,
         ];
         for tier in &all {
             let name = tier.tier_name();
-            assert!(name.chars().all(|c| c.is_ascii_lowercase()),
-                    "tier_name '{}' contains non-lowercase-ascii", name);
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase()),
+                "tier_name '{}' contains non-lowercase-ascii",
+                name
+            );
         }
     }
 

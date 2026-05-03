@@ -30,8 +30,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    config::BehaviorConfig,
-    constants::PROACTIVE_USER_ACTIVE_WINDOW_SECS,
+    config::BehaviorConfig, constants::PROACTIVE_USER_ACTIVE_WINDOW_SECS,
     context_observer::ContextSnapshot,
 };
 
@@ -41,21 +40,21 @@ use crate::{
 /// proactive response. `should_fire()` is the primary gate checked in
 /// `handle_system_event()` on `AppFocused` context changes.
 pub struct ProactiveEngine {
-    enabled:              bool,
-    min_interval_secs:    u64,
-    startup_grace_secs:   u64,
-    last_fired_at:        Option<Instant>,
-    session_started_at:   Instant,
+    enabled: bool,
+    min_interval_secs: u64,
+    startup_grace_secs: u64,
+    last_fired_at: Option<Instant>,
+    session_started_at: Instant,
     /// Phase 18 — Gate 6: bundle IDs exempt from proactive observations.
     /// Set from `BehaviorConfig.proactive_excluded_bundles` at construction time.
-    excluded_bundles:     Vec<String>,
+    excluded_bundles: Vec<String>,
     /// Phase 36 — Gate 7: instant of the operator's most recent turn (voice or typed).
     ///
     /// Updated by `CoreOrchestrator::handle_text_input` via `record_user_turn()`.
     /// When set and within `PROACTIVE_USER_ACTIVE_WINDOW_SECS` of now, Gate 7 blocks
     /// all proactive fires — an app-focus-driven ambient comment dropped between a
     /// user turn and Dexter's response reads as noise during active dialogue.
-    last_user_turn_at:    Option<Instant>,
+    last_user_turn_at: Option<Instant>,
 }
 
 impl ProactiveEngine {
@@ -65,13 +64,13 @@ impl ProactiveEngine {
     /// period begins counting from the moment the session opens.
     pub fn new(cfg: &BehaviorConfig) -> Self {
         Self {
-            enabled:            cfg.proactive_enabled,
-            min_interval_secs:  cfg.proactive_interval_secs,
+            enabled: cfg.proactive_enabled,
+            min_interval_secs: cfg.proactive_interval_secs,
             startup_grace_secs: cfg.proactive_startup_grace_secs,
-            last_fired_at:      None,
+            last_fired_at: None,
             session_started_at: Instant::now(),
-            excluded_bundles:   cfg.proactive_excluded_bundles.clone(),
-            last_user_turn_at:  None,
+            excluded_bundles: cfg.proactive_excluded_bundles.clone(),
+            last_user_turn_at: None,
         }
     }
 
@@ -82,13 +81,13 @@ impl ProactiveEngine {
     #[cfg(test)]
     pub fn new_backdated(cfg: &BehaviorConfig, started_ago_secs: u64) -> Self {
         Self {
-            enabled:            cfg.proactive_enabled,
-            min_interval_secs:  cfg.proactive_interval_secs,
+            enabled: cfg.proactive_enabled,
+            min_interval_secs: cfg.proactive_interval_secs,
             startup_grace_secs: cfg.proactive_startup_grace_secs,
-            last_fired_at:      None,
+            last_fired_at: None,
             session_started_at: Instant::now() - Duration::from_secs(started_ago_secs),
-            excluded_bundles:   cfg.proactive_excluded_bundles.clone(),
-            last_user_turn_at:  None,
+            excluded_bundles: cfg.proactive_excluded_bundles.clone(),
+            last_user_turn_at: None,
         }
     }
 
@@ -307,8 +306,13 @@ impl ProactiveEngine {
         //    + H(H):MM + optional AM/PM, OR 24-hour HH:MM.
         //    Also catches "it is 3 pm", "currently 3pm".
         let clock_patterns: &[&str] = &[
-            "it's ", "it is ", "the time is ", "time is ", "currently ",
-            "right now it's ", "right now the time is ",
+            "it's ",
+            "it is ",
+            "the time is ",
+            "time is ",
+            "currently ",
+            "right now it's ",
+            "right now the time is ",
         ];
         let has_clock_lead = clock_patterns.iter().any(|p| stripped.starts_with(p))
             || stripped
@@ -316,9 +320,7 @@ impl ProactiveEngine {
                 .next()
                 .map(|c| c.is_ascii_digit())
                 .unwrap_or(false);
-        let has_clocky_token = stripped
-            .split_whitespace()
-            .any(|w| is_clocky_token(w));
+        let has_clocky_token = stripped.split_whitespace().any(|w| is_clocky_token(w));
         if has_clock_lead && has_clocky_token && !has_substantive_verb(&lower) {
             return true;
         }
@@ -332,14 +334,39 @@ impl ProactiveEngine {
             "the day is ",
         ];
         let months: &[&str] = &[
-            "january", "february", "march", "april", "may", "june", "july",
-            "august", "september", "october", "november", "december",
-            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
-            "oct", "nov", "dec",
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+            "jan",
+            "feb",
+            "mar",
+            "apr",
+            "jun",
+            "jul",
+            "aug",
+            "sep",
+            "sept",
+            "oct",
+            "nov",
+            "dec",
         ];
         let days: &[&str] = &[
-            "monday", "tuesday", "wednesday", "thursday", "friday",
-            "saturday", "sunday",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
         ];
         let has_date_lead = date_leads.iter().any(|p| stripped.starts_with(p));
         let mentions_month = months.iter().any(|m| {
@@ -360,7 +387,10 @@ impl ProactiveEngine {
         // "Today is Tuesday" / "It's Wednesday" with no other verb is low-value
         // even without an explicit date lead if the response is essentially just
         // the day name.
-        if (mentions_day || mentions_month) && trimmed.chars().count() < 35 && !has_substantive_verb(&lower) {
+        if (mentions_day || mentions_month)
+            && trimmed.chars().count() < 35
+            && !has_substantive_verb(&lower)
+        {
             return true;
         }
 
@@ -419,7 +449,10 @@ fn is_clocky_token(token: &str) -> bool {
     }
     // AM/PM markers on their own.
     let lower = t.to_ascii_lowercase();
-    if matches!(lower.as_str(), "am" | "pm" | "a.m" | "p.m" | "a.m." | "p.m.") {
+    if matches!(
+        lower.as_str(),
+        "am" | "pm" | "a.m" | "p.m" | "a.m." | "p.m."
+    ) {
         return true;
     }
     // "3pm" / "3am" — digit(s) followed by am/pm.
@@ -483,15 +516,61 @@ fn has_substantive_verb(lower: &str) -> bool {
         .collect();
 
     const SUBSTANTIVE_VERBS: &[&str] = &[
-        "working", "debugging", "writing", "editing", "reading", "running",
-        "building", "testing", "deploying", "fixing", "refactoring", "reviewing",
-        "noticed", "saw", "see", "seeing", "spotted", "looks", "looking",
-        "seems", "appears", "suggest", "suggests", "try", "consider",
-        "check", "verify", "confirm", "note", "remember", "watch",
-        "hit", "track", "tracking", "missed", "passed", "approaching",
-        "remind", "reminded", "reminder", "schedule", "scheduled", "due",
-        "still", "already", "just", "about", "close",
-        "error", "errors", "failed", "failing", "broken", "crash", "crashed",
+        "working",
+        "debugging",
+        "writing",
+        "editing",
+        "reading",
+        "running",
+        "building",
+        "testing",
+        "deploying",
+        "fixing",
+        "refactoring",
+        "reviewing",
+        "noticed",
+        "saw",
+        "see",
+        "seeing",
+        "spotted",
+        "looks",
+        "looking",
+        "seems",
+        "appears",
+        "suggest",
+        "suggests",
+        "try",
+        "consider",
+        "check",
+        "verify",
+        "confirm",
+        "note",
+        "remember",
+        "watch",
+        "hit",
+        "track",
+        "tracking",
+        "missed",
+        "passed",
+        "approaching",
+        "remind",
+        "reminded",
+        "reminder",
+        "schedule",
+        "scheduled",
+        "due",
+        "still",
+        "already",
+        "just",
+        "about",
+        "close",
+        "error",
+        "errors",
+        "failed",
+        "failing",
+        "broken",
+        "crash",
+        "crashed",
     ];
 
     tokens.iter().any(|t| SUBSTANTIVE_VERBS.contains(t))
@@ -511,15 +590,15 @@ mod tests {
     fn unlocked_snapshot_with_app() -> ContextSnapshot {
         use crate::context_observer::ContextSnapshot;
         ContextSnapshot {
-            app_bundle_id:      Some("com.apple.Xcode".to_string()),
-            app_name:           Some("Xcode".to_string()),
-            focused_element:    None,
-            is_screen_locked:   false,
-            clipboard_text:     None,
+            app_bundle_id: Some("com.apple.Xcode".to_string()),
+            app_name: Some("Xcode".to_string()),
+            focused_element: None,
+            is_screen_locked: false,
+            clipboard_text: None,
             clipboard_changed_at: None,
             last_shell_command: None,
-            snapshot_hash:      1,
-            last_updated:       chrono::Utc::now(),
+            snapshot_hash: 1,
+            last_updated: chrono::Utc::now(),
         }
     }
 
@@ -605,8 +684,8 @@ mod tests {
     #[test]
     fn proactive_engine_fires_when_all_gates_pass() {
         let cfg = BehaviorConfig {
-            proactive_enabled:          true,
-            proactive_interval_secs:    90,
+            proactive_enabled: true,
+            proactive_interval_secs: 90,
             proactive_startup_grace_secs: 30,
             proactive_excluded_bundles: vec![],
             ..BehaviorConfig::default()
@@ -625,7 +704,10 @@ mod tests {
     fn proactive_engine_record_fire_blocks_immediate_repeat() {
         let cfg = default_behavior_cfg();
         let mut engine = ProactiveEngine::new_backdated(&cfg, 200);
-        assert!(engine.should_fire(&unlocked_snapshot_with_app()), "pre-condition");
+        assert!(
+            engine.should_fire(&unlocked_snapshot_with_app()),
+            "pre-condition"
+        );
         engine.record_fire();
         assert!(
             !engine.should_fire(&unlocked_snapshot_with_app()),
@@ -646,8 +728,12 @@ mod tests {
 
     #[test]
     fn is_silent_response_does_not_suppress_real_responses() {
-        assert!(!ProactiveEngine::is_silent_response("You're in Xcode — working on the metal shader."));
-        assert!(!ProactiveEngine::is_silent_response("Looks like you're debugging a concurrency issue."));
+        assert!(!ProactiveEngine::is_silent_response(
+            "You're in Xcode — working on the metal shader."
+        ));
+        assert!(!ProactiveEngine::is_silent_response(
+            "Looks like you're debugging a concurrency issue."
+        ));
     }
 
     // ── undo_fire ────────────────────────────────────────────────────────────
@@ -661,7 +747,10 @@ mod tests {
         let mut engine = ProactiveEngine::new_backdated(&cfg, 200);
 
         // Verify pre-condition: all gates clear.
-        assert!(engine.should_fire(&unlocked_snapshot_with_app()), "pre-condition: should fire");
+        assert!(
+            engine.should_fire(&unlocked_snapshot_with_app()),
+            "pre-condition: should fire"
+        );
 
         // Burn the slot.
         engine.record_fire();
@@ -730,7 +819,8 @@ mod tests {
 
     #[test]
     fn build_proactive_prompt_contains_context_summary() {
-        let prompt = ProactiveEngine::build_proactive_prompt("Xcode — Source Editor: func parseVmStat");
+        let prompt =
+            ProactiveEngine::build_proactive_prompt("Xcode — Source Editor: func parseVmStat");
         assert!(
             prompt.contains("Xcode — Source Editor: func parseVmStat"),
             "prompt must embed the context summary"
@@ -746,12 +836,26 @@ mod tests {
     #[test]
     fn build_shell_error_prompt_contains_command_exit_and_cwd() {
         let prompt = ProactiveEngine::build_shell_error_prompt(
-            "cargo build", 1, "/Users/jason/Developer/Dex",
+            "cargo build",
+            1,
+            "/Users/jason/Developer/Dex",
         );
-        assert!(prompt.contains("cargo build"),                "prompt must contain command");
-        assert!(prompt.contains("exit code 1"),                "prompt must contain exit code");
-        assert!(prompt.contains("/Users/jason/Developer/Dex"), "prompt must contain cwd");
-        assert!(prompt.contains("[SILENT]"),                   "prompt must mention [SILENT] opt-out");
+        assert!(
+            prompt.contains("cargo build"),
+            "prompt must contain command"
+        );
+        assert!(
+            prompt.contains("exit code 1"),
+            "prompt must contain exit code"
+        );
+        assert!(
+            prompt.contains("/Users/jason/Developer/Dex"),
+            "prompt must contain cwd"
+        );
+        assert!(
+            prompt.contains("[SILENT]"),
+            "prompt must mention [SILENT] opt-out"
+        );
     }
 
     #[test]
@@ -759,10 +863,12 @@ mod tests {
         // Regression guard: the two prompt styles must remain distinct.
         // If they collapse, the model loses the signal that one is about
         // an explicit failure vs. an app-focus ambient observation.
-        let error_prompt   = ProactiveEngine::build_shell_error_prompt("make", 2, "/tmp");
+        let error_prompt = ProactiveEngine::build_shell_error_prompt("make", 2, "/tmp");
         let ambient_prompt = ProactiveEngine::build_proactive_prompt("Terminal — make");
-        assert_ne!(error_prompt, ambient_prompt,
-            "shell error and ambient proactive prompts must be distinct");
+        assert_ne!(
+            error_prompt, ambient_prompt,
+            "shell error and ambient proactive prompts must be distinct"
+        );
     }
 
     // ── Gate 7: recent user-activity suppression (Phase 36) ──────────────────
@@ -800,9 +906,7 @@ mod tests {
         );
 
         // Simulate the window elapsing by overwriting the timestamp.
-        let window = Duration::from_secs(
-            crate::constants::PROACTIVE_USER_ACTIVE_WINDOW_SECS,
-        );
+        let window = Duration::from_secs(crate::constants::PROACTIVE_USER_ACTIVE_WINDOW_SECS);
         engine.last_user_turn_at = Some(Instant::now() - window - Duration::from_secs(1));
 
         assert!(
@@ -817,7 +921,10 @@ mod tests {
         // against a bug where last_user_turn_at = None is treated as "just now."
         let cfg = default_behavior_cfg();
         let engine = ProactiveEngine::new_backdated(&cfg, 200);
-        assert!(engine.last_user_turn_at.is_none(), "fresh engine has no turns");
+        assert!(
+            engine.last_user_turn_at.is_none(),
+            "fresh engine has no turns"
+        );
         assert!(
             engine.should_fire(&unlocked_snapshot_with_app()),
             "No prior user turn must not suppress firing"
@@ -848,10 +955,16 @@ mod tests {
     fn proactive_prompt_forbids_bare_time_and_date() {
         let prompt = ProactiveEngine::build_proactive_prompt("Safari — news.ycombinator.com");
         let lower = prompt.to_ascii_lowercase();
-        assert!(lower.contains("forbidden"), "prompt must have a FORBIDDEN section");
-        assert!(lower.contains("time"),      "prompt must forbid bare time");
-        assert!(lower.contains("date"),      "prompt must forbid bare date");
-        assert!(lower.contains("day of the week"), "prompt must forbid bare day of the week");
+        assert!(
+            lower.contains("forbidden"),
+            "prompt must have a FORBIDDEN section"
+        );
+        assert!(lower.contains("time"), "prompt must forbid bare time");
+        assert!(lower.contains("date"), "prompt must forbid bare date");
+        assert!(
+            lower.contains("day of the week"),
+            "prompt must forbid bare day of the week"
+        );
     }
 
     // ── is_low_value_response: clock patterns ────────────────────────────────
@@ -961,7 +1074,9 @@ mod tests {
     fn should_suppress_catches_both_silent_and_low_value() {
         assert!(ProactiveEngine::should_suppress_proactive("[SILENT]"));
         assert!(ProactiveEngine::should_suppress_proactive("It's 3:42 PM."));
-        assert!(ProactiveEngine::should_suppress_proactive("Today is Tuesday."));
+        assert!(ProactiveEngine::should_suppress_proactive(
+            "Today is Tuesday."
+        ));
         assert!(!ProactiveEngine::should_suppress_proactive(
             "You're debugging a concurrency issue in CoreOrchestrator."
         ));
@@ -987,7 +1102,7 @@ mod tests {
         assert!(!is_clocky_token("working"));
         assert!(!is_clocky_token("Xcode"));
         assert!(!is_clocky_token("42")); // bare number is not a clock
-        assert!(!is_clocky_token("3"));  // bare number is not a clock
+        assert!(!is_clocky_token("3")); // bare number is not a clock
         assert!(!is_clocky_token(""));
         // "router:rs" has a colon but non-digit segments → not a clock.
         assert!(!is_clocky_token("router:rs"));

@@ -30,7 +30,10 @@ use uuid::Uuid;
 
 use crate::{
     browser::BrowserCoordinator,
-    constants::{ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_DEFAULT_TIMEOUT_SECS, ACTION_DOWNLOAD_TIMEOUT_SECS, BROWSER_WORKER_RESULT_TIMEOUT_SECS},
+    constants::{
+        ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_DEFAULT_TIMEOUT_SECS, ACTION_DOWNLOAD_TIMEOUT_SECS,
+        BROWSER_WORKER_RESULT_TIMEOUT_SECS,
+    },
     ipc::proto::ActionCategory,
 };
 
@@ -53,10 +56,10 @@ use super::{
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserActionKind {
-    Navigate   { url: String },
-    Click      { selector: String },
-    Type       { selector: String, text: String },
-    Extract    { selector: Option<String> },   // None = full page body text
+    Navigate { url: String },
+    Click { selector: String },
+    Type { selector: String, text: String },
+    Extract { selector: Option<String> }, // None = full page body text
     Screenshot,
 }
 
@@ -70,9 +73,9 @@ pub enum BrowserActionKind {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionSpec {
     Shell {
-        args:              Vec<String>,
-        working_dir:       Option<PathBuf>,
-        rationale:         Option<String>,
+        args: Vec<String>,
+        working_dir: Option<PathBuf>,
+        rationale: Option<String>,
         #[serde(default)]
         category_override: Option<String>,
     },
@@ -80,17 +83,17 @@ pub enum ActionSpec {
         path: PathBuf,
     },
     FileWrite {
-        path:              PathBuf,
-        content:           String,
+        path: PathBuf,
+        content: String,
         #[serde(default)]
-        create_dirs:       bool,
+        create_dirs: bool,
         #[allow(dead_code)] // Phase 9+: injected into context alongside FileWrite audit entry
-        rationale:         Option<String>,
+        rationale: Option<String>,
         #[serde(default)]
         category_override: Option<String>,
     },
     AppleScript {
-        script:    String,
+        script: String,
         rationale: Option<String>,
     },
     Browser {
@@ -98,8 +101,8 @@ pub enum ActionSpec {
         // fields into the parent object level so the model's flat JSON round-trips:
         //   {"type":"browser","action":"navigate","url":"..."}
         #[serde(flatten)]
-        action:            BrowserActionKind,
-        rationale:         Option<String>,
+        action: BrowserActionKind,
+        rationale: Option<String>,
         #[serde(default)]
         category_override: Option<String>,
     },
@@ -118,30 +121,27 @@ pub enum ActionOutcome {
     /// command when asked "what command did you use?" — without it, the model reads its
     /// own conversation history and reports the original (wrong) GNU form it generated.
     Completed {
-        action_id:    String,
-        output:       String,
+        action_id: String,
+        output: String,
         rewritten_to: Option<String>,
     },
     /// DESTRUCTIVE action stored; caller must emit `ActionRequest` to the operator.
     PendingApproval {
-        action_id:   String,
+        action_id: String,
         description: String,
-        category:    ActionCategory,
+        category: ActionCategory,
     },
     /// Operator rejected, execution failed, or session ended. Logged; no execution.
     /// `error` carries the failure reason so the model can reason about what went wrong.
-    Rejected {
-        action_id: String,
-        error:     String,
-    },
+    Rejected { action_id: String, error: String },
 }
 
 // ── PendingAction ─────────────────────────────────────────────────────────────
 
 struct PendingAction {
-    spec:         ActionSpec,
+    spec: ActionSpec,
     #[allow(dead_code)] // trace_id reserved for Phase 9+ context injection
-    trace_id:     String,
+    trace_id: String,
     #[allow(dead_code)] // submitted_at reserved for Phase 9+ timeout enforcement
     submitted_at: chrono::DateTime<Utc>,
 }
@@ -150,10 +150,10 @@ struct PendingAction {
 
 pub struct ActionEngine {
     #[allow(dead_code)] // stored for test assertions; AuditLog owns its own path reference
-    state_dir:       PathBuf,
-    audit:           Arc<tokio::sync::Mutex<AuditLog>>,
+    state_dir: PathBuf,
+    audit: Arc<tokio::sync::Mutex<AuditLog>>,
     pending_actions: HashMap<String, PendingAction>,
-    browser:         BrowserCoordinator,  // Phase 14 — start_browser() called by server.rs
+    browser: BrowserCoordinator, // Phase 14 — start_browser() called by server.rs
 }
 
 /// Returns the appropriate shell timeout for a given args list.
@@ -163,12 +163,15 @@ pub struct ActionEngine {
 /// absolute paths like `/opt/homebrew/bin/yt-dlp` are handled correctly.
 fn shell_timeout(args: &[String]) -> u64 {
     const DOWNLOAD_TOOLS: &[&str] = &["yt-dlp", "curl", "wget", "ffmpeg", "ffprobe"];
-    let bin = args.first().map(|a| {
-        std::path::Path::new(a)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(a.as_str())
-    }).unwrap_or("");
+    let bin = args
+        .first()
+        .map(|a| {
+            std::path::Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a.as_str())
+        })
+        .unwrap_or("");
     if DOWNLOAD_TOOLS.iter().any(|t| *t == bin) {
         ACTION_DOWNLOAD_TIMEOUT_SECS
     } else {
@@ -189,8 +192,8 @@ impl ActionEngine {
     /// The audit file is not created until the first action is taken.
     pub fn new(state_dir: &std::path::Path, browser: BrowserCoordinator) -> Self {
         Self {
-            state_dir:       state_dir.to_path_buf(),
-            audit:           AuditLog::new_shared(state_dir),
+            state_dir: state_dir.to_path_buf(),
+            audit: AuditLog::new_shared(state_dir),
             pending_actions: HashMap::new(),
             browser,
         }
@@ -205,7 +208,7 @@ impl ActionEngine {
     /// internal `Arc<Mutex<WorkerClient>>`.
     pub fn executor_handle(&self) -> ExecutorHandle {
         ExecutorHandle {
-            audit:   self.audit.clone(),
+            audit: self.audit.clone(),
             browser: self.browser.clone(),
         }
     }
@@ -243,13 +246,9 @@ impl ActionEngine {
     /// - DESTRUCTIVE → store in `pending_actions` → return `PendingApproval`
     ///   (caller must emit `ActionRequest` ServerEvent to Swift; execution follows
     ///   only when `resolve()` is called with `approved=true`)
-    pub async fn submit(
-        &mut self,
-        spec:     ActionSpec,
-        trace_id: &str,
-    ) -> ActionOutcome {
+    pub async fn submit(&mut self, spec: ActionSpec, trace_id: &str) -> ActionOutcome {
         let action_id = Uuid::new_v4().to_string();
-        let category  = PolicyEngine::classify(&spec);
+        let category = PolicyEngine::classify(&spec);
 
         if category == ActionCategory::Destructive {
             let description = Self::describe(&spec);
@@ -263,15 +262,20 @@ impl ActionEngine {
                 action_id.clone(),
                 PendingAction {
                     spec,
-                    trace_id:     trace_id.to_string(),
+                    trace_id: trace_id.to_string(),
                     submitted_at: Utc::now(),
                 },
             );
-            return ActionOutcome::PendingApproval { action_id, description, category };
+            return ActionOutcome::PendingApproval {
+                action_id,
+                description,
+                category,
+            };
         }
 
         // SAFE or CAUTIOUS — execute immediately.
-        self.execute_and_log(&action_id, &spec, category, None).await
+        self.execute_and_log(&action_id, &spec, category, None)
+            .await
     }
 
     /// Resolve a pending DESTRUCTIVE action after the operator responds.
@@ -281,20 +285,20 @@ impl ActionEngine {
     /// prior session that survived a reconnect, or duplicate approval messages.
     pub async fn resolve(
         &mut self,
-        action_id:     &str,
-        approved:      bool,
+        action_id: &str,
+        approved: bool,
         operator_note: &str,
     ) -> ActionOutcome {
         let pending = match self.pending_actions.remove(action_id) {
             Some(p) => p,
-            None    => {
+            None => {
                 warn!(
                     action_id = %action_id,
                     "ActionApproval for unknown action_id — stale or duplicate; ignoring"
                 );
                 return ActionOutcome::Rejected {
                     action_id: action_id.to_string(),
-                    error:     "stale or duplicate approval — action_id not found".to_string(),
+                    error: "stale or duplicate approval — action_id not found".to_string(),
                 };
             }
         };
@@ -307,16 +311,16 @@ impl ActionEngine {
             );
             let category = PolicyEngine::classify(&pending.spec);
             let entry = AuditEntry {
-                timestamp:         Utc::now().to_rfc3339(),
+                timestamp: Utc::now().to_rfc3339(),
                 action_id,
-                r#type:            Self::type_str(&pending.spec),
-                category:          Self::category_str(category),
-                spec_json:         Self::spec_to_audit_json(&pending.spec),
-                outcome:           "rejected",
-                exit_code:         None,
-                output_preview:    None,
-                error:             None,
-                duration_ms:       None,
+                r#type: Self::type_str(&pending.spec),
+                category: Self::category_str(category),
+                spec_json: Self::spec_to_audit_json(&pending.spec),
+                outcome: "rejected",
+                exit_code: None,
+                output_preview: None,
+                error: None,
+                duration_ms: None,
                 operator_approved: Some(false),
             };
             let guard = self.audit.lock().await;
@@ -325,13 +329,14 @@ impl ActionEngine {
             }
             return ActionOutcome::Rejected {
                 action_id: action_id.to_string(),
-                error:     "operator rejected the action".to_string(),
+                error: "operator rejected the action".to_string(),
             };
         }
 
         info!(action_id = %action_id, "Operator approved DESTRUCTIVE action — executing");
         let category = PolicyEngine::classify(&pending.spec);
-        self.execute_and_log(action_id, &pending.spec, category, Some(true)).await
+        self.execute_and_log(action_id, &pending.spec, category, Some(true))
+            .await
     }
 
     /// Write audit entries for any remaining pending actions and clear the map.
@@ -344,16 +349,16 @@ impl ActionEngine {
         for (action_id, pending) in self.pending_actions.drain() {
             let category = PolicyEngine::classify(&pending.spec);
             let entry = AuditEntry {
-                timestamp:         Utc::now().to_rfc3339(),
-                action_id:         &action_id,
-                r#type:            Self::type_str(&pending.spec),
-                category:          Self::category_str(category),
-                spec_json:         Self::spec_to_audit_json(&pending.spec),
-                outcome:           "rejected",
-                exit_code:         None,
-                output_preview:    None,
-                error:             Some("session ended before operator responded".to_string()),
-                duration_ms:       None,
+                timestamp: Utc::now().to_rfc3339(),
+                action_id: &action_id,
+                r#type: Self::type_str(&pending.spec),
+                category: Self::category_str(category),
+                spec_json: Self::spec_to_audit_json(&pending.spec),
+                outcome: "rejected",
+                exit_code: None,
+                output_preview: None,
+                error: Some("session ended before operator responded".to_string()),
+                duration_ms: None,
                 operator_approved: None, // null = session ended, not an explicit rejection
             };
             if let Err(e) = guard.append(&entry) {
@@ -409,26 +414,28 @@ impl ActionEngine {
     /// approved DESTRUCTIVE actions.
     async fn execute_and_log(
         &self,
-        action_id:         &str,
-        spec:              &ActionSpec,
-        category:          ActionCategory,
+        action_id: &str,
+        spec: &ActionSpec,
+        category: ActionCategory,
         operator_approved: Option<bool>,
     ) -> ActionOutcome {
-        let result  = match spec {
-            ActionSpec::Shell { args, working_dir, .. } => {
-                executor::execute_shell(args, working_dir.as_ref(), shell_timeout(args)).await
-            }
-            ActionSpec::FileRead { path } => {
-                executor::execute_file_read(path).await
-            }
-            ActionSpec::FileWrite { path, content, create_dirs, .. } => {
-                executor::execute_file_write(path, content, *create_dirs).await
-            }
+        let result = match spec {
+            ActionSpec::Shell {
+                args, working_dir, ..
+            } => executor::execute_shell(args, working_dir.as_ref(), shell_timeout(args)).await,
+            ActionSpec::FileRead { path } => executor::execute_file_read(path).await,
+            ActionSpec::FileWrite {
+                path,
+                content,
+                create_dirs,
+                ..
+            } => executor::execute_file_write(path, content, *create_dirs).await,
             ActionSpec::AppleScript { script, .. } => {
                 executor::execute_applescript(script, ACTION_APPLESCRIPT_TIMEOUT_SECS).await
             }
             ActionSpec::Browser { action, .. } => {
-                executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS).await
+                executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
+                    .await
             }
         };
 
@@ -447,16 +454,20 @@ impl ActionEngine {
         };
 
         let entry = AuditEntry {
-            timestamp:         Utc::now().to_rfc3339(),
+            timestamp: Utc::now().to_rfc3339(),
             action_id,
-            r#type:            Self::type_str(spec),
-            category:          Self::category_str(category),
-            spec_json:         Self::spec_to_audit_json(spec),
-            outcome:           outcome_str,
-            exit_code:         result.exit_code,
+            r#type: Self::type_str(spec),
+            category: Self::category_str(category),
+            spec_json: Self::spec_to_audit_json(spec),
+            outcome: outcome_str,
+            exit_code: result.exit_code,
             output_preview,
-            error:             if result.error.is_empty() { None } else { Some(result.error.clone()) },
-            duration_ms:       Some(result.duration_ms),
+            error: if result.error.is_empty() {
+                None
+            } else {
+                Some(result.error.clone())
+            },
+            duration_ms: Some(result.duration_ms),
             operator_approved,
         };
 
@@ -472,8 +483,8 @@ impl ActionEngine {
             // with the stored ActionSpec). No normalization annotation needed here because
             // the approval dialog already showed the operator the action spec.
             ActionOutcome::Completed {
-                action_id:    action_id.to_string(),
-                output:       result.output,
+                action_id: action_id.to_string(),
+                output: result.output,
                 rewritten_to: None,
             }
         } else {
@@ -486,9 +497,15 @@ impl ActionEngine {
             } else if !result.output.is_empty() {
                 result.output
             } else {
-                format!("command failed (exit code: {})", result.exit_code.unwrap_or(-1))
+                format!(
+                    "command failed (exit code: {})",
+                    result.exit_code.unwrap_or(-1)
+                )
             };
-            ActionOutcome::Rejected { action_id: action_id.to_string(), error }
+            ActionOutcome::Rejected {
+                action_id: action_id.to_string(),
+                error,
+            }
         }
     }
 
@@ -509,14 +526,16 @@ impl ActionEngine {
                 format!("AppleScript: {}", preview)
             }
             ActionSpec::Browser { action, .. } => match action {
-                BrowserActionKind::Navigate { url }      => format!("Browser navigate: {url}"),
-                BrowserActionKind::Click { selector }    => format!("Browser click: {selector}"),
-                BrowserActionKind::Type { selector, .. } => format!("Browser type into: {selector}"),
-                BrowserActionKind::Extract { selector }  => format!(
+                BrowserActionKind::Navigate { url } => format!("Browser navigate: {url}"),
+                BrowserActionKind::Click { selector } => format!("Browser click: {selector}"),
+                BrowserActionKind::Type { selector, .. } => {
+                    format!("Browser type into: {selector}")
+                }
+                BrowserActionKind::Extract { selector } => format!(
                     "Browser extract: {}",
                     selector.as_deref().unwrap_or("<page>")
                 ),
-                BrowserActionKind::Screenshot            => "Browser screenshot".to_string(),
+                BrowserActionKind::Screenshot => "Browser screenshot".to_string(),
             },
         }
     }
@@ -524,20 +543,20 @@ impl ActionEngine {
     /// Phase 24: pub(crate) so ExecutorHandle can use it for audit entries.
     pub(crate) fn type_str(spec: &ActionSpec) -> &'static str {
         match spec {
-            ActionSpec::Shell { .. }       => "shell",
-            ActionSpec::FileRead { .. }    => "file_read",
-            ActionSpec::FileWrite { .. }   => "file_write",
+            ActionSpec::Shell { .. } => "shell",
+            ActionSpec::FileRead { .. } => "file_read",
+            ActionSpec::FileWrite { .. } => "file_write",
             ActionSpec::AppleScript { .. } => "applescript",
-            ActionSpec::Browser { .. }     => "browser",
+            ActionSpec::Browser { .. } => "browser",
         }
     }
 
     pub(crate) fn category_str(cat: ActionCategory) -> &'static str {
         match cat {
-            ActionCategory::Safe        => "safe",
-            ActionCategory::Cautious    => "cautious",
+            ActionCategory::Safe => "safe",
+            ActionCategory::Cautious => "cautious",
             ActionCategory::Destructive => "destructive",
-            _                           => "unspecified",
+            _ => "unspecified",
         }
     }
 
@@ -548,14 +567,24 @@ impl ActionEngine {
     /// log records intent, not data.
     pub(crate) fn spec_to_audit_json(spec: &ActionSpec) -> serde_json::Value {
         match spec {
-            ActionSpec::FileWrite { path, content, create_dirs, .. } => {
+            ActionSpec::FileWrite {
+                path,
+                content,
+                create_dirs,
+                ..
+            } => {
                 serde_json::json!({
                     "path":        path,
                     "content":     format!("<{} bytes omitted>", content.len()),
                     "create_dirs": create_dirs,
                 })
             }
-            ActionSpec::Shell { args, working_dir, rationale, .. } => {
+            ActionSpec::Shell {
+                args,
+                working_dir,
+                rationale,
+                ..
+            } => {
                 serde_json::json!({
                     "args":        args,
                     "working_dir": working_dir,
@@ -569,16 +598,24 @@ impl ActionEngine {
                 // Do not log the script body — it may contain keystrokes or credentials.
                 serde_json::json!({ "rationale": rationale })
             }
-            ActionSpec::Browser { action, rationale, .. } => {
+            ActionSpec::Browser {
+                action, rationale, ..
+            } => {
                 let action_detail = match action {
-                    BrowserActionKind::Navigate { url }     => serde_json::json!({"action":"navigate","url":url}),
-                    BrowserActionKind::Click { selector }   => serde_json::json!({"action":"click","selector":selector}),
+                    BrowserActionKind::Navigate { url } => {
+                        serde_json::json!({"action":"navigate","url":url})
+                    }
+                    BrowserActionKind::Click { selector } => {
+                        serde_json::json!({"action":"click","selector":selector})
+                    }
                     BrowserActionKind::Type { selector, .. } => {
                         // text is omitted from audit — may be a password or credential.
                         serde_json::json!({"action":"type","selector":selector,"text":"<omitted>"})
                     }
-                    BrowserActionKind::Extract { selector } => serde_json::json!({"action":"extract","selector":selector}),
-                    BrowserActionKind::Screenshot           => serde_json::json!({"action":"screenshot"}),
+                    BrowserActionKind::Extract { selector } => {
+                        serde_json::json!({"action":"extract","selector":selector})
+                    }
+                    BrowserActionKind::Screenshot => serde_json::json!({"action":"screenshot"}),
                 };
                 serde_json::json!({ "browser": action_detail, "rationale": rationale })
             }
@@ -598,8 +635,8 @@ impl ActionEngine {
 #[derive(Debug)]
 pub struct ActionResult {
     pub action_id: String,
-    pub outcome:   ActionOutcome,
-    pub trace_id:  String,
+    pub outcome: ActionOutcome,
+    pub trace_id: String,
 }
 
 // ── ExecutorHandle ───────────────────────────────────────────────────────────
@@ -612,7 +649,7 @@ pub struct ActionResult {
 /// internal `Arc<Mutex<WorkerClient>>`.
 #[derive(Clone)]
 pub struct ExecutorHandle {
-    audit:   Arc<tokio::sync::Mutex<AuditLog>>,
+    audit: Arc<tokio::sync::Mutex<AuditLog>>,
     browser: BrowserCoordinator,
 }
 
@@ -624,8 +661,8 @@ impl ExecutorHandle {
     pub async fn execute(
         &self,
         action_id: &str,
-        spec:      &ActionSpec,
-        category:  ActionCategory,
+        spec: &ActionSpec,
+        category: ActionCategory,
         operator_approved: Option<bool>,
     ) -> ActionOutcome {
         // For Shell actions: compute the display form of the normalized BSD command
@@ -639,21 +676,23 @@ impl ExecutorHandle {
             None
         };
 
-        let result  = match spec {
-            ActionSpec::Shell { args, working_dir, .. } => {
-                executor::execute_shell(args, working_dir.as_ref(), shell_timeout(args)).await
-            }
-            ActionSpec::FileRead { path } => {
-                executor::execute_file_read(path).await
-            }
-            ActionSpec::FileWrite { path, content, create_dirs, .. } => {
-                executor::execute_file_write(path, content, *create_dirs).await
-            }
+        let result = match spec {
+            ActionSpec::Shell {
+                args, working_dir, ..
+            } => executor::execute_shell(args, working_dir.as_ref(), shell_timeout(args)).await,
+            ActionSpec::FileRead { path } => executor::execute_file_read(path).await,
+            ActionSpec::FileWrite {
+                path,
+                content,
+                create_dirs,
+                ..
+            } => executor::execute_file_write(path, content, *create_dirs).await,
             ActionSpec::AppleScript { script, .. } => {
                 executor::execute_applescript(script, ACTION_APPLESCRIPT_TIMEOUT_SECS).await
             }
             ActionSpec::Browser { action, .. } => {
-                executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS).await
+                executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
+                    .await
             }
         };
 
@@ -672,16 +711,20 @@ impl ExecutorHandle {
         };
 
         let entry = AuditEntry {
-            timestamp:         Utc::now().to_rfc3339(),
+            timestamp: Utc::now().to_rfc3339(),
             action_id,
-            r#type:            ActionEngine::type_str(spec),
-            category:          ActionEngine::category_str(category),
-            spec_json:         ActionEngine::spec_to_audit_json(spec),
-            outcome:           outcome_str,
-            exit_code:         result.exit_code,
+            r#type: ActionEngine::type_str(spec),
+            category: ActionEngine::category_str(category),
+            spec_json: ActionEngine::spec_to_audit_json(spec),
+            outcome: outcome_str,
+            exit_code: result.exit_code,
             output_preview,
-            error:             if result.error.is_empty() { None } else { Some(result.error.clone()) },
-            duration_ms:       Some(result.duration_ms),
+            error: if result.error.is_empty() {
+                None
+            } else {
+                Some(result.error.clone())
+            },
+            duration_ms: Some(result.duration_ms),
             operator_approved,
         };
 
@@ -694,9 +737,9 @@ impl ExecutorHandle {
 
         if result.success {
             ActionOutcome::Completed {
-                action_id:    action_id.to_string(),
-                output:       result.output,
-                rewritten_to,   // Some("ps -Acro pid,pmem,comm") when GNU ps was normalized; None otherwise
+                action_id: action_id.to_string(),
+                output: result.output,
+                rewritten_to, // Some("ps -Acro pid,pmem,comm") when GNU ps was normalized; None otherwise
             }
         } else {
             // Combine stderr error and any stdout output so the model sees
@@ -708,9 +751,15 @@ impl ExecutorHandle {
             } else if !result.output.is_empty() {
                 result.output
             } else {
-                format!("command failed (exit code: {})", result.exit_code.unwrap_or(-1))
+                format!(
+                    "command failed (exit code: {})",
+                    result.exit_code.unwrap_or(-1)
+                )
             };
-            ActionOutcome::Rejected { action_id: action_id.to_string(), error }
+            ActionOutcome::Rejected {
+                action_id: action_id.to_string(),
+                error,
+            }
         }
     }
 }
@@ -724,28 +773,32 @@ mod tests {
 
     fn make_safe_shell() -> ActionSpec {
         ActionSpec::Shell {
-            args:              vec!["echo".to_string(), "engine-test".to_string()],
-            working_dir:       None,
-            rationale:         None,
+            args: vec!["echo".to_string(), "engine-test".to_string()],
+            working_dir: None,
+            rationale: None,
             category_override: None,
         }
     }
 
     fn make_destructive_shell() -> ActionSpec {
         ActionSpec::Shell {
-            args:              vec!["rm".to_string(), "-rf".to_string(), "/tmp/dexter-engine-test".to_string()],
-            working_dir:       None,
-            rationale:         None,
+            args: vec![
+                "rm".to_string(),
+                "-rf".to_string(),
+                "/tmp/dexter-engine-test".to_string(),
+            ],
+            working_dir: None,
+            rationale: None,
             category_override: None,
         }
     }
 
     fn make_cautious_file_write(tmp: &std::path::Path) -> ActionSpec {
         ActionSpec::FileWrite {
-            path:              tmp.join("engine-out.txt"),
-            content:           "engine test content".to_string(),
-            create_dirs:       false,
-            rationale:         None,
+            path: tmp.join("engine-out.txt"),
+            content: "engine test content".to_string(),
+            create_dirs: false,
+            rationale: None,
             category_override: None,
         }
     }
@@ -770,7 +823,10 @@ mod tests {
             other => panic!("expected Completed, got: {other:?}"),
         }
         // Audit log must exist after execution.
-        assert!(engine.audit.lock().await.path().exists(), "audit log must be created after first action");
+        assert!(
+            engine.audit.lock().await.path().exists(),
+            "audit log must be created after first action"
+        );
     }
 
     #[tokio::test]
@@ -780,7 +836,10 @@ mod tests {
         let spec = make_cautious_file_write(tmp.path());
 
         let outcome = engine.submit(spec, "trace-002").await;
-        assert!(matches!(outcome, ActionOutcome::Completed { .. }), "got: {outcome:?}");
+        assert!(
+            matches!(outcome, ActionOutcome::Completed { .. }),
+            "got: {outcome:?}"
+        );
     }
 
     #[tokio::test]
@@ -791,7 +850,11 @@ mod tests {
         let outcome = engine.submit(make_destructive_shell(), "trace-003").await;
         match outcome {
             ActionOutcome::PendingApproval { .. } => {
-                assert_eq!(engine.pending_actions.len(), 1, "must be stored in pending_actions");
+                assert_eq!(
+                    engine.pending_actions.len(),
+                    1,
+                    "must be stored in pending_actions"
+                );
             }
             other => panic!("expected PendingApproval, got: {other:?}"),
         }
@@ -810,9 +873,9 @@ mod tests {
 
         // Use echo with destructive override so it pends but executes safely when approved.
         let spec = ActionSpec::Shell {
-            args:              vec!["echo".to_string(), "approved-test".to_string()],
-            working_dir:       None,
-            rationale:         None,
+            args: vec!["echo".to_string(), "approved-test".to_string()],
+            working_dir: None,
+            rationale: None,
             category_override: Some("destructive".to_string()),
         };
 
@@ -828,7 +891,11 @@ mod tests {
             matches!(resolved, ActionOutcome::Completed { .. }),
             "approved echo should complete: {resolved:?}"
         );
-        assert_eq!(engine.pending_actions.len(), 0, "must be removed from pending_actions");
+        assert_eq!(
+            engine.pending_actions.len(),
+            0,
+            "must be removed from pending_actions"
+        );
     }
 
     #[tokio::test]
@@ -843,7 +910,10 @@ mod tests {
         };
 
         let resolved = engine.resolve(&action_id, false, "rejected by test").await;
-        assert!(matches!(resolved, ActionOutcome::Rejected { .. }), "got: {resolved:?}");
+        assert!(
+            matches!(resolved, ActionOutcome::Rejected { .. }),
+            "got: {resolved:?}"
+        );
         assert_eq!(engine.pending_actions.len(), 0);
     }
 

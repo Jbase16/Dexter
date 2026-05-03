@@ -34,7 +34,9 @@ impl AuditLog {
     /// The file is NOT created until the first `append()` call — we don't create
     /// an empty file on startup if no actions are ever taken.
     pub fn new(state_dir: &Path) -> Self {
-        Self { path: state_dir.join(AUDIT_LOG_FILENAME) }
+        Self {
+            path: state_dir.join(AUDIT_LOG_FILENAME),
+        }
     }
 
     /// Create an AuditLog wrapped in `Arc<tokio::sync::Mutex<>>` for shared
@@ -100,25 +102,25 @@ impl AuditLog {
 #[derive(Serialize)]
 pub struct AuditEntry<'a> {
     /// RFC3339 timestamp at the moment the audit entry is written.
-    pub timestamp:         String,
+    pub timestamp: String,
     /// UUID v4 correlating this entry with the ActionRequest/ActionApproval gRPC messages.
-    pub action_id:         &'a str,
+    pub action_id: &'a str,
     /// Action type tag: "shell" | "file_read" | "file_write" | "applescript"
-    pub r#type:            &'static str,
+    pub r#type: &'static str,
     /// Classified category: "safe" | "cautious" | "destructive"
-    pub category:          &'static str,
+    pub category: &'static str,
     /// Sanitized action parameters. FileWrite.content is redacted.
-    pub spec_json:         serde_json::Value,
+    pub spec_json: serde_json::Value,
     /// Execution outcome: "success" | "failure" | "rejected" | "timeout"
-    pub outcome:           &'static str,
+    pub outcome: &'static str,
     /// Process exit code. None for IO operations, timeouts, or rejections.
-    pub exit_code:         Option<i32>,
+    pub exit_code: Option<i32>,
     /// First AUDIT_OUTPUT_PREVIEW_CHARS chars of stdout (or file content).
-    pub output_preview:    Option<String>,
+    pub output_preview: Option<String>,
     /// Error description (stderr or IO error message). None on success.
-    pub error:             Option<String>,
+    pub error: Option<String>,
     /// Wall-clock execution time. None for rejections (never executed).
-    pub duration_ms:       Option<u64>,
+    pub duration_ms: Option<u64>,
     /// Whether the operator explicitly approved this action (DESTRUCTIVE only).
     pub operator_approved: Option<bool>,
 }
@@ -154,16 +156,16 @@ mod tests {
 
     fn make_entry(action_id: &str) -> AuditEntry<'_> {
         AuditEntry {
-            timestamp:         Utc::now().to_rfc3339(),
+            timestamp: Utc::now().to_rfc3339(),
             action_id,
-            r#type:            "shell",
-            category:          "cautious",
-            spec_json:         serde_json::json!({"args": ["echo", "hi"]}),
-            outcome:           "success",
-            exit_code:         Some(0),
-            output_preview:    Some("hi".to_string()),
-            error:             None,
-            duration_ms:       Some(12),
+            r#type: "shell",
+            category: "cautious",
+            spec_json: serde_json::json!({"args": ["echo", "hi"]}),
+            outcome: "success",
+            exit_code: Some(0),
+            output_preview: Some("hi".to_string()),
+            error: None,
+            duration_ms: Some(12),
             operator_approved: None,
         }
     }
@@ -183,7 +185,8 @@ mod tests {
         // File does not exist before first append.
         assert!(!log.path().exists());
 
-        log.append(&make_entry("test-001")).expect("append should succeed");
+        log.append(&make_entry("test-001"))
+            .expect("append should succeed");
 
         // File now exists and contains valid JSON.
         let contents = std::fs::read_to_string(log.path()).unwrap();
@@ -207,8 +210,7 @@ mod tests {
 
         // Both lines must be independently valid JSON.
         for line in &lines {
-            serde_json::from_str::<serde_json::Value>(line)
-                .expect("each line must be valid JSON");
+            serde_json::from_str::<serde_json::Value>(line).expect("each line must be valid JSON");
         }
     }
 

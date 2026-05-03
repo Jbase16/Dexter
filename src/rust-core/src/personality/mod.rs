@@ -10,7 +10,6 @@
 /// Public surface re-exported here so callers can write:
 ///   `use crate::personality::{PersonalityLayer, PersonalityProfile};`
 /// without knowing the internal submodule layout.
-
 pub mod layer;
 
 #[allow(unused_imports)]

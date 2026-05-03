@@ -1,4 +1,3 @@
-
 /// Ollama HTTP inference engine for the Dexter core.
 ///
 /// Wraps the Ollama REST API in a typed Rust interface. All Ollama-specific HTTP and
@@ -80,7 +79,7 @@ pub enum MessageOrigin {
 /// semantic source for budget accounting and trimming.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role:    String,
+    pub role: String,
     pub content: String,
     /// Base64-encoded image payloads for multimodal (vision) inference.
     ///
@@ -103,15 +102,30 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".to_string(), content: content.into(), images: None, origin: MessageOrigin::System }
+        Self {
+            role: "system".to_string(),
+            content: content.into(),
+            images: None,
+            origin: MessageOrigin::System,
+        }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".to_string(), content: content.into(), images: None, origin: MessageOrigin::User }
+        Self {
+            role: "user".to_string(),
+            content: content.into(),
+            images: None,
+            origin: MessageOrigin::User,
+        }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".to_string(), content: content.into(), images: None, origin: MessageOrigin::Assistant }
+        Self {
+            role: "assistant".to_string(),
+            content: content.into(),
+            images: None,
+            origin: MessageOrigin::Assistant,
+        }
     }
 
     /// Construct a user message with a single base64-encoded image attachment.
@@ -123,10 +137,10 @@ impl Message {
     #[allow(dead_code)] // Phase 20 — used in vision tests; callable by future vision pipelines
     pub fn user_with_image(content: impl Into<String>, image_b64: String) -> Self {
         Self {
-            role:    "user".to_string(),
+            role: "user".to_string(),
             content: content.into(),
-            images:  Some(vec![image_b64]),
-            origin:  MessageOrigin::User,
+            images: Some(vec![image_b64]),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -138,10 +152,10 @@ impl Message {
     /// the full rationale.
     pub fn tool_result(content: impl Into<String>) -> Self {
         Self {
-            role:    "user".to_string(),
+            role: "user".to_string(),
             content: content.into(),
-            images:  None,
-            origin:  MessageOrigin::ToolResult,
+            images: None,
+            origin: MessageOrigin::ToolResult,
         }
     }
 
@@ -150,10 +164,10 @@ impl Message {
     #[allow(dead_code)] // Phase 9 — retrieval pipeline call site
     pub fn retrieval(content: impl Into<String>) -> Self {
         Self {
-            role:    "user".to_string(),
+            role: "user".to_string(),
             content: content.into(),
-            images:  None,
-            origin:  MessageOrigin::Retrieval,
+            images: None,
+            origin: MessageOrigin::Retrieval,
         }
     }
 }
@@ -260,7 +274,7 @@ pub struct TokenChunk {
 /// independently.
 pub struct GenerationStream {
     /// Drain this to receive `TokenChunk`s.
-    pub rx:       tokio::sync::mpsc::Receiver<Result<TokenChunk, InferenceError>>,
+    pub rx: tokio::sync::mpsc::Receiver<Result<TokenChunk, InferenceError>>,
     /// JoinHandle for the producer task. Cancellable callers should keep this
     /// (or its `.abort_handle()`) so they can cancel the upstream HTTP stream.
     pub producer: tokio::task::JoinHandle<()>,
@@ -302,11 +316,11 @@ pub struct EmbeddingRequest {
 
 #[derive(Serialize)]
 struct OllamaChatRequest<'a> {
-    model:    &'a str,
+    model: &'a str,
     messages: &'a [Message],
-    stream:   bool,
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    options:  Option<OllamaOptions>,
+    options: Option<OllamaOptions>,
     /// keep_alive = 0 evicts the model from VRAM immediately after the request.
     /// Sent as a string per Ollama docs ("0" or "5m", not an integer).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -424,16 +438,16 @@ struct OllamaTagsResponse {
 
 #[derive(Deserialize)]
 struct OllamaTagsModel {
-    name:       String,
-    size:       u64,
-    digest:     String,
-    details:    OllamaModelDetails,
+    name: String,
+    size: u64,
+    digest: String,
+    details: OllamaModelDetails,
 }
 
 #[derive(Deserialize, Default)]
 struct OllamaModelDetails {
     #[serde(default)]
-    parameter_size:   String,
+    parameter_size: String,
     #[serde(default)]
     quantization_level: String,
     // `Option<Vec<String>>` rather than `Vec<String>`: some older models in Ollama's
@@ -456,9 +470,9 @@ struct OllamaModelDetails {
 ///   - model absent from /api/ps → not loaded (or load failed silently)
 #[derive(Deserialize, Debug, Clone)]
 pub struct OllamaPsEntry {
-    pub name:      String,
+    pub name: String,
     /// Total bytes the model needs to run at full speed (GPU + CPU combined).
-    pub size:      u64,
+    pub size: u64,
     /// Bytes actually resident in GPU memory (or unified memory on Apple Silicon).
     pub size_vram: u64,
     /// ISO-8601 timestamp when Ollama will auto-evict the model. Useful for
@@ -479,11 +493,11 @@ struct OllamaPsResponse {
 #[allow(dead_code)] // Phase 9 — pull_model() uses this for progress reporting
 #[derive(Deserialize)]
 struct OllamaPullProgress {
-    status:    String,
+    status: String,
     #[serde(default)]
     completed: Option<u64>,
     #[serde(default)]
-    total:     Option<u64>,
+    total: Option<u64>,
 }
 
 // ── InferenceEngine ───────────────────────────────────────────────────────────
@@ -498,8 +512,8 @@ struct OllamaPullProgress {
 /// any component that needs inference. The engine itself has no mutable state.
 #[derive(Clone)]
 pub struct InferenceEngine {
-    client:   Client,
-    config:   InferenceConfig,
+    client: Client,
+    config: InferenceConfig,
     base_url: String,
 }
 
@@ -517,13 +531,17 @@ impl InferenceEngine {
             // for the non-streaming methods only.
             .build()
             .map_err(|e| InferenceError::OllamaUnavailable {
-                url:    config.ollama_base_url.clone(),
+                url: config.ollama_base_url.clone(),
                 source: format!("failed to build HTTP client: {e}"),
             })?;
 
         let base_url = config.ollama_base_url.trim_end_matches('/').to_string();
 
-        Ok(Self { client, config, base_url })
+        Ok(Self {
+            client,
+            config,
+            base_url,
+        })
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -540,8 +558,12 @@ impl InferenceEngine {
     pub async fn generate_stream(
         &self,
         req: GenerationRequest,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<TokenChunk, InferenceError>>, InferenceError> {
-        Ok(self.generate_stream_cancellable(req).await?.into_rx_detached())
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<TokenChunk, InferenceError>>, InferenceError>
+    {
+        Ok(self
+            .generate_stream_cancellable(req)
+            .await?
+            .into_rx_detached())
     }
 
     /// Phase 38 / Codex finding [7]: cancellable streaming generation.
@@ -592,17 +614,17 @@ impl InferenceEngine {
             .unwrap_or(0);
 
         let body = OllamaChatRequest {
-            model:    &req.model_name,
+            model: &req.model_name,
             messages: &req.messages,
-            stream:   true,
-            options:  Some(OllamaOptions {
+            stream: true,
+            options: Some(OllamaOptions {
                 temperature: req.temperature,
                 num_predict: req.num_predict,
-                num_ctx:     req.num_ctx_override,
-                seed:        Some(request_seed),
+                num_ctx: req.num_ctx_override,
+                seed: Some(request_seed),
             }),
             keep_alive,
-            think:    false,  // disable qwen3 hidden reasoning chain
+            think: false, // disable qwen3 hidden reasoning chain
         };
 
         debug!(
@@ -616,7 +638,8 @@ impl InferenceEngine {
         // Send the request and get the raw response. We explicitly do NOT call
         // `.timeout()` here — inactivity detection is applied per-chunk in the
         // spawned task below.
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .send()
@@ -624,7 +647,7 @@ impl InferenceEngine {
             .map_err(|e| {
                 if e.is_connect() {
                     InferenceError::OllamaUnavailable {
-                        url:    url.clone(),
+                        url: url.clone(),
                         source: e.to_string(),
                     }
                 } else {
@@ -633,7 +656,7 @@ impl InferenceEngine {
             })?;
 
         if !response.status().is_success() {
-            let status  = response.status().as_u16();
+            let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             return Err(InferenceError::ApiError { status, message });
         }
@@ -661,11 +684,13 @@ impl InferenceEngine {
                 // Ollama goes completely silent (hung connection, OOM kill, process crash).
                 match timeout(inactivity, byte_stream.next()).await {
                     Err(_elapsed) => {
-                        let _ = tx.send(Err(InferenceError::StreamInterrupted(format!(
-                            "no data from Ollama for {}s (model: {})",
-                            inactivity.as_secs(),
-                            model_name,
-                        )))).await;
+                        let _ = tx
+                            .send(Err(InferenceError::StreamInterrupted(format!(
+                                "no data from Ollama for {}s (model: {})",
+                                inactivity.as_secs(),
+                                model_name,
+                            ))))
+                            .await;
                         break;
                     }
 
@@ -674,10 +699,12 @@ impl InferenceEngine {
 
                     // Network-level error mid-stream.
                     Ok(Some(Err(e))) => {
-                        let _ = tx.send(Err(InferenceError::ApiError {
-                            status:  e.status().map(|s| s.as_u16()).unwrap_or(0),
-                            message: e.to_string(),
-                        })).await;
+                        let _ = tx
+                            .send(Err(InferenceError::ApiError {
+                                status: e.status().map(|s| s.as_u16()).unwrap_or(0),
+                                message: e.to_string(),
+                            }))
+                            .await;
                         break;
                     }
 
@@ -689,9 +716,11 @@ impl InferenceEngine {
                         // any trailing incomplete line for the next chunk.
                         match std::str::from_utf8(&bytes) {
                             Err(e) => {
-                                let _ = tx.send(Err(InferenceError::SerializationError(
-                                    format!("UTF-8 decode error in stream: {e}"),
-                                ))).await;
+                                let _ = tx
+                                    .send(Err(InferenceError::SerializationError(format!(
+                                        "UTF-8 decode error in stream: {e}"
+                                    ))))
+                                    .await;
                                 break;
                             }
                             Ok(text) => {
@@ -707,13 +736,18 @@ impl InferenceEngine {
 
                                     match serde_json::from_str::<OllamaChatChunk>(line) {
                                         Err(e) => {
-                                            let _ = tx.send(Err(InferenceError::SerializationError(
-                                                format!("NDJSON parse error: {e} — line: {line}"),
-                                            ))).await;
+                                            let _ = tx
+                                                .send(Err(InferenceError::SerializationError(
+                                                    format!(
+                                                        "NDJSON parse error: {e} — line: {line}"
+                                                    ),
+                                                )))
+                                                .await;
                                             return; // exit the spawned task
                                         }
                                         Ok(chunk) => {
-                                            let content = chunk.message
+                                            let content = chunk
+                                                .message
                                                 .map(|m| m.content)
                                                 .unwrap_or_default();
                                             let eval_count = chunk.eval_count.unwrap_or(0);
@@ -724,12 +758,18 @@ impl InferenceEngine {
                                             // means keep_alive didn't hold. `eval_duration` +
                                             // `eval_count` gives generation throughput.
                                             if chunk.done {
-                                                let ld_ms  = chunk.load_duration.unwrap_or(0) / 1_000_000;
-                                                let ped_ms = chunk.prompt_eval_duration.unwrap_or(0) / 1_000_000;
-                                                let ed_ms  = chunk.eval_duration.unwrap_or(0) / 1_000_000;
-                                                let tps    = if ed_ms > 0 {
+                                                let ld_ms =
+                                                    chunk.load_duration.unwrap_or(0) / 1_000_000;
+                                                let ped_ms =
+                                                    chunk.prompt_eval_duration.unwrap_or(0)
+                                                        / 1_000_000;
+                                                let ed_ms =
+                                                    chunk.eval_duration.unwrap_or(0) / 1_000_000;
+                                                let tps = if ed_ms > 0 {
                                                     (eval_count as f64) / (ed_ms as f64 / 1000.0)
-                                                } else { 0.0 };
+                                                } else {
+                                                    0.0
+                                                };
                                                 info!(
                                                     model             = %model_name,
                                                     load_ms           = ld_ms,
@@ -786,14 +826,15 @@ impl InferenceEngine {
     pub async fn embed(&self, req: EmbeddingRequest) -> Result<Vec<f32>, InferenceError> {
         let url = format!("{}{}", self.base_url, OLLAMA_EMBED_PATH);
         let body = OllamaEmbedRequest {
-            model:      &req.model_name,
-            input:      &req.input,
+            model: &req.model_name,
+            input: &req.input,
             keep_alive: "10m",
         };
 
         debug!(model = %req.model_name, chars = req.input.len(), "Embedding request");
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .timeout(Duration::from_secs(self.config.request_timeout_secs))
@@ -802,18 +843,21 @@ impl InferenceEngine {
             .map_err(InferenceError::from)?;
 
         if !response.status().is_success() {
-            let status  = response.status().as_u16();
+            let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             return Err(InferenceError::ApiError { status, message });
         }
 
-        let embed_resp: OllamaEmbedResponse = response.json().await
+        let embed_resp: OllamaEmbedResponse = response
+            .json()
+            .await
             .map_err(|e| InferenceError::SerializationError(e.to_string()))?;
 
-        embed_resp.embeddings.into_iter().next()
-            .ok_or_else(|| InferenceError::SerializationError(
-                "Ollama /api/embed returned empty embeddings array".to_string()
-            ))
+        embed_resp.embeddings.into_iter().next().ok_or_else(|| {
+            InferenceError::SerializationError(
+                "Ollama /api/embed returned empty embeddings array".to_string(),
+            )
+        })
     }
 
     /// Return the inventory of all models currently on disk.
@@ -823,7 +867,8 @@ impl InferenceEngine {
     pub async fn list_available_models(&self) -> Result<Vec<ModelInfo>, InferenceError> {
         let url = format!("{}{}", self.base_url, OLLAMA_TAGS_PATH);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .timeout(Duration::from_secs(self.config.request_timeout_secs))
             .send()
@@ -834,7 +879,7 @@ impl InferenceEngine {
                 // operationally different from a 500.
                 if e.is_connect() || e.is_timeout() {
                     InferenceError::OllamaUnavailable {
-                        url:    url.clone(),
+                        url: url.clone(),
                         source: e.to_string(),
                     }
                 } else {
@@ -843,22 +888,28 @@ impl InferenceEngine {
             })?;
 
         if !response.status().is_success() {
-            let status  = response.status().as_u16();
+            let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             return Err(InferenceError::ApiError { status, message });
         }
 
-        let tags: OllamaTagsResponse = response.json().await
+        let tags: OllamaTagsResponse = response
+            .json()
+            .await
             .map_err(|e| InferenceError::SerializationError(e.to_string()))?;
 
-        let models = tags.models.into_iter().map(|m| ModelInfo {
-            name:           m.name,
-            size_bytes:     m.size,
-            digest:         m.digest,
-            parameter_size: m.details.parameter_size,
-            quantization:   m.details.quantization_level,
-            families:       m.details.families.unwrap_or_default(),
-        }).collect();
+        let models = tags
+            .models
+            .into_iter()
+            .map(|m| ModelInfo {
+                name: m.name,
+                size_bytes: m.size,
+                digest: m.digest,
+                parameter_size: m.details.parameter_size,
+                quantization: m.details.quantization_level,
+                families: m.details.families.unwrap_or_default(),
+            })
+            .collect();
 
         Ok(models)
     }
@@ -877,7 +928,8 @@ impl InferenceEngine {
     pub async fn ps(&self) -> Result<Vec<OllamaPsEntry>, InferenceError> {
         let url = format!("{}{}", self.base_url, OLLAMA_PS_PATH);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .timeout(Duration::from_secs(self.config.request_timeout_secs))
             .send()
@@ -885,7 +937,7 @@ impl InferenceEngine {
             .map_err(|e| {
                 if e.is_connect() || e.is_timeout() {
                     InferenceError::OllamaUnavailable {
-                        url:    url.clone(),
+                        url: url.clone(),
                         source: e.to_string(),
                     }
                 } else {
@@ -894,12 +946,14 @@ impl InferenceEngine {
             })?;
 
         if !response.status().is_success() {
-            let status  = response.status().as_u16();
+            let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             return Err(InferenceError::ApiError { status, message });
         }
 
-        let ps: OllamaPsResponse = response.json().await
+        let ps: OllamaPsResponse = response
+            .json()
+            .await
             .map_err(|e| InferenceError::SerializationError(e.to_string()))?;
 
         Ok(ps.models)
@@ -912,7 +966,9 @@ impl InferenceEngine {
     #[allow(dead_code)] // Phase 9 — ensure model is on disk before routing inference requests
     pub async fn ensure_model_available(&self, model_name: &str) -> Result<(), InferenceError> {
         let models = self.list_available_models().await?;
-        let found = models.iter().any(|m| m.name == model_name || m.name.starts_with(&format!("{model_name}:")));
+        let found = models
+            .iter()
+            .any(|m| m.name == model_name || m.name.starts_with(&format!("{model_name}:")));
 
         if found {
             debug!(model = %model_name, "Model is available");
@@ -939,17 +995,18 @@ impl InferenceEngine {
     pub async fn unload_model(&self, model_name: &str) -> Result<(), InferenceError> {
         let url = format!("{}{}", self.base_url, OLLAMA_CHAT_PATH);
         let body = OllamaChatRequest {
-            model:      model_name,
-            messages:   &[],
-            stream:     false,
-            options:    None,
+            model: model_name,
+            messages: &[],
+            stream: false,
+            options: None,
             keep_alive: Some("0"),
-            think:      false,
+            think: false,
         };
 
         debug!(model = %model_name, "Unloading model from VRAM");
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .timeout(Duration::from_secs(self.config.request_timeout_secs))
@@ -958,7 +1015,7 @@ impl InferenceEngine {
             .map_err(InferenceError::from)?;
 
         if !response.status().is_success() {
-            let status  = response.status().as_u16();
+            let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             return Err(InferenceError::ApiError { status, message });
         }
@@ -978,19 +1035,26 @@ impl InferenceEngine {
         let url = format!("{}{}", self.base_url, OLLAMA_PULL_PATH);
 
         #[derive(Serialize)]
-        struct PullRequest<'a> { model: &'a str, stream: bool }
+        struct PullRequest<'a> {
+            model: &'a str,
+            stream: bool,
+        }
 
         info!(model = %model_name, "Pulling model from Ollama registry");
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
-            .json(&PullRequest { model: model_name, stream: true })
+            .json(&PullRequest {
+                model: model_name,
+                stream: true,
+            })
             .send()
             .await
             .map_err(InferenceError::from)?;
 
         if !response.status().is_success() {
-            let status  = response.status().as_u16();
+            let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             return Err(InferenceError::ApiError { status, message });
         }
@@ -1004,51 +1068,54 @@ impl InferenceEngine {
                 Err(_) => {
                     return Err(InferenceError::StreamInterrupted(format!(
                         "pull stream silent for {}s (model: {})",
-                        inactivity.as_secs(), model_name
+                        inactivity.as_secs(),
+                        model_name
                     )));
                 }
                 Ok(None) => break,
                 Ok(Some(Err(e))) => return Err(InferenceError::from(e)),
-                Ok(Some(Ok(bytes))) => {
-                    match std::str::from_utf8(&bytes) {
-                        Err(e) => return Err(InferenceError::SerializationError(
-                            format!("UTF-8 in pull stream: {e}")
-                        )),
-                        Ok(text) => {
-                            line_buf.push_str(text);
-                            while let Some(pos) = line_buf.find('\n') {
-                                let line: String = line_buf.drain(..=pos).collect();
-                                let line = line.trim();
-                                if line.is_empty() { continue; }
+                Ok(Some(Ok(bytes))) => match std::str::from_utf8(&bytes) {
+                    Err(e) => {
+                        return Err(InferenceError::SerializationError(format!(
+                            "UTF-8 in pull stream: {e}"
+                        )))
+                    }
+                    Ok(text) => {
+                        line_buf.push_str(text);
+                        while let Some(pos) = line_buf.find('\n') {
+                            let line: String = line_buf.drain(..=pos).collect();
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
 
-                                if let Ok(progress) = serde_json::from_str::<OllamaPullProgress>(line) {
-                                    match (progress.completed, progress.total) {
-                                        (Some(c), Some(t)) if t > 0 => {
-                                            let pct = (c as f64 / t as f64 * 100.0) as u8;
-                                            debug!(
-                                                model = %model_name,
-                                                status = %progress.status,
-                                                pct,
-                                                "Pull progress"
-                                            );
-                                        }
-                                        _ => {
-                                            debug!(
-                                                model  = %model_name,
-                                                status = %progress.status,
-                                                "Pull progress"
-                                            );
-                                        }
+                            if let Ok(progress) = serde_json::from_str::<OllamaPullProgress>(line) {
+                                match (progress.completed, progress.total) {
+                                    (Some(c), Some(t)) if t > 0 => {
+                                        let pct = (c as f64 / t as f64 * 100.0) as u8;
+                                        debug!(
+                                            model = %model_name,
+                                            status = %progress.status,
+                                            pct,
+                                            "Pull progress"
+                                        );
                                     }
-                                    if progress.status == "success" {
-                                        info!(model = %model_name, "Pull complete");
-                                        return Ok(());
+                                    _ => {
+                                        debug!(
+                                            model  = %model_name,
+                                            status = %progress.status,
+                                            "Pull progress"
+                                        );
                                     }
+                                }
+                                if progress.status == "success" {
+                                    info!(model = %model_name, "Pull complete");
+                                    return Ok(());
                                 }
                             }
                         }
                     }
-                }
+                },
             }
         }
 
@@ -1084,14 +1151,14 @@ mod tests {
 
     fn test_config() -> InferenceConfig {
         InferenceConfig {
-            ollama_base_url:              "http://localhost:11434".to_string(),
+            ollama_base_url: "http://localhost:11434".to_string(),
             // 60s: phi3:mini must be loaded from disk on first request. Cold load on
             // Apple Silicon takes 20–40s. The production default is 30s (non-streaming
             // endpoint SLA), but tests need headroom for a cold model start.
-            request_timeout_secs:         60,
-            connect_timeout_secs:         3,
+            request_timeout_secs: 60,
+            connect_timeout_secs: 3,
             stream_inactivity_timeout_secs: 30,
-            auto_pull_missing_models:     false,
+            auto_pull_missing_models: false,
         }
     }
 
@@ -1102,16 +1169,22 @@ mod tests {
         // When images is Some, the JSON output must include an "images" key with
         // the base64 array. The Ollama /api/chat multimodal contract requires this.
         let msg = Message {
-            role:    "user".to_string(),
+            role: "user".to_string(),
             content: "what do you see?".to_string(),
-            images:  Some(vec!["base64abc".to_string()]),
-            origin:  MessageOrigin::User,
+            images: Some(vec!["base64abc".to_string()]),
+            origin: MessageOrigin::User,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"images\""),
-            "JSON must contain 'images' key when images is Some: {}", json);
-        assert!(json.contains("base64abc"),
-            "JSON must contain the base64 payload: {}", json);
+        assert!(
+            json.contains("\"images\""),
+            "JSON must contain 'images' key when images is Some: {}",
+            json
+        );
+        assert!(
+            json.contains("base64abc"),
+            "JSON must contain the base64 payload: {}",
+            json
+        );
     }
 
     #[test]
@@ -1121,8 +1194,11 @@ mod tests {
         // must not send an empty images array to Ollama — it confuses non-vision models.
         let msg = Message::user("hello");
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(!json.contains("images"),
-            "JSON must NOT contain 'images' key when images is None: {}", json);
+        assert!(
+            !json.contains("images"),
+            "JSON must NOT contain 'images' key when images is None: {}",
+            json
+        );
     }
 
     #[test]
@@ -1143,7 +1219,10 @@ mod tests {
     #[test]
     fn new_succeeds_without_ollama_running() {
         let result = InferenceEngine::new(test_config());
-        assert!(result.is_ok(), "InferenceEngine::new() should not contact Ollama");
+        assert!(
+            result.is_ok(),
+            "InferenceEngine::new() should not contact Ollama"
+        );
     }
 
     // AC-2: phi3:mini is present on disk with a non-zero size.
@@ -1152,12 +1231,20 @@ mod tests {
     #[ignore]
     async fn phi3_mini_is_available() {
         let engine = InferenceEngine::new(test_config()).unwrap();
-        let models = engine.list_available_models().await
+        let models = engine
+            .list_available_models()
+            .await
             .expect("list_available_models should succeed when Ollama is running");
 
         let phi3 = models.iter().find(|m| m.name.starts_with("phi3:mini"));
-        assert!(phi3.is_some(), "phi3:mini must be pulled before running inference tests");
-        assert!(phi3.unwrap().size_bytes > 0, "phi3:mini size_bytes should be non-zero");
+        assert!(
+            phi3.is_some(),
+            "phi3:mini must be pulled before running inference tests"
+        );
+        assert!(
+            phi3.unwrap().size_bytes > 0,
+            "phi3:mini size_bytes should be non-zero"
+        );
     }
 
     // AC-4: Single-turn generation with phi3:mini streams at least one non-empty token.
@@ -1167,28 +1254,33 @@ mod tests {
     async fn generate_stream_yields_tokens() {
         let engine = InferenceEngine::new(test_config()).unwrap();
         let req = GenerationRequest {
-            model_name:          "phi3:mini".to_string(),
-            messages:            vec![Message::user("Say 'hello' and nothing else.")],
-            temperature:         Some(0.0),
-            unload_after:        false,
+            model_name: "phi3:mini".to_string(),
+            messages: vec![Message::user("Say 'hello' and nothing else.")],
+            temperature: Some(0.0),
+            unload_after: false,
             keep_alive_override: None,
-            num_predict:         None,
+            num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override:    None,
+            num_ctx_override: None,
         };
 
-        let mut rx = engine.generate_stream(req).await
+        let mut rx = engine
+            .generate_stream(req)
+            .await
             .expect("generate_stream should not error before streaming starts");
 
-        let mut token_count  = 0usize;
-        let mut total_text   = String::new();
-        let mut saw_done     = false;
+        let mut token_count = 0usize;
+        let mut total_text = String::new();
+        let mut saw_done = false;
 
         while let Some(result) = rx.recv().await {
             let chunk = result.expect("stream chunk should not be an error");
             if chunk.done {
                 saw_done = true;
-                assert!(chunk.eval_count > 0, "eval_count should be >0 on final chunk");
+                assert!(
+                    chunk.eval_count > 0,
+                    "eval_count should be >0 on final chunk"
+                );
                 break;
             }
             if !chunk.content.is_empty() {
@@ -1197,9 +1289,15 @@ mod tests {
             }
         }
 
-        assert!(token_count > 0, "should receive at least one non-empty token");
+        assert!(
+            token_count > 0,
+            "should receive at least one non-empty token"
+        );
         assert!(saw_done, "stream should terminate with a done=true chunk");
-        assert!(!total_text.is_empty(), "accumulated text should not be empty");
+        assert!(
+            !total_text.is_empty(),
+            "accumulated text should not be empty"
+        );
     }
 
     // AC-5: ModelNotFound is returned for a model that is not pulled.
@@ -1209,14 +1307,14 @@ mod tests {
     async fn generate_stream_errors_for_missing_model() {
         let engine = InferenceEngine::new(test_config()).unwrap();
         let req = GenerationRequest {
-            model_name:          "nonexistent-model-dexter-test:latest".to_string(),
-            messages:            vec![Message::user("hello")],
-            temperature:         None,
-            unload_after:        false,
+            model_name: "nonexistent-model-dexter-test:latest".to_string(),
+            messages: vec![Message::user("hello")],
+            temperature: None,
+            unload_after: false,
             keep_alive_override: None,
-            num_predict:         None,
+            num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override:    None,
+            num_ctx_override: None,
         };
 
         // The error may surface at generate_stream (if ensure_model_available is called
@@ -1230,7 +1328,10 @@ mod tests {
             Ok(mut rx) => {
                 // The error arrives as the first chunk.
                 let first = rx.recv().await.expect("should receive an error chunk");
-                assert!(first.is_err(), "first chunk should be an error for missing model");
+                assert!(
+                    first.is_err(),
+                    "first chunk should be an error for missing model"
+                );
             }
         }
     }
@@ -1245,15 +1346,23 @@ mod tests {
         let engine = InferenceEngine::new(test_config()).unwrap();
         let req = EmbeddingRequest {
             model_name: "phi3:mini".to_string(),
-            input:      "This is a test embedding.".to_string(),
+            input: "This is a test embedding.".to_string(),
         };
 
-        let embedding = engine.embed(req).await
+        let embedding = engine
+            .embed(req)
+            .await
             .expect("embed should succeed with phi3:mini");
 
-        assert!(!embedding.is_empty(), "embedding vector should be non-empty");
+        assert!(
+            !embedding.is_empty(),
+            "embedding vector should be non-empty"
+        );
         // Sanity check: embedding values should not all be zero.
-        assert!(embedding.iter().any(|&v| v != 0.0), "embedding should have non-zero values");
+        assert!(
+            embedding.iter().any(|&v| v != 0.0),
+            "embedding should have non-zero values"
+        );
     }
 
     // AC-7: list_available_models returns a non-empty list when Ollama is running.
@@ -1262,15 +1371,20 @@ mod tests {
     #[ignore]
     async fn list_available_models_returns_models() {
         let engine = InferenceEngine::new(test_config()).unwrap();
-        let models = engine.list_available_models().await
+        let models = engine
+            .list_available_models()
+            .await
             .expect("list_available_models should succeed when Ollama is running");
 
-        assert!(!models.is_empty(), "should have at least one model if Ollama is running");
+        assert!(
+            !models.is_empty(),
+            "should have at least one model if Ollama is running"
+        );
 
         // Every model should have a non-empty name and non-zero size.
         for model in &models {
             assert!(!model.name.is_empty(), "model name should not be empty");
-            assert!(model.size_bytes > 0,   "model size_bytes should be >0");
+            assert!(model.size_bytes > 0, "model size_bytes should be >0");
         }
     }
 }

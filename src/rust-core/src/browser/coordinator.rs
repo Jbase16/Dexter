@@ -16,8 +16,8 @@ use tracing::{error, info, warn};
 
 use crate::{
     constants::{
-        BROWSER_WORKER_PATH, BROWSER_WORKER_RESULT_TIMEOUT_SECS,
-        VOICE_PYTHON_EXE, VOICE_WORKER_RESTART_BACKOFF_SECS, VOICE_WORKER_RESTART_MAX_ATTEMPTS,
+        BROWSER_WORKER_PATH, BROWSER_WORKER_RESULT_TIMEOUT_SECS, VOICE_PYTHON_EXE,
+        VOICE_WORKER_RESTART_BACKOFF_SECS, VOICE_WORKER_RESTART_MAX_ATTEMPTS,
     },
     voice::{
         protocol::{msg, WorkerType},
@@ -31,8 +31,8 @@ use crate::{
 pub struct BrowserCoordinator {
     // Same Arc<Mutex> pattern as VoiceCoordinator: allows &self usage from
     // execute_and_log (which borrows &ActionEngine) without &mut constraints.
-    client:        Arc<tokio::sync::Mutex<Option<WorkerClient>>>,
-    is_available:  Arc<AtomicBool>,
+    client: Arc<tokio::sync::Mutex<Option<WorkerClient>>>,
+    is_available: Arc<AtomicBool>,
     restart_count: Arc<AtomicU32>,
 }
 
@@ -41,8 +41,8 @@ impl BrowserCoordinator {
     /// Always succeeds. Caller must call start() to spawn the actual process.
     pub fn new_degraded() -> Self {
         Self {
-            client:        Arc::new(tokio::sync::Mutex::new(None)),
-            is_available:  Arc::new(AtomicBool::new(false)),
+            client: Arc::new(tokio::sync::Mutex::new(None)),
+            is_available: Arc::new(AtomicBool::new(false)),
             restart_count: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -50,7 +50,8 @@ impl BrowserCoordinator {
     /// Spawn browser_worker.py. Sets is_available=true on success.
     /// Called once from ActionEngine::start_browser().
     pub async fn start(&self) {
-        match WorkerClient::spawn(WorkerType::Browser, VOICE_PYTHON_EXE, BROWSER_WORKER_PATH).await {
+        match WorkerClient::spawn(WorkerType::Browser, VOICE_PYTHON_EXE, BROWSER_WORKER_PATH).await
+        {
             Ok(client) => {
                 *self.client.lock().await = Some(client);
                 self.is_available.store(true, Ordering::Relaxed);
@@ -84,11 +85,14 @@ impl BrowserCoordinator {
     pub async fn execute(
         &self,
         msg_type: u8,
-        payload:  &[u8],
+        payload: &[u8],
     ) -> Result<String, crate::voice::worker_client::WorkerError> {
         if !self.is_available.load(Ordering::Relaxed) {
             return Err(crate::voice::worker_client::WorkerError::Io(
-                std::io::Error::new(std::io::ErrorKind::NotConnected, "browser worker unavailable")
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "browser worker unavailable",
+                ),
             ));
         }
 
@@ -97,12 +101,15 @@ impl BrowserCoordinator {
         let read_result = {
             let mut guard = self.client.lock().await;
             let client = guard.as_mut().ok_or_else(|| {
-                crate::voice::worker_client::WorkerError::Io(
-                    std::io::Error::new(std::io::ErrorKind::NotConnected, "browser worker slot is None")
-                )
+                crate::voice::worker_client::WorkerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "browser worker slot is None",
+                ))
             })?;
 
-            client.write_frame(msg_type, payload).await
+            client
+                .write_frame(msg_type, payload)
+                .await
                 .map_err(crate::voice::worker_client::WorkerError::Io)?;
 
             tokio::time::timeout(
@@ -116,20 +123,24 @@ impl BrowserCoordinator {
                                         std::io::Error::new(
                                             std::io::ErrorKind::InvalidData,
                                             "non-UTF8 browser result payload",
-                                        )
+                                        ),
                                     )
                                 });
                             }
                             Ok(Some(_)) => continue, // discard non-result frames (e.g. stray HEALTH_PONG)
-                            Ok(None) | Err(_) => return Err(
-                                crate::voice::worker_client::WorkerError::Io(
-                                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "browser worker closed")
-                                )
-                            ),
+                            Ok(None) | Err(_) => {
+                                return Err(crate::voice::worker_client::WorkerError::Io(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::BrokenPipe,
+                                        "browser worker closed",
+                                    ),
+                                ))
+                            }
                         }
                     }
-                }
-            ).await
+                },
+            )
+            .await
         };
         // Lock guard dropped here.
 
@@ -164,11 +175,13 @@ impl BrowserCoordinator {
         let healthy = {
             let mut guard = self.client.lock().await;
             match guard.as_mut() {
-                None         => false,
+                None => false,
                 Some(client) => client.health_check().await,
             }
         };
-        if healthy { return; }
+        if healthy {
+            return;
+        }
 
         let count = self.restart_count.fetch_add(1, Ordering::Relaxed);
         if count >= VOICE_WORKER_RESTART_MAX_ATTEMPTS {
@@ -179,7 +192,10 @@ impl BrowserCoordinator {
             return;
         }
 
-        warn!(restart_count = count + 1, "Browser worker unhealthy — restarting");
+        warn!(
+            restart_count = count + 1,
+            "Browser worker unhealthy — restarting"
+        );
         self.is_available.store(false, Ordering::Relaxed);
         *self.client.lock().await = None;
 
@@ -251,7 +267,8 @@ mod tests {
     #[test]
     fn is_permanently_degraded_true_when_count_at_max() {
         let c = BrowserCoordinator::new_degraded();
-        c.restart_count.store(VOICE_WORKER_RESTART_MAX_ATTEMPTS, Ordering::Relaxed);
+        c.restart_count
+            .store(VOICE_WORKER_RESTART_MAX_ATTEMPTS, Ordering::Relaxed);
         assert!(c.is_permanently_degraded());
     }
 }

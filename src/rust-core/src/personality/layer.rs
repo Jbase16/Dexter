@@ -1,4 +1,3 @@
-
 /// PersonalityLayer — loads and applies the operator's personality profile.
 ///
 /// The personality is a first-class architectural parameter, not a hardcoded system prompt.
@@ -56,7 +55,10 @@ impl fmt::Display for PersonalityError {
                 write!(f, "Personality profile not found at '{p}'")
             }
             PersonalityError::ParseError { path, source } => {
-                write!(f, "Failed to parse personality profile at '{path}': {source}")
+                write!(
+                    f,
+                    "Failed to parse personality profile at '{path}': {source}"
+                )
             }
         }
     }
@@ -89,14 +91,18 @@ pub struct ResponseStyle {
     pub never_pad_to_seem_thorough: bool,
 }
 
-fn default_verbosity()  -> String { "medium".to_string() }
-fn default_true()       -> bool   { true }
+fn default_verbosity() -> String {
+    "medium".to_string()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for ResponseStyle {
     fn default() -> Self {
         Self {
-            max_verbosity:           default_verbosity(),
-            code_always_formatted:   default_true(),
+            max_verbosity: default_verbosity(),
+            code_always_formatted: default_true(),
             never_pad_to_seem_thorough: default_true(),
         }
     }
@@ -208,20 +214,20 @@ fn default_system_prompt() -> String {
 impl Default for PersonalityProfile {
     fn default() -> Self {
         Self {
-            name:                  default_name(),
-            version:               "1.0".to_string(),
-            system_prompt_prefix:  default_system_prompt(),
-            tone_directives:       vec![
+            name: default_name(),
+            version: "1.0".to_string(),
+            system_prompt_prefix: default_system_prompt(),
+            tone_directives: vec![
                 "Be direct. Avoid corporate hedging language.".to_string(),
                 "Match the operator's register.".to_string(),
             ],
-            response_style:        ResponseStyle::default(),
-            anti_patterns:         vec![
+            response_style: ResponseStyle::default(),
+            anti_patterns: vec![
                 "Starting responses with 'Certainly!', 'Of course!', or 'Great!'".to_string(),
                 "Ending with 'Let me know if you need anything else!'".to_string(),
             ],
-            domains:               Vec::new(),
-            lora_adapter_path:     None,
+            domains: Vec::new(),
+            lora_adapter_path: None,
         }
     }
 }
@@ -248,9 +254,9 @@ impl PersonalityLayer {
         let content = std::fs::read_to_string(path)
             .map_err(|_| PersonalityError::FileNotFound(path_str.clone()))?;
 
-        let profile: PersonalityProfile = serde_yaml::from_str(&content)
-            .map_err(|e| PersonalityError::ParseError {
-                path:   path_str,
+        let profile: PersonalityProfile =
+            serde_yaml::from_str(&content).map_err(|e| PersonalityError::ParseError {
+                path: path_str,
                 source: e.to_string(),
             })?;
 
@@ -294,7 +300,9 @@ impl PersonalityLayer {
     /// Used as the fallback in `load_or_default()` and in unit tests that don't
     /// require a real YAML file on disk.
     pub fn with_defaults() -> Self {
-        Self { profile: PersonalityProfile::default() }
+        Self {
+            profile: PersonalityProfile::default(),
+        }
     }
 
     /// Return a reference to the loaded profile.
@@ -370,8 +378,14 @@ impl PersonalityLayer {
             .filter(|q| !q.is_empty());
 
         let matching: Vec<&DomainBlock> = match &query_lc {
-            Some(q) => p.domains.iter()
-                .filter(|d| d.triggers.iter().any(|t| !t.is_empty() && q.contains(&t.to_lowercase())))
+            Some(q) => p
+                .domains
+                .iter()
+                .filter(|d| {
+                    d.triggers
+                        .iter()
+                        .any(|t| !t.is_empty() && q.contains(&t.to_lowercase()))
+                })
                 .collect(),
             None => Vec::new(),
         };
@@ -383,7 +397,7 @@ impl PersonalityLayer {
             }
         }
 
-        let has_core_aps   = !p.anti_patterns.is_empty();
+        let has_core_aps = !p.anti_patterns.is_empty();
         let has_domain_aps = matching.iter().any(|d| !d.anti_patterns.is_empty());
         if has_core_aps || has_domain_aps {
             prompt.push_str("\n\nAnti-patterns to never use:");
@@ -431,10 +445,18 @@ impl PersonalityLayer {
     /// tests, debugging tools, and future callers.
     #[allow(dead_code)]
     pub fn matching_domain_names(&self, user_query: &str) -> Vec<String> {
-        if user_query.is_empty() { return Vec::new(); }
+        if user_query.is_empty() {
+            return Vec::new();
+        }
         let q = user_query.to_lowercase();
-        self.profile.domains.iter()
-            .filter(|d| d.triggers.iter().any(|t| !t.is_empty() && q.contains(&t.to_lowercase())))
+        self.profile
+            .domains
+            .iter()
+            .filter(|d| {
+                d.triggers
+                    .iter()
+                    .any(|t| !t.is_empty() && q.contains(&t.to_lowercase()))
+            })
             .map(|d| d.name.clone())
             .collect()
     }
@@ -465,7 +487,7 @@ impl PersonalityLayer {
     /// The returned Vec is owned — callers pass it directly to `InferenceEngine::generate_stream`.
     pub fn apply_to_messages_for(
         &self,
-        messages:   &[Message],
+        messages: &[Message],
         user_query: Option<&str>,
     ) -> Vec<Message> {
         let personality_prompt = self.build_system_prompt_for(user_query);
@@ -480,7 +502,8 @@ impl PersonalityLayer {
             Some(first) if first.role == "system" => {
                 // Prepend to existing system message. Personality comes first so
                 // operator-specified identity and tone aren't overridden by later context.
-                let merged_content = format!("{personality_prompt}\n\n{}", first.content.trim_start());
+                let merged_content =
+                    format!("{personality_prompt}\n\n{}", first.content.trim_start());
                 result.push(Message::system(merged_content));
                 result.extend_from_slice(&messages[1..]);
             }
@@ -511,21 +534,30 @@ mod tests {
         let layer = defaults();
         let prompt = layer.build_system_prompt();
         // The default profile's system_prompt_prefix should appear verbatim.
-        assert!(prompt.contains("Dexter"), "system prompt should include the entity name");
+        assert!(
+            prompt.contains("Dexter"),
+            "system prompt should include the entity name"
+        );
     }
 
     #[test]
     fn build_system_prompt_includes_tone_directives() {
         let layer = defaults();
         let prompt = layer.build_system_prompt();
-        assert!(prompt.contains("Communication rules:"), "should have a tone section");
+        assert!(
+            prompt.contains("Communication rules:"),
+            "should have a tone section"
+        );
     }
 
     #[test]
     fn build_system_prompt_includes_anti_patterns() {
         let layer = defaults();
         let prompt = layer.build_system_prompt();
-        assert!(prompt.contains("Anti-patterns"), "should have an anti-patterns section");
+        assert!(
+            prompt.contains("Anti-patterns"),
+            "should have an anti-patterns section"
+        );
     }
 
     #[test]
@@ -539,9 +571,7 @@ mod tests {
     #[test]
     fn apply_to_messages_inserts_system_before_user() {
         let layer = defaults();
-        let messages = vec![
-            Message::user("What time is it?".to_string()),
-        ];
+        let messages = vec![Message::user("What time is it?".to_string())];
         let result = layer.apply_to_messages(&messages);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, "system");
@@ -552,7 +582,9 @@ mod tests {
     fn apply_to_messages_prepends_to_existing_system() {
         let layer = defaults();
         let messages = vec![
-            Message::system("Operator-added context: the user is debugging a Rust binary.".to_string()),
+            Message::system(
+                "Operator-added context: the user is debugging a Rust binary.".to_string(),
+            ),
             Message::user("What's wrong with this code?".to_string()),
         ];
         let result = layer.apply_to_messages(&messages);
@@ -561,10 +593,14 @@ mod tests {
         assert_eq!(result[0].role, "system");
         // Personality prompt should appear before the operator context.
         let content = &result[0].content;
-        let personality_pos  = content.find("Dexter").unwrap_or(usize::MAX);
-        let operator_pos = content.find("debugging a Rust binary").unwrap_or(usize::MAX);
-        assert!(personality_pos < operator_pos,
-            "personality prompt must precede operator-added system context");
+        let personality_pos = content.find("Dexter").unwrap_or(usize::MAX);
+        let operator_pos = content
+            .find("debugging a Rust binary")
+            .unwrap_or(usize::MAX);
+        assert!(
+            personality_pos < operator_pos,
+            "personality prompt must precede operator-added system context"
+        );
         assert_eq!(result[1].role, "user");
     }
 
@@ -596,18 +632,27 @@ mod tests {
             return;
         }
         let result = PersonalityLayer::load(path);
-        assert!(result.is_ok(), "Project YAML should parse without errors: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Project YAML should parse without errors: {:?}",
+            result
+        );
         let layer = result.unwrap();
         assert_eq!(layer.profile().name, "Dexter");
-        assert!(layer.profile().system_prompt_prefix.contains("system level"),
-            "Loaded system_prompt_prefix should contain expected content");
+        assert!(
+            layer
+                .profile()
+                .system_prompt_prefix
+                .contains("system level"),
+            "Loaded system_prompt_prefix should contain expected content"
+        );
     }
 
     #[test]
     fn load_missing_file_returns_file_not_found() {
         let path = Path::new("/nonexistent/path/personality.yaml");
         match PersonalityLayer::load(path) {
-            Err(PersonalityError::FileNotFound(_)) => {}  // expected
+            Err(PersonalityError::FileNotFound(_)) => {} // expected
             other => panic!("expected FileNotFound, got: {other:?}"),
         }
     }
@@ -628,103 +673,129 @@ mod tests {
 
     fn profile_with_domain(name: &str, triggers: &[&str], content: &str) -> PersonalityProfile {
         PersonalityProfile {
-            name:                  default_name(),
-            version:               "1.0".to_string(),
-            system_prompt_prefix:  "core prompt".to_string(),
-            tone_directives:       Vec::new(),
-            response_style:        ResponseStyle::default(),
-            anti_patterns:         Vec::new(),
+            name: default_name(),
+            version: "1.0".to_string(),
+            system_prompt_prefix: "core prompt".to_string(),
+            tone_directives: Vec::new(),
+            response_style: ResponseStyle::default(),
+            anti_patterns: Vec::new(),
             domains: vec![DomainBlock {
-                name:          name.to_string(),
-                triggers:      triggers.iter().map(|t| t.to_string()).collect(),
-                content:       content.to_string(),
+                name: name.to_string(),
+                triggers: triggers.iter().map(|t| t.to_string()).collect(),
+                content: content.to_string(),
                 anti_patterns: Vec::new(),
             }],
-            lora_adapter_path:     None,
+            lora_adapter_path: None,
         }
     }
 
     #[test]
     fn domain_block_not_loaded_when_no_query_hint() {
-        let layer = PersonalityLayer { profile: profile_with_domain("imessage", &["imessage"], "IMSG BLOCK") };
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("imessage", &["imessage"], "IMSG BLOCK"),
+        };
         let prompt = layer.build_system_prompt();
-        assert!(!prompt.contains("IMSG BLOCK"),
-            "domain block must not load without a query hint");
+        assert!(
+            !prompt.contains("IMSG BLOCK"),
+            "domain block must not load without a query hint"
+        );
     }
 
     #[test]
     fn domain_block_loads_on_trigger_match() {
-        let layer = PersonalityLayer { profile: profile_with_domain("imessage", &["imessage", "text"], "IMSG BLOCK") };
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("imessage", &["imessage", "text"], "IMSG BLOCK"),
+        };
         let prompt = layer.build_system_prompt_for(Some("send an iMessage to Mom"));
-        assert!(prompt.contains("IMSG BLOCK"),
-            "domain must load when user query contains a trigger");
+        assert!(
+            prompt.contains("IMSG BLOCK"),
+            "domain must load when user query contains a trigger"
+        );
     }
 
     #[test]
     fn domain_block_trigger_match_is_case_insensitive() {
-        let layer = PersonalityLayer { profile: profile_with_domain("imessage", &["IMESSAGE"], "IMSG BLOCK") };
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("imessage", &["IMESSAGE"], "IMSG BLOCK"),
+        };
         let prompt = layer.build_system_prompt_for(Some("send an imessage to mom"));
-        assert!(prompt.contains("IMSG BLOCK"),
-            "trigger matching must be case-insensitive");
+        assert!(
+            prompt.contains("IMSG BLOCK"),
+            "trigger matching must be case-insensitive"
+        );
     }
 
     #[test]
     fn domain_block_does_not_load_on_unrelated_query() {
-        let layer = PersonalityLayer { profile: profile_with_domain("imessage", &["imessage"], "IMSG BLOCK") };
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("imessage", &["imessage"], "IMSG BLOCK"),
+        };
         let prompt = layer.build_system_prompt_for(Some("what time is it?"));
-        assert!(!prompt.contains("IMSG BLOCK"),
-            "domain must not load when no trigger matches");
+        assert!(
+            !prompt.contains("IMSG BLOCK"),
+            "domain must not load when no trigger matches"
+        );
     }
 
     #[test]
     fn empty_trigger_is_ignored_rather_than_matching_everything() {
         // Guard against a misconfigured YAML where `triggers: [""]` would
         // otherwise match every query — that would defeat the whole point of T1.2.
-        let layer = PersonalityLayer { profile: profile_with_domain("bug", &[""], "LEAK") };
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("bug", &[""], "LEAK"),
+        };
         let prompt = layer.build_system_prompt_for(Some("anything"));
-        assert!(!prompt.contains("LEAK"),
-            "empty triggers must not match — would cause unconditional injection");
+        assert!(
+            !prompt.contains("LEAK"),
+            "empty triggers must not match — would cause unconditional injection"
+        );
     }
 
     #[test]
     fn domain_anti_patterns_loaded_with_content() {
         let profile = PersonalityProfile {
-            name:                 default_name(),
-            version:              "1.0".to_string(),
+            name: default_name(),
+            version: "1.0".to_string(),
             system_prompt_prefix: "core".to_string(),
-            tone_directives:      Vec::new(),
-            response_style:       ResponseStyle::default(),
-            anti_patterns:        vec!["core AP".to_string()],
+            tone_directives: Vec::new(),
+            response_style: ResponseStyle::default(),
+            anti_patterns: vec!["core AP".to_string()],
             domains: vec![DomainBlock {
-                name:          "imessage".to_string(),
-                triggers:      vec!["imessage".to_string()],
-                content:       "IMSG CONTENT".to_string(),
+                name: "imessage".to_string(),
+                triggers: vec!["imessage".to_string()],
+                content: "IMSG CONTENT".to_string(),
                 anti_patterns: vec!["IMSG AP".to_string()],
             }],
             lora_adapter_path: None,
         };
         let layer = PersonalityLayer { profile };
 
-        let with_match    = layer.build_system_prompt_for(Some("send imessage"));
+        let with_match = layer.build_system_prompt_for(Some("send imessage"));
         let without_match = layer.build_system_prompt_for(Some("what time is it"));
 
-        assert!(with_match.contains("IMSG AP"),
-            "domain anti-pattern must appear when the domain matches");
-        assert!(without_match.contains("core AP"),
-            "core anti-pattern must always appear");
-        assert!(!without_match.contains("IMSG AP"),
-            "domain anti-pattern must NOT appear without a trigger match");
+        assert!(
+            with_match.contains("IMSG AP"),
+            "domain anti-pattern must appear when the domain matches"
+        );
+        assert!(
+            without_match.contains("core AP"),
+            "core anti-pattern must always appear"
+        );
+        assert!(
+            !without_match.contains("IMSG AP"),
+            "domain anti-pattern must NOT appear without a trigger match"
+        );
     }
 
     #[test]
     fn matching_domain_names_reports_what_loaded() {
         let profile = PersonalityProfile {
-            name:                 default_name(),
-            version:              "1.0".to_string(),
+            name: default_name(),
+            version: "1.0".to_string(),
             system_prompt_prefix: "core".to_string(),
-            tone_directives:      Vec::new(),
-            response_style:       ResponseStyle::default(),
-            anti_patterns:        Vec::new(),
+            tone_directives: Vec::new(),
+            response_style: ResponseStyle::default(),
+            anti_patterns: Vec::new(),
             domains: vec![
                 DomainBlock {
                     name: "imessage".to_string(),
@@ -743,8 +814,14 @@ mod tests {
         };
         let layer = PersonalityLayer { profile };
 
-        assert_eq!(layer.matching_domain_names("download that video"), vec!["download"]);
-        assert_eq!(layer.matching_domain_names("what time is it"), Vec::<String>::new());
+        assert_eq!(
+            layer.matching_domain_names("download that video"),
+            vec!["download"]
+        );
+        assert_eq!(
+            layer.matching_domain_names("what time is it"),
+            Vec::<String>::new()
+        );
         // Multi-match: both trigger.
         let mut both = layer.matching_domain_names("imessage me after the download");
         both.sort();
@@ -753,16 +830,22 @@ mod tests {
 
     #[test]
     fn apply_to_messages_for_injects_domain_content_into_system_prompt() {
-        let layer = PersonalityLayer { profile: profile_with_domain("download", &["yt-dlp"], "YT DLP CONTENT") };
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("download", &["yt-dlp"], "YT DLP CONTENT"),
+        };
         let messages = vec![Message::user("run yt-dlp on this".to_string())];
 
-        let with_hint    = layer.apply_to_messages_for(&messages, Some("run yt-dlp on this"));
+        let with_hint = layer.apply_to_messages_for(&messages, Some("run yt-dlp on this"));
         let without_hint = layer.apply_to_messages_for(&messages, None);
 
-        assert!(with_hint[0].content.contains("YT DLP CONTENT"),
-            "domain content must appear in system message when hint matches");
-        assert!(!without_hint[0].content.contains("YT DLP CONTENT"),
-            "domain content must NOT appear when hint is None");
+        assert!(
+            with_hint[0].content.contains("YT DLP CONTENT"),
+            "domain content must appear in system message when hint matches"
+        );
+        assert!(
+            !without_hint[0].content.contains("YT DLP CONTENT"),
+            "domain content must NOT appear when hint is None"
+        );
     }
 
     #[test]
@@ -771,7 +854,10 @@ mod tests {
         // The result must match build_system_prompt_for(None) exactly —
         // guards against accidental drift between the two APIs.
         let layer = PersonalityLayer::with_defaults();
-        assert_eq!(layer.build_system_prompt(), layer.build_system_prompt_for(None));
+        assert_eq!(
+            layer.build_system_prompt(),
+            layer.build_system_prompt_for(None)
+        );
     }
 
     #[test]
@@ -782,10 +868,11 @@ mod tests {
         // write_all with a byte literal avoids Rust format-string escaping entirely.
         // The content is structurally invalid YAML (unclosed bracket) so serde_yaml
         // must return a parse error regardless of field matching.
-        tmp.write_all(b"name: [unclosed bracket invalid yaml").expect("write");
+        tmp.write_all(b"name: [unclosed bracket invalid yaml")
+            .expect("write");
         let path = tmp.path().to_owned();
         match PersonalityLayer::load(&path) {
-            Err(PersonalityError::ParseError { .. }) => {}  // expected
+            Err(PersonalityError::ParseError { .. }) => {} // expected
             other => panic!("expected ParseError, got: {other:?}"),
         }
     }

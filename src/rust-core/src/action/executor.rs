@@ -20,10 +20,7 @@ use std::{
 use tokio::{process::Command, time::timeout};
 use tracing::warn;
 
-use crate::{
-    browser::coordinator::BrowserCoordinator,
-    voice::protocol::msg,
-};
+use crate::{browser::coordinator::BrowserCoordinator, voice::protocol::msg};
 
 use super::engine::BrowserActionKind;
 
@@ -34,13 +31,13 @@ use super::engine::BrowserActionKind;
 #[derive(Debug)]
 pub struct ExecutionResult {
     /// Process exited 0 / IO succeeded.
-    pub success:     bool,
+    pub success: bool,
     /// Stdout (shell/AppleScript) or file content (file_read) or bytes-written note (file_write).
-    pub output:      String,
+    pub output: String,
     /// Stderr or IO error description. Empty string on success.
-    pub error:       String,
+    pub error: String,
     /// Process exit code. `None` for pure IO operations (file_read/file_write), timeouts.
-    pub exit_code:   Option<i32>,
+    pub exit_code: Option<i32>,
     /// Wall-clock duration of the execution in milliseconds.
     pub duration_ms: u64,
 }
@@ -94,9 +91,11 @@ pub(crate) fn normalize_for_policy(path: &std::path::Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in expanded.components() {
         match component {
-            Component::ParentDir => { out.pop(); }
-            Component::CurDir   => {}
-            other               => out.push(other.as_os_str()),
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
         }
     }
     out
@@ -123,8 +122,10 @@ pub fn describe_normalized_shell_command(args: &[String]) -> Option<String> {
         return None;
     }
     let has_gnu = args[1..].iter().any(|a| {
-        a.starts_with("--sort") || a.starts_with("--format")
-            || a.starts_with("--no-header") || a == "--deselect"
+        a.starts_with("--sort")
+            || a.starts_with("--format")
+            || a.starts_with("--no-header")
+            || a == "--deselect"
     });
     // Also catch -eo which is Linux procps syntax (macOS uses -Ao or -A -o).
     let has_eo = args[1..].iter().any(|a| a == "-eo");
@@ -180,11 +181,7 @@ fn normalize_shell_args(args: &[String]) -> Vec<String> {
                 // Route through bash -c so the pipe is handled by the shell.
                 // This is the one place we intentionally use a shell pipeline;
                 // the string is hardcoded, not operator-supplied, so injection is N/A.
-                return vec![
-                    "bash".to_string(),
-                    "-c".to_string(),
-                    pipeline.to_string(),
-                ];
+                return vec!["bash".to_string(), "-c".to_string(), pipeline.to_string()];
             }
         }
         "ls" => {
@@ -218,18 +215,18 @@ fn normalize_shell_args(args: &[String]) -> Vec<String> {
 /// All args have `~` expanded before being passed to the OS — the kernel does not
 /// process tilde expansion (that is a shell convenience, not an OS feature).
 pub async fn execute_shell(
-    args:         &[String],
-    working_dir:  Option<&PathBuf>,
+    args: &[String],
+    working_dir: Option<&PathBuf>,
     timeout_secs: u64,
 ) -> ExecutionResult {
     let start = Instant::now();
 
     if args.is_empty() {
         return ExecutionResult {
-            success:     false,
-            output:      String::new(),
-            error:       "empty args — no command to execute".to_string(),
-            exit_code:   None,
+            success: false,
+            output: String::new(),
+            error: "empty args — no command to execute".to_string(),
+            exit_code: None,
             duration_ms: 0,
         };
     }
@@ -264,15 +261,15 @@ pub async fn execute_shell(
                  Either omit working_dir or supply a path that exists."
             );
             return ExecutionResult {
-                success:     false,
-                output:      String::new(),
-                error:       format!(
+                success: false,
+                output: String::new(),
+                error: format!(
                     "working_dir does not exist: {}. \
                      Refusing to silently use the daemon's working directory; \
                      either omit working_dir or supply a path that exists.",
                     expanded_dir.display()
                 ),
-                exit_code:   None,
+                exit_code: None,
                 duration_ms: start.elapsed().as_millis() as u64,
             };
         }
@@ -287,32 +284,30 @@ pub async fn execute_shell(
             // timeout fired — Tokio drops the `cmd.output()` future, which drops
             // the inner Child, which sends SIGKILL via kill_on_drop(true) above.
             ExecutionResult {
-                success:     false,
-                output:      String::new(),
-                error:       format!("timed out after {}s", timeout_secs),
-                exit_code:   None,
+                success: false,
+                output: String::new(),
+                error: format!("timed out after {}s", timeout_secs),
+                exit_code: None,
                 duration_ms,
             }
         }
         Ok(Err(io_err)) => {
             // spawn or wait failed (command not found, permission denied, etc.)
             ExecutionResult {
-                success:     false,
-                output:      String::new(),
-                error:       io_err.to_string(),
-                exit_code:   None,
+                success: false,
+                output: String::new(),
+                error: io_err.to_string(),
+                exit_code: None,
                 duration_ms,
             }
         }
-        Ok(Ok(output)) => {
-            ExecutionResult {
-                success:     output.status.success(),
-                output:      String::from_utf8_lossy(&output.stdout).to_string(),
-                error:       String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code:   output.status.code(),
-                duration_ms,
-            }
-        }
+        Ok(Ok(output)) => ExecutionResult {
+            success: output.status.success(),
+            output: String::from_utf8_lossy(&output.stdout).to_string(),
+            error: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code(),
+            duration_ms,
+        },
     }
 }
 
@@ -326,30 +321,30 @@ pub async fn execute_file_read(path: &PathBuf) -> ExecutionResult {
     // the model to loop. Binary files (webm, mp4, etc.) must not be read this way.
     match tokio::fs::read(&resolved).await {
         Err(e) => ExecutionResult {
-            success:     false,
-            output:      String::new(),
-            error:       e.to_string(),
-            exit_code:   None,
+            success: false,
+            output: String::new(),
+            error: e.to_string(),
+            exit_code: None,
             duration_ms: start.elapsed().as_millis() as u64,
         },
         Ok(bytes) => match String::from_utf8(bytes.clone()) {
             Ok(content) => ExecutionResult {
-                success:     true,
-                output:      content,
-                error:       String::new(),
-                exit_code:   Some(0),
+                success: true,
+                output: content,
+                error: String::new(),
+                exit_code: Some(0),
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             Err(_) => ExecutionResult {
-                success:     false,
-                output:      String::new(),
-                error:       format!(
+                success: false,
+                output: String::new(),
+                error: format!(
                     "binary file ({} bytes) — cannot display as text. \
                      Use `shell: ls ~/Desktop/` to verify existence, or `shell: file <path>` \
                      to inspect type.",
                     bytes.len()
                 ),
-                exit_code:   None,
+                exit_code: None,
                 duration_ms: start.elapsed().as_millis() as u64,
             },
         },
@@ -359,8 +354,8 @@ pub async fn execute_file_read(path: &PathBuf) -> ExecutionResult {
 // ── execute_file_write ────────────────────────────────────────────────────────
 
 pub async fn execute_file_write(
-    path:        &PathBuf,
-    content:     &str,
+    path: &PathBuf,
+    content: &str,
     create_dirs: bool,
 ) -> ExecutionResult {
     let start = Instant::now();
@@ -375,10 +370,10 @@ pub async fn execute_file_write(
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 return ExecutionResult {
-                    success:     false,
-                    output:      String::new(),
-                    error:       format!("create_dir_all failed: {e}"),
-                    exit_code:   None,
+                    success: false,
+                    output: String::new(),
+                    error: format!("create_dir_all failed: {e}"),
+                    exit_code: None,
                     duration_ms: start.elapsed().as_millis() as u64,
                 };
             }
@@ -388,17 +383,17 @@ pub async fn execute_file_write(
     let byte_count = content.len();
     match tokio::fs::write(path, content).await {
         Ok(()) => ExecutionResult {
-            success:     true,
-            output:      format!("wrote {} bytes to {}", byte_count, path.display()),
-            error:       String::new(),
-            exit_code:   Some(0),
+            success: true,
+            output: format!("wrote {} bytes to {}", byte_count, path.display()),
+            error: String::new(),
+            exit_code: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
         },
         Err(e) => ExecutionResult {
-            success:     false,
-            output:      String::new(),
-            error:       e.to_string(),
-            exit_code:   None,
+            success: false,
+            output: String::new(),
+            error: e.to_string(),
+            exit_code: None,
             duration_ms: start.elapsed().as_millis() as u64,
         },
     }
@@ -429,9 +424,9 @@ pub async fn execute_applescript(script: &str, timeout_secs: u64) -> ExecutionRe
 /// - The command times out (BROWSER_WORKER_RESULT_TIMEOUT_SECS)
 /// - The worker returns {"success": false, "error": "..."}
 pub async fn execute_browser(
-    coordinator:  &BrowserCoordinator,
-    action:       &BrowserActionKind,
-    _timeout_secs: u64,   // timeout is enforced inside coordinator.execute()
+    coordinator: &BrowserCoordinator,
+    action: &BrowserActionKind,
+    _timeout_secs: u64, // timeout is enforced inside coordinator.execute()
 ) -> ExecutionResult {
     let start = Instant::now();
 
@@ -442,26 +437,26 @@ pub async fn execute_browser(
 
     match result {
         Err(e) => ExecutionResult {
-            success:     false,
-            output:      String::new(),
-            error:       format!("Browser worker error: {e}"),
-            exit_code:   None,
+            success: false,
+            output: String::new(),
+            error: format!("Browser worker error: {e}"),
+            exit_code: None,
             duration_ms,
         },
         Ok(json_str) => {
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Err(e) => ExecutionResult {
-                    success:     false,
-                    output:      String::new(),
-                    error:       format!("Browser result parse error: {e}"),
-                    exit_code:   None,
+                    success: false,
+                    output: String::new(),
+                    error: format!("Browser result parse error: {e}"),
+                    exit_code: None,
                     duration_ms,
                 },
                 Ok(val) => ExecutionResult {
-                    success:     val["success"].as_bool().unwrap_or(false),
-                    output:      val["output"].as_str().unwrap_or("").to_string(),
-                    error:       val["error"].as_str().unwrap_or("").to_string(),
-                    exit_code:   None,  // browser actions have no process exit code
+                    success: val["success"].as_bool().unwrap_or(false),
+                    output: val["output"].as_str().unwrap_or("").to_string(),
+                    error: val["error"].as_str().unwrap_or("").to_string(),
+                    exit_code: None, // browser actions have no process exit code
                     duration_ms,
                 },
             }
@@ -481,20 +476,23 @@ fn build_browser_frame(action: &BrowserActionKind) -> (u8, Vec<u8>) {
         ),
         BrowserActionKind::Click { selector } => (
             msg::BROWSER_CLICK,
-            serde_json::json!({"selector": selector}).to_string().into_bytes(),
+            serde_json::json!({"selector": selector})
+                .to_string()
+                .into_bytes(),
         ),
         BrowserActionKind::Type { selector, text } => (
             msg::BROWSER_TYPE,
-            serde_json::json!({"selector": selector, "text": text}).to_string().into_bytes(),
+            serde_json::json!({"selector": selector, "text": text})
+                .to_string()
+                .into_bytes(),
         ),
         BrowserActionKind::Extract { selector } => (
             msg::BROWSER_EXTRACT,
-            serde_json::json!({"selector": selector}).to_string().into_bytes(),
+            serde_json::json!({"selector": selector})
+                .to_string()
+                .into_bytes(),
         ),
-        BrowserActionKind::Screenshot => (
-            msg::BROWSER_SCREENSHOT,
-            vec![],
-        ),
+        BrowserActionKind::Screenshot => (msg::BROWSER_SCREENSHOT, vec![]),
     }
 }
 
@@ -506,15 +504,18 @@ fn build_browser_frame(action: &BrowserActionKind) -> (u8, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::constants::ACTION_DEFAULT_TIMEOUT_SECS;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn execute_shell_echo_succeeds() {
         let args: Vec<String> = vec!["echo".to_string(), "hello-dexter".to_string()];
         let result = execute_shell(&args, None, ACTION_DEFAULT_TIMEOUT_SECS).await;
         assert!(result.success, "echo should succeed: {:?}", result.error);
-        assert!(result.output.contains("hello-dexter"), "stdout must contain the echoed string");
+        assert!(
+            result.output.contains("hello-dexter"),
+            "stdout must contain the echoed string"
+        );
         assert_eq!(result.exit_code, Some(0));
     }
 
@@ -535,8 +536,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_file_read_reads_temp_file() {
-        let tmp    = tempdir().unwrap();
-        let path   = tmp.path().join("test.txt");
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("test.txt");
         let expect = "dexter phase 8 test content";
         std::fs::write(&path, expect).unwrap();
 
@@ -555,9 +556,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_file_write_creates_and_reads_back() {
-        let tmp   = tempdir().unwrap();
-        let path  = tmp.path().join("out.txt");
-        let data  = "written by dexter phase 8";
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("out.txt");
+        let data = "written by dexter phase 8";
 
         let wr = execute_file_write(&path, data, false).await;
         assert!(wr.success, "write should succeed: {:?}", wr.error);
@@ -568,23 +569,33 @@ mod tests {
 
     #[tokio::test]
     async fn execute_file_write_with_create_dirs() {
-        let tmp  = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
         let path = tmp.path().join("nested/dir/out.txt");
         let data = "nested write";
 
         let wr = execute_file_write(&path, data, true).await;
-        assert!(wr.success, "write with create_dirs should succeed: {:?}", wr.error);
+        assert!(
+            wr.success,
+            "write with create_dirs should succeed: {:?}",
+            wr.error
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), data);
     }
 
     #[tokio::test]
     async fn execute_applescript_return_value() {
         // osascript -e 'return "dexter_ok"' → stdout: "dexter_ok\n"
-        let result = execute_applescript(r#"return "dexter_ok""#, ACTION_DEFAULT_TIMEOUT_SECS).await;
-        assert!(result.success, "osascript should succeed: {:?}", result.error);
+        let result =
+            execute_applescript(r#"return "dexter_ok""#, ACTION_DEFAULT_TIMEOUT_SECS).await;
+        assert!(
+            result.success,
+            "osascript should succeed: {:?}",
+            result.error
+        );
         assert!(
             result.output.contains("dexter_ok"),
-            "osascript stdout must contain return value, got: {:?}", result.output
+            "osascript stdout must contain return value, got: {:?}",
+            result.output
         );
     }
 
@@ -595,30 +606,36 @@ mod tests {
         // Pre-Phase-38 behavior: silently fall back to daemon cwd with a warn!,
         // potentially mutating an unrelated tree. Now we fail explicitly so the
         // model gets the bad-path back and can correct on the continuation turn.
-        let bad_dir  = PathBuf::from("/tmp/dexter_phase38_no_such_dir_xyz");
-        let args     = vec!["echo".to_string(), "hi".to_string()];
-        let result   = execute_shell(&args, Some(&bad_dir), ACTION_DEFAULT_TIMEOUT_SECS).await;
+        let bad_dir = PathBuf::from("/tmp/dexter_phase38_no_such_dir_xyz");
+        let args = vec!["echo".to_string(), "hi".to_string()];
+        let result = execute_shell(&args, Some(&bad_dir), ACTION_DEFAULT_TIMEOUT_SECS).await;
 
         assert!(!result.success, "missing working_dir must fail the action");
         assert!(
             result.error.contains("working_dir does not exist"),
-            "error must name the failure mode, got: {:?}", result.error
+            "error must name the failure mode, got: {:?}",
+            result.error
         );
         assert!(
             result.error.contains("dexter_phase38_no_such_dir_xyz"),
-            "error must include the bad path so the model can correct it, got: {:?}", result.error
+            "error must include the bad path so the model can correct it, got: {:?}",
+            result.error
         );
     }
 
     #[tokio::test]
     async fn execute_shell_existing_working_dir_succeeds() {
         // Regression guard: a valid working_dir must still work normally.
-        let tmp  = tempdir().unwrap();
-        let dir  = tmp.path().to_path_buf();
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let args = vec!["echo".to_string(), "hi".to_string()];
         let result = execute_shell(&args, Some(&dir), ACTION_DEFAULT_TIMEOUT_SECS).await;
 
-        assert!(result.success, "valid working_dir should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "valid working_dir should succeed: {:?}",
+            result.error
+        );
         assert!(result.output.contains("hi"));
     }
 
@@ -632,7 +649,8 @@ mod tests {
 
     #[test]
     fn normalize_for_policy_collapses_curdir() {
-        let normalized = normalize_for_policy(std::path::Path::new("/Users/jason/./notes/./file.txt"));
+        let normalized =
+            normalize_for_policy(std::path::Path::new("/Users/jason/./notes/./file.txt"));
         assert_eq!(normalized, PathBuf::from("/Users/jason/notes/file.txt"));
     }
 
@@ -644,7 +662,10 @@ mod tests {
         let s = normalized.to_string_lossy().to_string();
         assert!(!s.starts_with("~"), "tilde must be expanded, got {s}");
         assert!(s.starts_with("/"), "result must be absolute, got {s}");
-        assert!(s.ends_with("/file.txt"), "filename must be preserved, got {s}");
+        assert!(
+            s.ends_with("/file.txt"),
+            "filename must be preserved, got {s}"
+        );
     }
 
     #[test]
@@ -652,7 +673,9 @@ mod tests {
         // The exact attack: ~/../../etc/hosts. Normalize must collapse both.
         let normalized = normalize_for_policy(std::path::Path::new("~/../../etc/hosts"));
         let s = normalized.to_string_lossy().to_string();
-        assert!(s.ends_with("/etc/hosts") || s == "/etc/hosts",
-                "tilde + dotdot must normalize to a system path so policy can flag it, got {s}");
+        assert!(
+            s.ends_with("/etc/hosts") || s == "/etc/hosts",
+            "tilde + dotdot must normalize to a system path so policy can flag it, got {s}"
+        );
     }
 }

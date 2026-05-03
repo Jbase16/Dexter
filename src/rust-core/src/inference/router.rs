@@ -1,4 +1,3 @@
-
 /// ModelRouter and ConversationContext for Dexter's inference tier selection.
 ///
 /// ## ModelRouter
@@ -65,7 +64,6 @@
 /// Truncation drops the oldest pairs first. A pair is always dropped atomically (never
 /// just the user or just the assistant turn) to prevent models that enforce strict
 /// role-alternation from getting confused by orphaned messages.
-
 use tracing::{debug, info};
 
 use super::engine::{Message, MessageOrigin};
@@ -112,17 +110,19 @@ pub enum Category {
 pub struct Complexity(pub u8);
 
 impl Complexity {
-    pub const TRIVIAL:  Self = Self(0);
+    pub const TRIVIAL: Self = Self(0);
     /// Phase 37.5 / B4: no longer referenced in the routing table match arms
     /// (Chat/complexity=1 is now folded into the `≤ MODERATE` bucket), but kept
     /// as part of the public 0–3 scale documentation for tests, future tuning,
     /// and external callers reasoning about complexity values.
     #[allow(dead_code)]
-    pub const SIMPLE:   Self = Self(1);
+    pub const SIMPLE: Self = Self(1);
     pub const MODERATE: Self = Self(2);
-    pub const DEEP:     Self = Self(3);
+    pub const DEEP: Self = Self(3);
 
-    pub fn value(&self) -> u8 { self.0 }
+    pub fn value(&self) -> u8 {
+        self.0
+    }
 }
 
 // ── RoutingDecision ───────────────────────────────────────────────────────────
@@ -136,22 +136,22 @@ impl Complexity {
 #[derive(Debug, Clone)]
 pub struct RoutingDecision {
     /// The primary model tier selected.
-    pub model:      ModelId,
+    pub model: ModelId,
 
     /// Detected category from stage 1.
-    pub category:   Category,
+    pub category: Category,
 
     /// Complexity score from stage 2.
     pub complexity: Complexity,
 
     /// Human-readable explanation of the routing decision.
     /// Written to tracing logs. Format: "category=code complexity=2 → PRIMARY (fallback: CODE)"
-    pub reasoning:  String,
+    pub reasoning: String,
 
     /// Fallback model if the primary tier is unavailable.
     /// Only set when the primary choice is a heavier model that might not be loaded.
     #[allow(dead_code)] // Phase 7 — availability checks before model dispatch
-    pub fallback:   Option<ModelId>,
+    pub fallback: Option<ModelId>,
 
     /// Provenance marker for sticky inheritance.
     ///
@@ -202,27 +202,27 @@ impl ModelRouter {
         // walking `role == "user"` would let synthetic content poison direct
         // classification whenever a tool result happened to be the most recent
         // role="user" message in the buffer.
-        let last_user_text: &str = messages.iter()
+        let last_user_text: &str = messages
+            .iter()
             .rev()
             .find(|m| m.origin == MessageOrigin::User)
             .map(|m| m.content.as_str())
             .unwrap_or("");
 
         let direct_category = self.classify_category(last_user_text);
-        let complexity      = self.score_complexity(last_user_text);
+        let complexity = self.score_complexity(last_user_text);
 
         // Sticky-inheritance pass: only considered when direct classification is Chat.
         // If the current utterance carries its own strong signal (Code/Vision/Retrieval),
         // inheritance never fires — direct wins. This is the asymmetry: inheritance only
         // fills in for ambiguity, never overrides a confident direct read.
-        let inherited_category = self.maybe_inherit_category(
-            direct_category.clone(),
-            last_user_text,
-            messages,
-        );
+        let inherited_category =
+            self.maybe_inherit_category(direct_category.clone(), last_user_text, messages);
 
         // Resolved category: inherited if inheritance fired, otherwise direct.
-        let category = inherited_category.clone().unwrap_or_else(|| direct_category.clone());
+        let category = inherited_category
+            .clone()
+            .unwrap_or_else(|| direct_category.clone());
 
         let (model, fallback, base_reasoning) = self.select_model(&category, complexity);
 
@@ -231,8 +231,10 @@ impl ModelRouter {
         // is suppressed here and on the `inherited_category` field — logs record
         // causal deltas, not possibilities.
         let reasoning = if let Some(ref inh) = inherited_category {
-            format!("{base_reasoning} (inherited from prior turn: direct={:?} → {:?})",
-                    direct_category, inh)
+            format!(
+                "{base_reasoning} (inherited from prior turn: direct={:?} → {:?})",
+                direct_category, inh
+            )
         } else {
             base_reasoning
         };
@@ -310,7 +312,8 @@ impl ModelRouter {
         // synthetic retrieved sentence could silently break inheritance by
         // classifying as non-ambiguous Chat, or a tool-result text could be
         // mistaken for the source of an inherited category.
-        let prior_user_texts: Vec<&str> = messages.iter()
+        let prior_user_texts: Vec<&str> = messages
+            .iter()
             .filter(|m| m.origin == MessageOrigin::User)
             .map(|m| m.content.as_str())
             .collect();
@@ -375,11 +378,22 @@ impl ModelRouter {
         // code (e.g., "look at this screenshot of a compile error").
         // Phase 20: extended with natural-language screen-reference phrases that users
         // say when they want Dexter to look at what's on the display.
-        if contains_any(&lower, &[
-            "screenshot", "image", "picture", "photo", "look at this",
-            "what do you see", "what's on screen", "on the screen",
-            "see my screen", "look at the screen", "look at my screen",
-        ]) {
+        if contains_any(
+            &lower,
+            &[
+                "screenshot",
+                "image",
+                "picture",
+                "photo",
+                "look at this",
+                "what do you see",
+                "what's on screen",
+                "on the screen",
+                "see my screen",
+                "look at the screen",
+                "look at my screen",
+            ],
+        ) {
             return Category::Vision;
         }
 
@@ -395,26 +409,50 @@ impl ModelRouter {
         // NOTE: "what time is it" / "what day is it" are intentionally excluded.
         // Those are system-state queries the model can answer via a `date` shell action —
         // routing them to DuckDuckGo returns useless results. They fall through to Chat/FAST.
-        if contains_any(&lower, &[
-            // Versions / releases
-            "current version of", "latest version of", "what is the current",
-            "what's the current", "latest release", "release notes",
-            "what changed in", "ships with",
-            // News / events
-            "what are the latest", "recent news", "breaking news",
-            "happening today", "happening now",
-            // Weather
-            "today's weather", "weather today", "weather forecast",
-            "what's the weather", "what is the weather",
-            // Office-holders / leadership
-            "current price of", "who is the current",
-            "current ceo", "current president", "current leader",
-            "who runs", "who leads",
-            // Markets
-            "stock price of", "share price of", "exchange rate",
-            // Sports
-            "sports score", "game score", "game tonight", "standings", "who won",
-        ]) {
+        if contains_any(
+            &lower,
+            &[
+                // Versions / releases
+                "current version of",
+                "latest version of",
+                "what is the current",
+                "what's the current",
+                "latest release",
+                "release notes",
+                "what changed in",
+                "ships with",
+                // News / events
+                "what are the latest",
+                "recent news",
+                "breaking news",
+                "happening today",
+                "happening now",
+                // Weather
+                "today's weather",
+                "weather today",
+                "weather forecast",
+                "what's the weather",
+                "what is the weather",
+                // Office-holders / leadership
+                "current price of",
+                "who is the current",
+                "current ceo",
+                "current president",
+                "current leader",
+                "who runs",
+                "who leads",
+                // Markets
+                "stock price of",
+                "share price of",
+                "exchange rate",
+                // Sports
+                "sports score",
+                "game score",
+                "game tonight",
+                "standings",
+                "who won",
+            ],
+        ) {
             return Category::RetrievalFirst;
         }
 
@@ -427,89 +465,209 @@ impl ModelRouter {
         // terms, error-shape patterns, and API/system-design phrases. These domain
         // signals are far more robust than English verbs — `fn `, `.rs`, `cargo`,
         // and ``` almost never appear in non-code conversation.
-        if contains_any(&lower, &[
-            // Direct programming intent
-            "implement ", "write a function", "write a class", "write a struct",
-            "write a test", "write unit test", "write integration test",
-            "refactor ", "write the code", "generate code",
-            "code this", "code the ", "debug this", "fix this bug", "fix the bug",
-            "fix this error", "fix this warning", "fix this test",
-            "compile error", "runtime error", "type error", "syntax error",
-            "this function", "this method", "this class", "this struct",
-            "update this function", "add a function", "add a method",
-            "how do i implement", "how do i write",
-            // Code fences (unambiguous programming context)
-            "```",
-            // File extensions — space/punctuation-delimited to avoid false matches
-            // inside unrelated words. `.rs `, `.rs,`, `.rs.`, `.rs?` etc.
-            ".rs ", ".rs,", ".rs.", ".rs?", ".rs:", ".rs\n",
-            ".py ", ".py,", ".py.", ".py?", ".py:", ".py\n",
-            ".ts ", ".ts,", ".ts.", ".ts?", ".ts:", ".ts\n",
-            ".tsx", ".jsx",
-            ".js ", ".js,", ".js.", ".js?", ".js:", ".js\n",
-            ".go ", ".go,", ".go.", ".go?", ".go:", ".go\n",
-            ".swift", ".cpp", ".hpp", ".java ", ".kt ", ".rb ", ".scala",
-            // Language-specific syntax markers. Deliberately pruned: bare
-            // "class ", "interface ", "trait " are dropped because they're
-            // common in non-code English ("world class", "user interface",
-            // "personality trait"). Keeping only markers that are either
-            // symbol-flavored ("pub fn", "async fn") or rare enough in prose
-            // ("struct ", "enum ", "impl ") to be safe.
-            "fn ", "def ", "impl ", "pub fn", "async fn",
-            "struct ", "enum ", "func ",
-            // Toolchain / compilers / package managers — qualified patterns only.
-            // Bare "cargo ", "make ", "ld ", "yarn ", "vite ", "gcc ", "clang ",
-            // "tsc ", "npm ", "pnpm " all had catastrophic false-positive rates
-            // ("cargo ship", "make it faster", "old " matching "ld ", "knitting
-            // yarn", "invite ") so each is replaced with the command-shaped
-            // pattern Dexter operators would actually type.
-            "cargo build", "cargo run", "cargo check", "cargo test",
-            "cargo install", "cargo doc", "cargo.toml", "cargo add",
-            "rustc ", "rustup ",
-            "npm install", "npm run", "npm test", "npm start", "package.json",
-            "yarn add", "yarn install",
-            "pnpm install", "pnpm add",
-            "pip install",
-            "tsconfig.json", "webpack.config", "vitest", "jest ",
-            // Error-shape patterns
-            "won't compile", "wont compile", "won't build", "wont build",
-            "failing build", "build fails", "cargo check fails", "cargo build fails",
-            "panicking", "panics at", "panic!", "stack trace", "traceback",
-            "segfault", "segmentation fault", "null pointer",
-            "nullpointerexception", "undefined is not a function",
-            // API / system-design intent (these used to miss the Code classifier
-            // and fall through to Chat — design a REST API is clearly Code work)
-            "design a rest api", "design an api", "design the api",
-            "rest api", "graphql api", "api endpoint",
-            "database schema", "data model ", "data schema",
-            "microservice", "backend service",
-            // Phase 37.9 / T4 fix: per-language "<lang> function/class/struct"
-            // patterns. Live smoke T4 — "write a Rust function that uses rayon's
-            // parallel iterator to compute prime counts in a range" — missed
-            // "write a function" because the infix "Rust" broke contiguity
-            // (contains_any is substring-based, not token-based). Enumerating
-            // <lang>+<code-noun> pairs catches this class of query without a
-            // tokenizer refactor. "rust " alone is too broad (oxidation false
-            // positives); "<lang> function/class/…" is safe.
-            "rust function", "rust class", "rust struct", "rust enum",
-            "rust trait", "rust macro",
-            "python function", "python class", "python script", "python method",
-            "go function", "golang function",
-            "swift function", "swift class", "swift struct",
-            "typescript function", "typescript class",
-            "javascript function", "javascript class",
-            "java function", "java class", "java method",
-            "c++ function", "c++ class",
-            "kotlin function", "kotlin class",
-            "ruby function", "ruby class", "ruby method",
-            // Rust crate signals — survive operator typos in the word
-            // "function" (the T4 query had "funcrion"). "use rayon" / "rayon::"
-            // etc. are specific enough to not match "crayon" (which contains
-            // "rayon" as a substring but never appears next to "use" or "::").
-            "use rayon", "rayon::",
-            "use tokio", "tokio::",
-            "use serde", "serde::",
-        ]) {
+        if contains_any(
+            &lower,
+            &[
+                // Direct programming intent
+                "implement ",
+                "write a function",
+                "write a class",
+                "write a struct",
+                "write a test",
+                "write unit test",
+                "write integration test",
+                "refactor ",
+                "write the code",
+                "generate code",
+                "code this",
+                "code the ",
+                "debug this",
+                "fix this bug",
+                "fix the bug",
+                "fix this error",
+                "fix this warning",
+                "fix this test",
+                "compile error",
+                "runtime error",
+                "type error",
+                "syntax error",
+                "this function",
+                "this method",
+                "this class",
+                "this struct",
+                "update this function",
+                "add a function",
+                "add a method",
+                "how do i implement",
+                "how do i write",
+                // Code fences (unambiguous programming context)
+                "```",
+                // File extensions — space/punctuation-delimited to avoid false matches
+                // inside unrelated words. `.rs `, `.rs,`, `.rs.`, `.rs?` etc.
+                ".rs ",
+                ".rs,",
+                ".rs.",
+                ".rs?",
+                ".rs:",
+                ".rs\n",
+                ".py ",
+                ".py,",
+                ".py.",
+                ".py?",
+                ".py:",
+                ".py\n",
+                ".ts ",
+                ".ts,",
+                ".ts.",
+                ".ts?",
+                ".ts:",
+                ".ts\n",
+                ".tsx",
+                ".jsx",
+                ".js ",
+                ".js,",
+                ".js.",
+                ".js?",
+                ".js:",
+                ".js\n",
+                ".go ",
+                ".go,",
+                ".go.",
+                ".go?",
+                ".go:",
+                ".go\n",
+                ".swift",
+                ".cpp",
+                ".hpp",
+                ".java ",
+                ".kt ",
+                ".rb ",
+                ".scala",
+                // Language-specific syntax markers. Deliberately pruned: bare
+                // "class ", "interface ", "trait " are dropped because they're
+                // common in non-code English ("world class", "user interface",
+                // "personality trait"). Keeping only markers that are either
+                // symbol-flavored ("pub fn", "async fn") or rare enough in prose
+                // ("struct ", "enum ", "impl ") to be safe.
+                "fn ",
+                "def ",
+                "impl ",
+                "pub fn",
+                "async fn",
+                "struct ",
+                "enum ",
+                "func ",
+                // Toolchain / compilers / package managers — qualified patterns only.
+                // Bare "cargo ", "make ", "ld ", "yarn ", "vite ", "gcc ", "clang ",
+                // "tsc ", "npm ", "pnpm " all had catastrophic false-positive rates
+                // ("cargo ship", "make it faster", "old " matching "ld ", "knitting
+                // yarn", "invite ") so each is replaced with the command-shaped
+                // pattern Dexter operators would actually type.
+                "cargo build",
+                "cargo run",
+                "cargo check",
+                "cargo test",
+                "cargo install",
+                "cargo doc",
+                "cargo.toml",
+                "cargo add",
+                "rustc ",
+                "rustup ",
+                "npm install",
+                "npm run",
+                "npm test",
+                "npm start",
+                "package.json",
+                "yarn add",
+                "yarn install",
+                "pnpm install",
+                "pnpm add",
+                "pip install",
+                "tsconfig.json",
+                "webpack.config",
+                "vitest",
+                "jest ",
+                // Error-shape patterns
+                "won't compile",
+                "wont compile",
+                "won't build",
+                "wont build",
+                "failing build",
+                "build fails",
+                "cargo check fails",
+                "cargo build fails",
+                "panicking",
+                "panics at",
+                "panic!",
+                "stack trace",
+                "traceback",
+                "segfault",
+                "segmentation fault",
+                "null pointer",
+                "nullpointerexception",
+                "undefined is not a function",
+                // API / system-design intent (these used to miss the Code classifier
+                // and fall through to Chat — design a REST API is clearly Code work)
+                "design a rest api",
+                "design an api",
+                "design the api",
+                "rest api",
+                "graphql api",
+                "api endpoint",
+                "database schema",
+                "data model ",
+                "data schema",
+                "microservice",
+                "backend service",
+                // Phase 37.9 / T4 fix: per-language "<lang> function/class/struct"
+                // patterns. Live smoke T4 — "write a Rust function that uses rayon's
+                // parallel iterator to compute prime counts in a range" — missed
+                // "write a function" because the infix "Rust" broke contiguity
+                // (contains_any is substring-based, not token-based). Enumerating
+                // <lang>+<code-noun> pairs catches this class of query without a
+                // tokenizer refactor. "rust " alone is too broad (oxidation false
+                // positives); "<lang> function/class/…" is safe.
+                "rust function",
+                "rust class",
+                "rust struct",
+                "rust enum",
+                "rust trait",
+                "rust macro",
+                "python function",
+                "python class",
+                "python script",
+                "python method",
+                "go function",
+                "golang function",
+                "swift function",
+                "swift class",
+                "swift struct",
+                "typescript function",
+                "typescript class",
+                "javascript function",
+                "javascript class",
+                "java function",
+                "java class",
+                "java method",
+                "c++ function",
+                "c++ class",
+                "kotlin function",
+                "kotlin class",
+                "ruby function",
+                "ruby class",
+                "ruby method",
+                // Rust crate signals — survive operator typos in the word
+                // "function" (the T4 query had "funcrion"). "use rayon" / "rayon::"
+                // etc. are specific enough to not match "crayon" (which contains
+                // "rayon" as a substring but never appears next to "use" or "::").
+                "use rayon",
+                "rayon::",
+                "use tokio",
+                "tokio::",
+                "use serde",
+                "serde::",
+            ],
+        ) {
             return Category::Code;
         }
 
@@ -553,18 +711,35 @@ impl ModelRouter {
         // paraphrase of "step by step" and a classic operator framing for
         // multi-step reasoning. Same story for "every step of the attack chain",
         // "each step of the process", and "one step at a time".
-        if contains_any(&lower, &[
-            "step by step", "think step by step",
-            "walk me through", "walk through every", "walk through each",
-            "walk through the", "every step of", "each step of",
-            "one step at a time",
-            "prove that", "prove why", "prove this",
-            "formal proof", "mathematical proof",
-            "derive the", "reason about", "think through",
-            "design an architecture", "architect a system", "system design",
-            "end to end",
-            "deep analysis", "thoroughly analyze", "in-depth analysis",
-        ]) {
+        if contains_any(
+            &lower,
+            &[
+                "step by step",
+                "think step by step",
+                "walk me through",
+                "walk through every",
+                "walk through each",
+                "walk through the",
+                "every step of",
+                "each step of",
+                "one step at a time",
+                "prove that",
+                "prove why",
+                "prove this",
+                "formal proof",
+                "mathematical proof",
+                "derive the",
+                "reason about",
+                "think through",
+                "design an architecture",
+                "architect a system",
+                "system design",
+                "end to end",
+                "deep analysis",
+                "thoroughly analyze",
+                "in-depth analysis",
+            ],
+        ) {
             return Complexity::DEEP;
         }
 
@@ -579,9 +754,10 @@ impl ModelRouter {
         // Example: "implement a payment processor from scratch in Rust with
         //   distributed transactions and audit logging" (> 250 chars)
         //   → +1 (length) +2 (weak-deep) = 3 → HEAVY. Correct.
-        if contains_any(&lower, &[
-            "from scratch", "compare and contrast", "full system",
-        ]) {
+        if contains_any(
+            &lower,
+            &["from scratch", "compare and contrast", "full system"],
+        ) {
             score = score.saturating_add(2);
         }
 
@@ -593,33 +769,61 @@ impl ModelRouter {
         // should be 2 → PRIMARY). "compare Rust and Go" without "and contrast"
         // is typically short enough to stay at complexity 0 → FAST on its own,
         // which is the right default.
-        if contains_any(&lower, &[
-            "explain how", "explain why", "explain what", "explain the",
-            "how does", "why does", "how do", "why do",
-            "analyze ", "analyse ",
-            "design ", "plan ", "outline ", "structure ",
-            "trade-off", "tradeoff", "pros and cons",
-            "multiple", "several", "various", "each of",
-            "in detail", "in depth",
-            // Phase 37.7: literal-phrase escape hatches for common operator
-            // variants that don't match "in depth" or "in detail" as substrings.
-            // The ret2libc test case — "explain in technical depth how …" —
-            // missed both "explain how" (non-adjacent) and "in depth"
-            // (non-contiguous: "in _technical_ depth") and scored 0. These
-            // entries catch the variants directly.
-            "in technical depth", "in technical detail",
-            "technically how", "technically why",
-        ]) {
+        if contains_any(
+            &lower,
+            &[
+                "explain how",
+                "explain why",
+                "explain what",
+                "explain the",
+                "how does",
+                "why does",
+                "how do",
+                "why do",
+                "analyze ",
+                "analyse ",
+                "design ",
+                "plan ",
+                "outline ",
+                "structure ",
+                "trade-off",
+                "tradeoff",
+                "pros and cons",
+                "multiple",
+                "several",
+                "various",
+                "each of",
+                "in detail",
+                "in depth",
+                // Phase 37.7: literal-phrase escape hatches for common operator
+                // variants that don't match "in depth" or "in detail" as substrings.
+                // The ret2libc test case — "explain in technical depth how …" —
+                // missed both "explain how" (non-adjacent) and "in depth"
+                // (non-contiguous: "in _technical_ depth") and scored 0. These
+                // entries catch the variants directly.
+                "in technical depth",
+                "in technical detail",
+                "technically how",
+                "technically why",
+            ],
+        ) {
             score = score.saturating_add(1);
         }
 
         // ── Multi-file / systemic code signals ───────────────────────────────
         // These are specific to Code category but raise complexity regardless.
-        if contains_any(&lower, &[
-            "across multiple files", "entire codebase", "all files",
-            "full implementation", "complete implementation",
-            "production-ready", "production ready",
-        ]) {
+        if contains_any(
+            &lower,
+            &[
+                "across multiple files",
+                "entire codebase",
+                "all files",
+                "full implementation",
+                "complete implementation",
+                "production-ready",
+                "production ready",
+            ],
+        ) {
             score = score.saturating_add(1);
         }
 
@@ -636,7 +840,11 @@ impl ModelRouter {
 
     // ── Tier selection (the routing policy table) ─────────────────────────────
 
-    fn select_model(&self, category: &Category, complexity: Complexity) -> (ModelId, Option<ModelId>, String) {
+    fn select_model(
+        &self,
+        category: &Category,
+        complexity: Complexity,
+    ) -> (ModelId, Option<ModelId>, String) {
         match (category, complexity) {
 
             // ── Vision ─────────────────────────────────────────────────────────
@@ -732,10 +940,10 @@ pub struct ConversationContext {
     session_id: String,
     /// The raw message buffer. Index 0 is always a system message if one was set via
     /// `set_system_message()`. User and assistant messages follow in order.
-    messages:   Vec<Message>,
+    messages: Vec<Message>,
     /// Maximum number of user+assistant exchange pairs to retain.
     /// System messages don't count toward this limit.
-    max_turns:  usize,
+    max_turns: usize,
 }
 
 impl ConversationContext {
@@ -751,7 +959,7 @@ impl ConversationContext {
     pub fn new(session_id: impl Into<String>, max_turns: usize) -> Self {
         Self {
             session_id: session_id.into(),
-            messages:   Vec::new(),
+            messages: Vec::new(),
             max_turns,
         }
     }
@@ -778,7 +986,10 @@ impl ConversationContext {
     /// inflated the turn count with synthetic messages and caused `max_turns`
     /// trimming to evict real history prematurely.
     pub fn turn_count(&self) -> usize {
-        self.messages.iter().filter(|m| m.origin == MessageOrigin::User).count()
+        self.messages
+            .iter()
+            .filter(|m| m.origin == MessageOrigin::User)
+            .count()
     }
 
     /// Session identifier. Logged on every inference call for tracing.
@@ -811,7 +1022,12 @@ impl ConversationContext {
     /// message to inject retrieved facts.
     #[allow(dead_code)] // Phase 9 — retrieval pipeline injects retrieved facts into system message
     pub fn set_system_message(&mut self, content: impl Into<String>) {
-        if self.messages.first().map(|m| m.role == "system").unwrap_or(false) {
+        if self
+            .messages
+            .first()
+            .map(|m| m.role == "system")
+            .unwrap_or(false)
+        {
             self.messages[0] = Message::system(content);
         } else {
             self.messages.insert(0, Message::system(content));
@@ -856,7 +1072,12 @@ impl ConversationContext {
     /// Used when starting a new conversation topic while preserving identity context.
     #[allow(dead_code)] // Phase 7 — explicit context reset on operator command
     pub fn clear_history(&mut self) {
-        if self.messages.first().map(|m| m.role == "system").unwrap_or(false) {
+        if self
+            .messages
+            .first()
+            .map(|m| m.role == "system")
+            .unwrap_or(false)
+        {
             self.messages.truncate(1);
         } else {
             self.messages.clear();
@@ -894,7 +1115,9 @@ impl ConversationContext {
             // the first non-system message was always a user message — a fragile
             // invariant that would break the moment a retrieval injection landed
             // between the system prompt and the first user turn.
-            let user_idx = match self.messages.iter()
+            let user_idx = match self
+                .messages
+                .iter()
                 .position(|m| m.origin == MessageOrigin::User)
             {
                 Some(idx) => idx,
@@ -933,7 +1156,9 @@ impl ConversationContext {
 mod tests {
     use super::*;
 
-    fn router() -> ModelRouter { ModelRouter::new() }
+    fn router() -> ModelRouter {
+        ModelRouter::new()
+    }
 
     fn user_msg(text: &str) -> Message {
         Message::user(text.to_string())
@@ -945,7 +1170,7 @@ mod tests {
     fn route_simple_chat_returns_fast() {
         // Genuinely context-free question with no retrieval, code, or vision signals.
         let decision = router().route(&[user_msg("tell me a joke about programmers")]);
-        assert_eq!(decision.model,    ModelId::Fast);
+        assert_eq!(decision.model, ModelId::Fast);
         assert_eq!(decision.category, Category::Chat);
         assert_eq!(decision.complexity, Complexity::TRIVIAL);
     }
@@ -957,21 +1182,23 @@ mod tests {
         // via a `date` shell action. Time is a system-state query, not a web query.
         let decision = router().route(&[user_msg("What time is it?")]);
         assert_eq!(decision.category, Category::Chat);
-        assert_eq!(decision.model,    ModelId::Fast);
+        assert_eq!(decision.model, ModelId::Fast);
     }
 
     #[test]
     fn route_implement_function_returns_code() {
-        let decision = router().route(&[user_msg("implement a function to sort a list of integers")]);
+        let decision =
+            router().route(&[user_msg("implement a function to sort a list of integers")]);
         assert_eq!(decision.category, Category::Code);
-        assert_eq!(decision.model,    ModelId::Code);
+        assert_eq!(decision.model, ModelId::Code);
     }
 
     #[test]
     fn route_screenshot_returns_vision() {
-        let decision = router().route(&[user_msg("look at this screenshot and tell me what's wrong")]);
+        let decision =
+            router().route(&[user_msg("look at this screenshot and tell me what's wrong")]);
         assert_eq!(decision.category, Category::Vision);
-        assert_eq!(decision.model,    ModelId::Vision);
+        assert_eq!(decision.model, ModelId::Vision);
     }
 
     // ── Phase 20: Vision keyword coverage tests ────────────────────────────────
@@ -980,17 +1207,24 @@ mod tests {
     fn route_see_my_screen_returns_vision() {
         // "see my screen" is a new Phase 20 keyword — natural operator phrasing.
         let decision = router().route(&[user_msg("can you see my screen?")]);
-        assert_eq!(decision.category, Category::Vision,
-            "\"see my screen\" must route to Vision");
+        assert_eq!(
+            decision.category,
+            Category::Vision,
+            "\"see my screen\" must route to Vision"
+        );
         assert_eq!(decision.model, ModelId::Vision);
     }
 
     #[test]
     fn route_look_at_the_screen_returns_vision() {
         // "look at the screen" is a new Phase 20 keyword.
-        let decision = router().route(&[user_msg("look at the screen and tell me what app is open")]);
-        assert_eq!(decision.category, Category::Vision,
-            "\"look at the screen\" must route to Vision");
+        let decision =
+            router().route(&[user_msg("look at the screen and tell me what app is open")]);
+        assert_eq!(
+            decision.category,
+            Category::Vision,
+            "\"look at the screen\" must route to Vision"
+        );
         assert_eq!(decision.model, ModelId::Vision);
     }
 
@@ -998,36 +1232,39 @@ mod tests {
     fn route_picture_keyword_returns_vision() {
         // "picture" is a pre-existing vision keyword; this test documents coverage.
         let decision = router().route(&[user_msg("take a picture of what's on screen")]);
-        assert_eq!(decision.category, Category::Vision,
-            "\"picture\" keyword must route to Vision");
+        assert_eq!(
+            decision.category,
+            Category::Vision,
+            "\"picture\" keyword must route to Vision"
+        );
     }
 
     #[test]
     fn route_current_version_returns_retrieval_first() {
         let decision = router().route(&[user_msg("what is the current version of Rust?")]);
         assert_eq!(decision.category, Category::RetrievalFirst);
-        assert_eq!(decision.model,    ModelId::Primary);
+        assert_eq!(decision.model, ModelId::Primary);
     }
 
     // ── Complexity thresholds ─────────────────────────────────────────────────
 
     #[test]
     fn step_by_step_proof_returns_heavy() {
-        let decision = router().route(&[
-            user_msg("prove step by step why the halting problem is undecidable")
-        ]);
-        assert_eq!(decision.category,   Category::Chat);
+        let decision = router().route(&[user_msg(
+            "prove step by step why the halting problem is undecidable",
+        )]);
+        assert_eq!(decision.category, Category::Chat);
         assert_eq!(decision.complexity, Complexity::DEEP);
-        assert_eq!(decision.model,      ModelId::Heavy);
+        assert_eq!(decision.model, ModelId::Heavy);
     }
 
     #[test]
     fn system_design_question_returns_heavy() {
-        let decision = router().route(&[
-            user_msg("design an architecture for a distributed task queue that handles 1M jobs/sec")
-        ]);
+        let decision = router().route(&[user_msg(
+            "design an architecture for a distributed task queue that handles 1M jobs/sec",
+        )]);
         assert_eq!(decision.complexity, Complexity::DEEP);
-        assert_eq!(decision.model,      ModelId::Heavy);
+        assert_eq!(decision.model, ModelId::Heavy);
     }
 
     #[test]
@@ -1036,12 +1273,12 @@ mod tests {
         // of complexity. The previous "complex code → PRIMARY" rule assumed
         // PRIMARY was the smarter generalist, but for code specifically the
         // programming specialist (deepseek-coder-v2:16b) wins.
-        let decision = router().route(&[
-            user_msg("design a complete authentication system: implement JWT refresh tokens, \
-                      database schema, error handling, and unit tests from scratch")
-        ]);
-        assert_eq!(decision.category,  Category::Code);
-        assert_eq!(decision.model,     ModelId::Code);
+        let decision = router().route(&[user_msg(
+            "design a complete authentication system: implement JWT refresh tokens, \
+                      database schema, error handling, and unit tests from scratch",
+        )]);
+        assert_eq!(decision.category, Category::Code);
+        assert_eq!(decision.model, ModelId::Code);
     }
 
     #[test]
@@ -1050,7 +1287,7 @@ mod tests {
         // collapse of the split must not demote simple code requests.
         let decision = router().route(&[user_msg("implement a function to reverse a string")]);
         assert_eq!(decision.category, Category::Code);
-        assert_eq!(decision.model,    ModelId::Code);
+        assert_eq!(decision.model, ModelId::Code);
     }
 
     #[test]
@@ -1058,12 +1295,16 @@ mod tests {
         // Phase 37.5 / B4: a single moderate-reasoning signal is enough to push
         // a Chat query from FAST → PRIMARY. "explain how" scores +1, landing at
         // complexity=1 which now routes to PRIMARY (was FAST).
-        let decision = router().route(&[
-            user_msg("explain how the Rust borrow checker prevents data races")
-        ]);
+        let decision = router().route(&[user_msg(
+            "explain how the Rust borrow checker prevents data races",
+        )]);
         assert_eq!(decision.category, Category::Chat);
-        assert_eq!(decision.model,    ModelId::Primary,
-            "single moderate signal must now route to PRIMARY, got {:?}", decision.model);
+        assert_eq!(
+            decision.model,
+            ModelId::Primary,
+            "single moderate signal must now route to PRIMARY, got {:?}",
+            decision.model
+        );
     }
 
     #[test]
@@ -1071,9 +1312,9 @@ mod tests {
         // The B4 shift must not push EVERY chat to PRIMARY — complexity=0
         // (no keywords, short) still belongs on FAST for latency.
         let decision = router().route(&[user_msg("tell me a joke about programmers")]);
-        assert_eq!(decision.category,   Category::Chat);
+        assert_eq!(decision.category, Category::Chat);
         assert_eq!(decision.complexity, Complexity::TRIVIAL);
-        assert_eq!(decision.model,      ModelId::Fast);
+        assert_eq!(decision.model, ModelId::Fast);
     }
 
     // ── Phase 37.7 Step 4: Classifier signal cleanup ──────────────────────────
@@ -1083,16 +1324,25 @@ mod tests {
         // "rewrite " used to live in the Code keyword list and falsely classified
         // "rewrite this paragraph to sound less aggressive" as Code. Must now
         // route as Chat.
-        let decision = router().route(&[user_msg("rewrite this paragraph to sound less aggressive")]);
-        assert_eq!(decision.category, Category::Chat,
-            "rewriting prose must not be classified as Code");
+        let decision =
+            router().route(&[user_msg("rewrite this paragraph to sound less aggressive")]);
+        assert_eq!(
+            decision.category,
+            Category::Chat,
+            "rewriting prose must not be classified as Code"
+        );
     }
 
     #[test]
     fn code_fence_routes_to_code() {
-        let decision = router().route(&[user_msg("what does this do: ```fn main() { println!(\"hi\"); }```")]);
-        assert_eq!(decision.category, Category::Code,
-            "code fences must classify as Code");
+        let decision = router().route(&[user_msg(
+            "what does this do: ```fn main() { println!(\"hi\"); }```",
+        )]);
+        assert_eq!(
+            decision.category,
+            Category::Code,
+            "code fences must classify as Code"
+        );
     }
 
     #[test]
@@ -1104,8 +1354,11 @@ mod tests {
     #[test]
     fn syntax_marker_routes_to_code() {
         let decision = router().route(&[user_msg("what does pub fn new do here")]);
-        assert_eq!(decision.category, Category::Code,
-            "`pub fn` is an unambiguous Rust syntax marker");
+        assert_eq!(
+            decision.category,
+            Category::Code,
+            "`pub fn` is an unambiguous Rust syntax marker"
+        );
     }
 
     #[test]
@@ -1129,8 +1382,11 @@ mod tests {
     #[test]
     fn design_rest_api_routes_to_code() {
         let decision = router().route(&[user_msg("design a REST API for user authentication")]);
-        assert_eq!(decision.category, Category::Code,
-            "API/system-design intent should classify as Code, not Chat");
+        assert_eq!(
+            decision.category,
+            Category::Code,
+            "API/system-design intent should classify as Code, not Chat"
+        );
     }
 
     // ── Phase 37.7 Step 5: char-count vs byte-count ───────────────────────────
@@ -1147,8 +1403,11 @@ mod tests {
 
         let decision = router().route(&[user_msg(&em_dashes)]);
         // No keywords, 200 chars (< 250) → complexity 0 → FAST.
-        assert_eq!(decision.complexity, Complexity::TRIVIAL,
-            "200 chars of non-ASCII must not bump complexity via byte inflation");
+        assert_eq!(
+            decision.complexity,
+            Complexity::TRIVIAL,
+            "200 chars of non-ASCII must not bump complexity via byte inflation"
+        );
     }
 
     // ── Phase 37.7 Step 6: gated DEEP escalation ──────────────────────────────
@@ -1159,9 +1418,12 @@ mod tests {
         // "hello world HTTP server from scratch" is not HEAVY work — weak DEEP
         // + short length should land at complexity 2 (PRIMARY).
         let decision = router().route(&[user_msg("write a hello world HTTP server from scratch")]);
-        assert_ne!(decision.model, ModelId::Heavy,
+        assert_ne!(
+            decision.model,
+            ModelId::Heavy,
             "short 'from scratch' must not unilaterally route to HEAVY: reasoning={}",
-            decision.reasoning);
+            decision.reasoning
+        );
     }
 
     #[test]
@@ -1179,16 +1441,23 @@ mod tests {
             arise when any one of those layers is missing";
         let decision = router().route(&[user_msg(long_text)]);
         // "end to end" is a strong DEEP trigger — this should land HEAVY.
-        assert_eq!(decision.model, ModelId::Heavy,
+        assert_eq!(
+            decision.model,
+            ModelId::Heavy,
             "long Chat utterance with 'from scratch' + 'end to end' should HEAVY: \
-             reasoning={}", decision.reasoning);
+             reasoning={}",
+            decision.reasoning
+        );
     }
 
     #[test]
     fn compare_and_contrast_trivial_is_not_heavy() {
         let decision = router().route(&[user_msg("compare and contrast tabs vs spaces")]);
-        assert_ne!(decision.model, ModelId::Heavy,
-            "trivial 'compare and contrast' must not unilaterally light HEAVY");
+        assert_ne!(
+            decision.model,
+            ModelId::Heavy,
+            "trivial 'compare and contrast' must not unilaterally light HEAVY"
+        );
     }
 
     // ── Phase 37.7 Step 7: conversation depth no longer mutates complexity ────
@@ -1208,11 +1477,18 @@ mod tests {
         msgs.push(user_msg("ok thanks"));
 
         let decision = router().route(&msgs);
-        assert_eq!(decision.complexity, Complexity::TRIVIAL,
+        assert_eq!(
+            decision.complexity,
+            Complexity::TRIVIAL,
             "accumulated conversation turns must not inflate semantic complexity: \
-             reasoning={}", decision.reasoning);
-        assert_eq!(decision.model, ModelId::Fast,
-            "trivial utterance in long thread must still route FAST");
+             reasoning={}",
+            decision.reasoning
+        );
+        assert_eq!(
+            decision.model,
+            ModelId::Fast,
+            "trivial utterance in long thread must still route FAST"
+        );
     }
 
     // ── Phase 37.7 Step 8: expanded retrieval-first coverage ──────────────────
@@ -1231,7 +1507,9 @@ mod tests {
 
     #[test]
     fn release_notes_route_to_retrieval_first() {
-        let decision = router().route(&[user_msg("show me the release notes for the new rust toolchain")]);
+        let decision = router().route(&[user_msg(
+            "show me the release notes for the new rust toolchain",
+        )]);
         assert_eq!(decision.category, Category::RetrievalFirst);
     }
 
@@ -1248,12 +1526,16 @@ mod tests {
         let decision = router().route(&[user_msg(
             "Explain in technical depth how a ret2libc attack bypasses NX on \
              x86_64 Linux with ASLR enabled, including the role of a leaked \
-             libc address."
+             libc address.",
         )]);
         assert_eq!(decision.category, Category::Chat);
-        assert_eq!(decision.model, ModelId::Primary,
+        assert_eq!(
+            decision.model,
+            ModelId::Primary,
             "technical-depth explanation must route to PRIMARY (not FAST): \
-             reasoning={}", decision.reasoning);
+             reasoning={}",
+            decision.reasoning
+        );
     }
 
     #[test]
@@ -1281,13 +1563,23 @@ mod tests {
             assistant_msg("Here's a parser..."),
             user_msg("make it faster"),
         ]);
-        assert_eq!(decision.category, Category::Code,
-            "ambiguous follow-up after Code must inherit Code, got {:?}", decision.category);
+        assert_eq!(
+            decision.category,
+            Category::Code,
+            "ambiguous follow-up after Code must inherit Code, got {:?}",
+            decision.category
+        );
         assert_eq!(decision.model, ModelId::Code);
-        assert_eq!(decision.inherited_category, Some(Category::Code),
-            "provenance field must record inheritance");
-        assert!(decision.reasoning.contains("inherited from prior turn"),
-            "reasoning should surface inheritance: {}", decision.reasoning);
+        assert_eq!(
+            decision.inherited_category,
+            Some(Category::Code),
+            "provenance field must record inheritance"
+        );
+        assert!(
+            decision.reasoning.contains("inherited from prior turn"),
+            "reasoning should surface inheritance: {}",
+            decision.reasoning
+        );
     }
 
     #[test]
@@ -1299,11 +1591,16 @@ mod tests {
             assistant_msg("Here's a parser..."),
             user_msg("tell me a joke now"),
         ]);
-        assert_eq!(decision.category, Category::Chat,
-            "topic-shift phrase must defeat inheritance");
+        assert_eq!(
+            decision.category,
+            Category::Chat,
+            "topic-shift phrase must defeat inheritance"
+        );
         assert_eq!(decision.model, ModelId::Fast);
-        assert_eq!(decision.inherited_category, None,
-            "no-op/refused inheritance must leave provenance field None");
+        assert_eq!(
+            decision.inherited_category, None,
+            "no-op/refused inheritance must leave provenance field None"
+        );
     }
 
     #[test]
@@ -1316,8 +1613,11 @@ mod tests {
             assistant_msg("Here..."),
             user_msg("and faster please"),
         ]);
-        assert_eq!(decision_short.category, Category::Code,
-            "short utterance with strong cue after Code should inherit");
+        assert_eq!(
+            decision_short.category,
+            Category::Code,
+            "short utterance with strong cue after Code should inherit"
+        );
 
         let decision_long = router().route(&[
             user_msg("write a function to sort a list"),
@@ -1326,9 +1626,12 @@ mod tests {
         ]);
         // Long follow-up with no strong continuation cue — must NOT inherit Code.
         // "in detail" triggers complexity=1 → PRIMARY (Chat route, not Code).
-        assert_eq!(decision_long.category, Category::Chat,
+        assert_eq!(
+            decision_long.category,
+            Category::Chat,
             "long follow-up with no strong cue must not inherit: reasoning={}",
-            decision_long.reasoning);
+            decision_long.reasoning
+        );
         assert_eq!(decision_long.inherited_category, None);
     }
 
@@ -1346,37 +1649,45 @@ mod tests {
         // re-check the `ambiguous_predecessor_count >= MAX_INHERITED_HOPS`
         // guard in maybe_inherit_category.
         let decision = router().route(&[
-            user_msg("implement a Rust parser"),    // direct Code
+            user_msg("implement a Rust parser"), // direct Code
             assistant_msg("..."),
-            user_msg("make it faster"),             // hop 1 → Code
+            user_msg("make it faster"), // hop 1 → Code
             assistant_msg("..."),
-            user_msg("make it smaller"),            // hop 2 → Code
+            user_msg("make it smaller"), // hop 2 → Code
             assistant_msg("..."),
-            user_msg("make it cleaner"),            // hop 3 → Code
+            user_msg("make it cleaner"), // hop 3 → Code
             assistant_msg("..."),
-            user_msg("simplify it again"),          // would be hop 4 — refused
+            user_msg("simplify it again"), // would be hop 4 — refused
         ]);
-        assert_eq!(decision.category, Category::Chat,
+        assert_eq!(
+            decision.category,
+            Category::Chat,
             "4th ambiguous hop must exceed cap and fall back to Chat: reasoning={}",
-            decision.reasoning);
-        assert_eq!(decision.inherited_category, None,
-            "refused inheritance must leave provenance None");
+            decision.reasoning
+        );
+        assert_eq!(
+            decision.inherited_category, None,
+            "refused inheritance must leave provenance None"
+        );
     }
 
     #[test]
     fn inheritance_hop_cap_allows_third_hop() {
         // Boundary check: the 3rd consecutive ambiguous follow-up is still allowed.
         let decision = router().route(&[
-            user_msg("implement a Rust parser"),    // direct Code
+            user_msg("implement a Rust parser"), // direct Code
             assistant_msg("..."),
-            user_msg("make it faster"),             // hop 1 → Code
+            user_msg("make it faster"), // hop 1 → Code
             assistant_msg("..."),
-            user_msg("make it smaller"),            // hop 2 → Code
+            user_msg("make it smaller"), // hop 2 → Code
             assistant_msg("..."),
-            user_msg("make it cleaner"),            // hop 3 — still allowed
+            user_msg("make it cleaner"), // hop 3 — still allowed
         ]);
-        assert_eq!(decision.category, Category::Code,
-            "3rd hop is within cap and must inherit Code");
+        assert_eq!(
+            decision.category,
+            Category::Code,
+            "3rd hop is within cap and must inherit Code"
+        );
         assert_eq!(decision.inherited_category, Some(Category::Code));
     }
 
@@ -1418,11 +1729,15 @@ mod tests {
             user_msg("implement a binary search too"),
         ]);
         assert_eq!(decision.category, Category::Code);
-        assert_eq!(decision.inherited_category, None,
-            "direct Code signal means no inheritance event — provenance stays None");
-        assert!(!decision.reasoning.contains("inherited"),
+        assert_eq!(
+            decision.inherited_category, None,
+            "direct Code signal means no inheritance event — provenance stays None"
+        );
+        assert!(
+            !decision.reasoning.contains("inherited"),
             "reasoning must not mention inheritance when it didn't fire: {}",
-            decision.reasoning);
+            decision.reasoning
+        );
     }
 
     #[test]
@@ -1447,10 +1762,13 @@ mod tests {
             Message::tool_result("[Action result] cargo check failed"),
             Message::user("make it faster"),
         ]);
-        assert_eq!(decision.category, Category::Code,
+        assert_eq!(
+            decision.category,
+            Category::Code,
             "router must find 'make it faster' (last User-origin), inherit from \
              'implement a Rust parser', and route to Code — not classify the \
-             tool-result content");
+             tool-result content"
+        );
         assert_eq!(decision.inherited_category, Some(Category::Code));
     }
 
@@ -1468,8 +1786,11 @@ mod tests {
             Message::retrieval("[Retrieved] Jensen Huang has served since 1993."),
             Message::user("why"),
         ]);
-        assert_eq!(decision.category, Category::RetrievalFirst,
-            "retrieval injection must not interrupt inheritance walk");
+        assert_eq!(
+            decision.category,
+            Category::RetrievalFirst,
+            "retrieval injection must not interrupt inheritance walk"
+        );
         assert_eq!(decision.inherited_category, Some(Category::RetrievalFirst));
     }
 
@@ -1483,20 +1804,29 @@ mod tests {
         let decision = router().route(&[
             user_msg("who is the current CEO of Nvidia?"),
             assistant_msg("Jensen Huang."),
-            user_msg("why though"),   // "why" is a strong continuation cue
+            user_msg("why though"), // "why" is a strong continuation cue
         ]);
-        assert_eq!(decision.category, Category::RetrievalFirst,
-            "'why' after retrieval turn should inherit RetrievalFirst");
+        assert_eq!(
+            decision.category,
+            Category::RetrievalFirst,
+            "'why' after retrieval turn should inherit RetrievalFirst"
+        );
         assert_eq!(decision.inherited_category, Some(Category::RetrievalFirst));
     }
 
     #[test]
     fn reasoning_string_contains_category_and_complexity() {
         let decision = router().route(&[user_msg("implement a sorting function")]);
-        assert!(decision.reasoning.contains("category=code"),
-            "reasoning should include category: {}", decision.reasoning);
-        assert!(decision.reasoning.contains("complexity="),
-            "reasoning should include complexity: {}", decision.reasoning);
+        assert!(
+            decision.reasoning.contains("category=code"),
+            "reasoning should include category: {}",
+            decision.reasoning
+        );
+        assert!(
+            decision.reasoning.contains("complexity="),
+            "reasoning should include complexity: {}",
+            decision.reasoning
+        );
     }
 
     // ── ConversationContext ────────────────────────────────────────────────────
@@ -1505,7 +1835,7 @@ mod tests {
     fn context_starts_empty() {
         let ctx = ConversationContext::new("test-session", 10);
         assert_eq!(ctx.message_count(), 0);
-        assert_eq!(ctx.turn_count(),    0);
+        assert_eq!(ctx.turn_count(), 0);
     }
 
     #[test]
@@ -1532,8 +1862,10 @@ mod tests {
         assert_eq!(ctx.turn_count(), 2, "should have trimmed to max_turns=2");
         // turn 1 should be gone.
         let messages = ctx.messages();
-        assert!(!messages.iter().any(|m| m.content.contains("turn 1")),
-            "oldest turn should have been dropped: {messages:?}");
+        assert!(
+            !messages.iter().any(|m| m.content.contains("turn 1")),
+            "oldest turn should have been dropped: {messages:?}"
+        );
         // turn 2 and turn 3 should remain.
         assert!(messages.iter().any(|m| m.content.contains("turn 2 user")));
         assert!(messages.iter().any(|m| m.content.contains("turn 3 user")));
@@ -1550,16 +1882,24 @@ mod tests {
 
         let messages = ctx.messages();
         // System message must survive.
-        assert_eq!(messages[0].role, "system",
-            "system message must be preserved after truncation");
+        assert_eq!(
+            messages[0].role, "system",
+            "system message must be preserved after truncation"
+        );
         assert_eq!(messages[0].content, "You are Dexter.");
         // turn 2 should survive; turn 1 should be gone.
-        assert!(messages.iter().any(|m| m.content == "turn 2"),
-            "current turn must survive");
-        assert!(!messages.iter().any(|m| m.content == "turn 1"),
-            "old user turn must be dropped");
-        assert!(!messages.iter().any(|m| m.content == "resp 1"),
-            "old assistant turn must be dropped with its user turn");
+        assert!(
+            messages.iter().any(|m| m.content == "turn 2"),
+            "current turn must survive"
+        );
+        assert!(
+            !messages.iter().any(|m| m.content == "turn 1"),
+            "old user turn must be dropped"
+        );
+        assert!(
+            !messages.iter().any(|m| m.content == "resp 1"),
+            "old assistant turn must be dropped with its user turn"
+        );
     }
 
     #[test]
@@ -1603,15 +1943,22 @@ mod tests {
         ctx.push_assistant("answer 2");
 
         // Only 2 real user turns exist; tool results must not inflate the count.
-        assert_eq!(ctx.turn_count(), 2,
-            "turn_count must ignore tool-result origins; got {}", ctx.turn_count());
+        assert_eq!(
+            ctx.turn_count(),
+            2,
+            "turn_count must ignore tool-result origins; got {}",
+            ctx.turn_count()
+        );
 
         // And turn 1 must still be present — the budget did NOT trigger a trim.
-        let has_turn_1 = ctx.messages().iter().any(|m|
-            m.origin == MessageOrigin::User && m.content == "question 1"
+        let has_turn_1 = ctx
+            .messages()
+            .iter()
+            .any(|m| m.origin == MessageOrigin::User && m.content == "question 1");
+        assert!(
+            has_turn_1,
+            "question 1 must survive — tool results should not evict real history"
         );
-        assert!(has_turn_1,
-            "question 1 must survive — tool results should not evict real history");
     }
 
     #[test]
@@ -1628,9 +1975,12 @@ mod tests {
         ctx.push_user("real turn 2");
 
         assert_eq!(ctx.turn_count(), 2);
-        assert!(ctx.messages().iter().any(|m|
-            m.origin == MessageOrigin::User && m.content == "real turn 1"
-        ), "real turn 1 must survive a flood of tool results");
+        assert!(
+            ctx.messages()
+                .iter()
+                .any(|m| m.origin == MessageOrigin::User && m.content == "real turn 1"),
+            "real turn 1 must survive a flood of tool results"
+        );
     }
 
     #[test]
@@ -1643,17 +1993,25 @@ mod tests {
         ctx.push_user("turn 1");
         ctx.push_assistant("resp 1");
         ctx.push_tool_result("tool result for turn 1");
-        ctx.push_user("turn 2");  // triggers trim of turn 1 + its children
+        ctx.push_user("turn 2"); // triggers trim of turn 1 + its children
 
         assert_eq!(ctx.turn_count(), 1);
         let has_turn_1 = ctx.messages().iter().any(|m| m.content == "turn 1");
-        let has_turn_1_tool = ctx.messages().iter().any(|m| m.content == "tool result for turn 1");
+        let has_turn_1_tool = ctx
+            .messages()
+            .iter()
+            .any(|m| m.content == "tool result for turn 1");
         let has_turn_1_resp = ctx.messages().iter().any(|m| m.content == "resp 1");
         assert!(!has_turn_1, "turn 1 evicted");
-        assert!(!has_turn_1_resp, "turn 1's assistant response evicted with it");
+        assert!(
+            !has_turn_1_resp,
+            "turn 1's assistant response evicted with it"
+        );
         assert!(!has_turn_1_tool, "turn 1's tool result evicted with it");
-        assert!(ctx.messages().iter().any(|m| m.content == "turn 2"),
-            "turn 2 survives the trim");
+        assert!(
+            ctx.messages().iter().any(|m| m.content == "turn 2"),
+            "turn 2 survives the trim"
+        );
     }
 
     #[test]
@@ -1666,7 +2024,8 @@ mod tests {
         ctx.set_system_message("personality");
         // Retrieval ahead of any real turn — an invariant the old code
         // would have broken against.
-        ctx.messages.insert(1, Message::retrieval("[Retrieved: boot context]"));
+        ctx.messages
+            .insert(1, Message::retrieval("[Retrieved: boot context]"));
         ctx.push_user("turn 1");
         ctx.push_assistant("resp 1");
         ctx.push_user("turn 2"); // triggers trim
@@ -1716,9 +2075,10 @@ mod tests {
         // The decisive assertion: the very first question is still in context.
         // Under the old limit (8), turn 1 would have been evicted by turn 9 and
         // the operator would not get a recall match here.
-        let first_user_present = ctx.messages().iter().any(|m|
-            m.role == "user" && m.content == "question 1"
-        );
+        let first_user_present = ctx
+            .messages()
+            .iter()
+            .any(|m| m.role == "user" && m.content == "question 1");
         assert!(
             first_user_present,
             "N1 regression: 'question 1' must still be in context after 16 turns"
@@ -1726,9 +2086,10 @@ mod tests {
 
         // Sanity: pushing turn 17 evicts the oldest pair — confirms trim still works.
         ctx.push_user("question 17".to_string());
-        let first_user_after_17 = ctx.messages().iter().any(|m|
-            m.role == "user" && m.content == "question 1"
-        );
+        let first_user_after_17 = ctx
+            .messages()
+            .iter()
+            .any(|m| m.role == "user" && m.content == "question 1");
         assert!(
             !first_user_after_17,
             "Eviction must trigger at turn_count > max_turns (defensive — proves the limit is real)"
@@ -1755,36 +2116,46 @@ mod tests {
     fn walk_through_every_step_routes_heavy() {
         // The T2 live-smoke query verbatim (minus offsec wording — behavior is
         // identical to the classifier since DEEP signals fire pre-domain).
-        let decision = router().route(&[
-            user_msg("walk through every step an attacker would use to persist on a hardened macOS host")
-        ]);
-        assert_eq!(decision.category,   Category::Chat);
-        assert_eq!(decision.complexity, Complexity::DEEP,
+        let decision = router().route(&[user_msg(
+            "walk through every step an attacker would use to persist on a hardened macOS host",
+        )]);
+        assert_eq!(decision.category, Category::Chat);
+        assert_eq!(
+            decision.complexity,
+            Complexity::DEEP,
             "'walk through every step' must trigger Strong DEEP; got reasoning={}",
-            decision.reasoning);
-        assert_eq!(decision.model,      ModelId::Heavy,
+            decision.reasoning
+        );
+        assert_eq!(
+            decision.model,
+            ModelId::Heavy,
             "DEEP Chat must route HEAVY; got {:?} reasoning={}",
-            decision.model, decision.reasoning);
+            decision.model,
+            decision.reasoning
+        );
     }
 
     #[test]
     fn walk_me_through_routes_heavy() {
         // Common operator paraphrase: "walk me through the threat model".
-        let decision = router().route(&[
-            user_msg("walk me through the threat model for a public DNS resolver")
-        ]);
+        let decision = router().route(&[user_msg(
+            "walk me through the threat model for a public DNS resolver",
+        )]);
         assert_eq!(decision.complexity, Complexity::DEEP);
-        assert_eq!(decision.model,      ModelId::Heavy);
+        assert_eq!(decision.model, ModelId::Heavy);
     }
 
     #[test]
     fn each_step_of_routes_heavy() {
         // Another paraphrase family: "each step of" / "every step of".
-        let decision = router().route(&[
-            user_msg("describe each step of the TLS handshake including key derivation")
-        ]);
-        assert_eq!(decision.complexity, Complexity::DEEP,
-            "'each step of' must match the new DEEP paraphrase set");
+        let decision = router().route(&[user_msg(
+            "describe each step of the TLS handshake including key derivation",
+        )]);
+        assert_eq!(
+            decision.complexity,
+            Complexity::DEEP,
+            "'each step of' must match the new DEEP paraphrase set"
+        );
     }
 
     #[test]
@@ -1794,26 +2165,29 @@ mod tests {
         let decision = router().route(&[
             user_msg("write a Rust function that uses rayon's parallel iterator to compute prime counts in a range")
         ]);
-        assert_eq!(decision.category, Category::Code,
+        assert_eq!(
+            decision.category,
+            Category::Code,
             "'<lang> function' must classify as Code; got reasoning={}",
-            decision.reasoning);
-        assert_eq!(decision.model,    ModelId::Code);
+            decision.reasoning
+        );
+        assert_eq!(decision.model, ModelId::Code);
     }
 
     #[test]
     fn python_class_query_routes_to_code() {
-        let decision = router().route(&[
-            user_msg("write a Python class that wraps a SQLite connection with context manager support")
-        ]);
+        let decision = router().route(&[user_msg(
+            "write a Python class that wraps a SQLite connection with context manager support",
+        )]);
         assert_eq!(decision.category, Category::Code);
-        assert_eq!(decision.model,    ModelId::Code);
+        assert_eq!(decision.model, ModelId::Code);
     }
 
     #[test]
     fn swift_struct_query_routes_to_code() {
-        let decision = router().route(&[
-            user_msg("design a Swift struct for tracking window state across spaces")
-        ]);
+        let decision = router().route(&[user_msg(
+            "design a Swift struct for tracking window state across spaces",
+        )]);
         assert_eq!(decision.category, Category::Code);
     }
 
@@ -1825,17 +2199,18 @@ mod tests {
         let decision = router().route(&[
             user_msg("show me how to use rayon to parallelize a hot loop (funcrion signature: fn count_primes)")
         ]);
-        assert_eq!(decision.category, Category::Code,
+        assert_eq!(
+            decision.category,
+            Category::Code,
             "'use rayon' must classify as Code even when 'function' is mis-spelled; reasoning={}",
-            decision.reasoning);
+            decision.reasoning
+        );
     }
 
     #[test]
     fn tokio_path_signal_routes_to_code() {
         // `tokio::` path separator is an unambiguous Rust code marker.
-        let decision = router().route(&[
-            user_msg("why does tokio::spawn not await my future")
-        ]);
+        let decision = router().route(&[user_msg("why does tokio::spawn not await my future")]);
         assert_eq!(decision.category, Category::Code);
     }
 
@@ -1843,20 +2218,23 @@ mod tests {
     fn bare_rust_word_does_not_route_to_code() {
         // Guard: adding per-language patterns must not sweep in "rust" alone.
         // "There's rust on my bike chain" is not a code query.
-        let decision = router().route(&[
-            user_msg("there's rust on my bike chain, how do I remove it")
-        ]);
-        assert_eq!(decision.category, Category::Chat,
+        let decision = router().route(&[user_msg(
+            "there's rust on my bike chain, how do I remove it",
+        )]);
+        assert_eq!(
+            decision.category,
+            Category::Chat,
             "bare word 'rust' without a code-noun must stay Chat; reasoning={}",
-            decision.reasoning);
+            decision.reasoning
+        );
     }
 
     #[test]
     fn trait_word_alone_does_not_route_to_code() {
         // Guard: "personality trait" must not match "rust trait".
-        let decision = router().route(&[
-            user_msg("which personality trait do you think matters most in a leader")
-        ]);
+        let decision = router().route(&[user_msg(
+            "which personality trait do you think matters most in a leader",
+        )]);
         assert_eq!(decision.category, Category::Chat);
     }
 }
@@ -1893,10 +2271,20 @@ const WEAK_CUE_MAX_CHARS: usize = 20;
 /// of other signals — even a short "by the way, fix this" (which would otherwise
 /// pass the strong-cue test via "fix") must NOT inherit.
 const TOPIC_SHIFT_PHRASES: &[&str] = &[
-    "tell me a joke", "new topic", "unrelated", "different question",
-    "by the way", "separately", "another question", "change topic",
-    "forget that", "never mind that", "ignore that", "off-topic",
-    "off topic", "new question",
+    "tell me a joke",
+    "new topic",
+    "unrelated",
+    "different question",
+    "by the way",
+    "separately",
+    "another question",
+    "change topic",
+    "forget that",
+    "never mind that",
+    "ignore that",
+    "off-topic",
+    "off topic",
+    "new question",
 ];
 
 /// Strong continuation cues — unambiguous signals that the current utterance
@@ -1917,16 +2305,40 @@ const STRONG_CONTINUATION_CUES: &[&str] = &[
     // demanding a co-occurring subject reference — breaks the natural short
     // form. If false-positive inheritance from a stray "why" becomes a real
     // problem in live use, tighten to "why does" / "why is" / "why would".
-    "why", "how about", "what about", "instead", "again",
+    "why",
+    "how about",
+    "what about",
+    "instead",
+    "again",
     // Reference + command patterns
-    "make it", "make that", "make them",
+    "make it",
+    "make that",
+    "make them",
     // Bare imperatives (typically subject-elided from prior turn)
-    "refactor", "simplify", "expand", "shorten", "fix ", "rename",
-    "optimize", "add ", "remove", "delete this", "tweak",
-    "rewrite it", "rewrite this", "rewrite that",
+    "refactor",
+    "simplify",
+    "expand",
+    "shorten",
+    "fix ",
+    "rename",
+    "optimize",
+    "add ",
+    "remove",
+    "delete this",
+    "tweak",
+    "rewrite it",
+    "rewrite this",
+    "rewrite that",
     // Comparative follow-ups
-    "faster", "slower", "smaller", "bigger", "shorter", "longer",
-    "cleaner", "simpler", "better",
+    "faster",
+    "slower",
+    "smaller",
+    "bigger",
+    "shorter",
+    "longer",
+    "cleaner",
+    "simpler",
+    "better",
 ];
 
 /// Weak continuation cues — coordinators that MAY imply continuation but more

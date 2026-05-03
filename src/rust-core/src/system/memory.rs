@@ -1,3 +1,4 @@
+use crate::constants::{MEMORY_HEAVY_WARN_THRESHOLD_GB, VM_STAT_CMD};
 /// System memory sampling via vm_stat.
 ///
 /// Provides a non-fatal headroom estimate before heavy model inference.
@@ -5,7 +6,6 @@
 /// to callers as fatal — the memory sampler is a diagnostic tool only.
 use std::process::Command;
 use tracing::warn;
-use crate::constants::{MEMORY_HEAVY_WARN_THRESHOLD_GB, VM_STAT_CMD};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -32,16 +32,24 @@ pub enum MemorySampleError {
 impl std::fmt::Display for MemorySampleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e)            => write!(f, "vm_stat I/O error: {e}"),
-            Self::Utf8(e)          => write!(f, "vm_stat output is not UTF-8: {e}"),
-            Self::MissingField(s)  => write!(f, "vm_stat output missing field: {s}"),
-            Self::ParseError(s)    => write!(f, "vm_stat parse error: {s}"),
+            Self::Io(e) => write!(f, "vm_stat I/O error: {e}"),
+            Self::Utf8(e) => write!(f, "vm_stat output is not UTF-8: {e}"),
+            Self::MissingField(s) => write!(f, "vm_stat output missing field: {s}"),
+            Self::ParseError(s) => write!(f, "vm_stat parse error: {s}"),
         }
     }
 }
 
-impl From<std::io::Error>      for MemorySampleError { fn from(e: std::io::Error)      -> Self { Self::Io(e) } }
-impl From<std::str::Utf8Error> for MemorySampleError { fn from(e: std::str::Utf8Error) -> Self { Self::Utf8(e) } }
+impl From<std::io::Error> for MemorySampleError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+impl From<std::str::Utf8Error> for MemorySampleError {
+    fn from(e: std::str::Utf8Error) -> Self {
+        Self::Utf8(e)
+    }
+}
 
 /// Run vm_stat and return a MemorySnapshot.
 pub fn sample() -> Result<MemorySnapshot, MemorySampleError> {
@@ -93,8 +101,8 @@ pub fn warn_if_low_for_heavy() {
 pub fn parse_vm_stat(data: &[u8]) -> Result<MemorySnapshot, MemorySampleError> {
     let text = std::str::from_utf8(data)?;
     let mut page_size: Option<u64> = None;
-    let mut free:      Option<u64> = None;
-    let mut inactive:  Option<u64> = None;
+    let mut free: Option<u64> = None;
+    let mut inactive: Option<u64> = None;
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -116,13 +124,16 @@ pub fn parse_vm_stat(data: &[u8]) -> Result<MemorySnapshot, MemorySampleError> {
     }
 
     let page_size = page_size.ok_or(MemorySampleError::MissingField("page size header"))?;
-    let free      = free.ok_or(MemorySampleError::MissingField("Pages free"))?;
-    let inactive  = inactive.ok_or(MemorySampleError::MissingField("Pages inactive"))?;
+    let free = free.ok_or(MemorySampleError::MissingField("Pages free"))?;
+    let inactive = inactive.ok_or(MemorySampleError::MissingField("Pages inactive"))?;
 
     let available_bytes = (free + inactive) * page_size;
-    let available_gb    = available_bytes as f64 / 1_073_741_824.0; // 1 GiB = 2^30 bytes
+    let available_gb = available_bytes as f64 / 1_073_741_824.0; // 1 GiB = 2^30 bytes
 
-    Ok(MemorySnapshot { available_gb, page_size })
+    Ok(MemorySnapshot {
+        available_gb,
+        page_size,
+    })
 }
 
 /// Extract the page size (in bytes) from the vm_stat header line.
@@ -131,9 +142,9 @@ pub fn parse_vm_stat(data: &[u8]) -> Result<MemorySnapshot, MemorySampleError> {
 fn extract_page_size(line: &str) -> Option<u64> {
     // Target: "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
     let start = line.find("page size of")?;
-    let rest  = &line[start + "page size of".len()..];
-    let rest  = rest.trim();
-    let end   = rest.find(' ')?;
+    let rest = &line[start + "page size of".len()..];
+    let rest = rest.trim();
+    let end = rest.find(' ')?;
     rest[..end].parse().ok()
 }
 
@@ -172,14 +183,21 @@ Pages purgeable:                             10.
         // (10000 + 50000) × 16384 = 60000 × 16384 = 983_040_000 bytes ≈ 0.915 GiB
         let expected = (10_000u64 + 50_000) * 16_384;
         let expected_gb = expected as f64 / 1_073_741_824.0;
-        assert!((snap.available_gb - expected_gb).abs() < 1e-6,
-            "available_gb mismatch: got {}, expected {}", snap.available_gb, expected_gb);
+        assert!(
+            (snap.available_gb - expected_gb).abs() < 1e-6,
+            "available_gb mismatch: got {}, expected {}",
+            snap.available_gb,
+            expected_gb
+        );
     }
 
     #[test]
     fn parse_vm_stat_page_size_parsed_from_header() {
         let snap = parse_vm_stat(FIXTURE_VM_STAT.as_bytes()).unwrap();
-        assert_eq!(snap.page_size, 16_384, "Page size must be extracted from the vm_stat header");
+        assert_eq!(
+            snap.page_size, 16_384,
+            "Page size must be extracted from the vm_stat header"
+        );
     }
 
     #[test]
@@ -211,7 +229,10 @@ Pages inactive:                           50000.
     fn parse_vm_stat_missing_header_returns_err() {
         let data = "Pages free: 10000.\nPages inactive: 50000.\n";
         let err = parse_vm_stat(data.as_bytes()).unwrap_err();
-        assert!(matches!(err, MemorySampleError::MissingField("page size header")));
+        assert!(matches!(
+            err,
+            MemorySampleError::MissingField("page size header")
+        ));
     }
 
     /// Calls the real `vm_stat` binary. Run with: make test-e2e
@@ -220,8 +241,11 @@ Pages inactive:                           50000.
     async fn memory_sample_positive_on_live_machine() {
         let snap = sample().expect("vm_stat must succeed on live machine");
         assert!(snap.available_gb > 0.0, "Available GB must be positive");
-        assert!(snap.page_size > 0,      "Page size must be positive");
+        assert!(snap.page_size > 0, "Page size must be positive");
         // Apple Silicon always uses 16384-byte pages.
-        assert_eq!(snap.page_size, 16_384, "Expected 16KB pages on Apple Silicon");
+        assert_eq!(
+            snap.page_size, 16_384,
+            "Expected 16KB pages on Apple Silicon"
+        );
     }
 }
