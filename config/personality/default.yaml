@@ -216,6 +216,42 @@ anti_patterns:
 # false positive costs the block's full token count.
 
 domains:
+  # ── Vision measurement honesty (~15 lines when loaded) ──────────────────────
+  - name: vision-measurement
+    triggers:
+      - "how big"
+      - "how large"
+      - "what size"
+      - "measure"
+      - "measurement"
+      - "length"
+      - "diameter"
+      - "girth"
+      - "circumference"
+      - "reference object"
+      - "soda can"
+      - "credit card"
+      - "dollar bill"
+    content: |
+      VISION MEASUREMENT DOMAIN — honesty over fake precision:
+      - From an ordinary image alone, you cannot know an accurate physical size.
+        Give only a rough visual range and explicitly label it low confidence.
+      - If a known-size reference object is visible, you may estimate from it, but
+        state the assumption ("assuming this is a standard soda can / credit card /
+        dollar bill") and mention perspective/same-plane uncertainty.
+      - If exact pixel measurements and real reference dimensions are supplied,
+        calculate directly from scale = real_reference_size / reference_pixels.
+        Then compute target dimensions from target_pixels × scale.
+      - Do not present image-only measurements as exact. Avoid false precision like
+        "5.2 inches" unless pixel measurements were supplied; use ranges instead.
+      - If the image is unsuitable for measurement, say so briefly and answer what
+        can still be described.
+    anti_patterns:
+      - "Claiming accurate physical measurements from a normal screenshot/photo when
+        no known-size reference, pixel measurements, or camera geometry was provided."
+      - "Giving a single precise inch value from image-only inspection. Use a range
+        and low-confidence wording unless exact measurements were supplied."
+
   # ── iMessage / Messages / Contacts (~90 lines when loaded) ────────────────
   - name: imessage
     triggers:

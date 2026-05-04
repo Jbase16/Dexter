@@ -186,7 +186,7 @@ cd src/rust-core && cargo build --release
 cd /Users/jason/Developer/Dex && make proto
 cd src/swift && swift build
 
-# Live smoke (requires Ollama + workers running)
+# Live smoke (requires Ollama + workers running; make run uses release core)
 bash scripts/live-smoke.sh
 ```
 
@@ -213,11 +213,19 @@ Swift HUD uses). Useful for:
 
 Build + run:
 ```bash
+# Terminal 1: start the release core + Swift UI
+cd /Users/jason/Developer/Dex && make run
+
+# Terminal 2: send typed input to that running daemon
 cd src/rust-core && cargo build --release --bin dexter-cli
 ./target/release/dexter-cli "what's 2 plus 2"
 ./target/release/dexter-cli --quiet --auto-deny "rm -rf /tmp/foo"
 printf "q1\nq2\n" | ./target/release/dexter-cli
 ```
+
+`dexter-cli` is only a client. It sends input to whatever daemon owns
+`/tmp/dexter.sock`; rebuild/restart the core with `make run` before using the
+CLI to validate Rust-core changes.
 
 Defaults to `from_voice=false` (HUD typed-mode behavior, no TTS). Use
 `--from-voice` to exercise the TTS pipeline. Auto-denies destructive action

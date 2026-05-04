@@ -649,6 +649,42 @@ mod tests {
     }
 
     #[test]
+    fn project_yaml_loads_vision_measurement_domain_for_size_queries() {
+        let path = Path::new("../../config/personality/default.yaml");
+        if !path.exists() {
+            return;
+        }
+        let layer = PersonalityLayer::load(path).expect("project personality YAML should parse");
+
+        let prompt = layer.build_system_prompt_for(Some("estimate the length using the soda can"));
+
+        assert!(
+            prompt.contains("VISION MEASUREMENT DOMAIN"),
+            "size/reference queries should load the vision measurement honesty domain"
+        );
+        assert!(
+            prompt.contains("Do not present image-only measurements as exact"),
+            "measurement domain must warn against fake precision"
+        );
+    }
+
+    #[test]
+    fn project_yaml_does_not_load_vision_measurement_domain_for_plain_vision_queries() {
+        let path = Path::new("../../config/personality/default.yaml");
+        if !path.exists() {
+            return;
+        }
+        let layer = PersonalityLayer::load(path).expect("project personality YAML should parse");
+
+        let prompt = layer.build_system_prompt_for(Some("what color is the shirt in this image?"));
+
+        assert!(
+            !prompt.contains("VISION MEASUREMENT DOMAIN"),
+            "plain visual description/color queries should not pay for measurement guidance"
+        );
+    }
+
+    #[test]
     fn load_missing_file_returns_file_not_found() {
         let path = Path::new("/nonexistent/path/personality.yaml");
         match PersonalityLayer::load(path) {

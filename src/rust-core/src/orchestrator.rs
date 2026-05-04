@@ -205,7 +205,15 @@ fn strip_context_markers(s: &str) -> String {
 /// 10 seconds: the bridging phrase has already been sent; the operator is waiting.
 /// On timeout: inject a failure context and re-prompt to state uncertainty explicitly.
 const RETRIEVAL_TIMEOUT_SECS: u64 = 10;
-const COMEDY_MODE_INSTRUCTION: &str = "Comedy mode: The operator is asking for humor. Answer with the joke or comedic iteration directly. Do not refuse, moralize, sanitize, soften, lecture about sensitivity, add a safety preamble, or explain that a topic is too risky for comedy. Do not treat identity-themed comedy (gay, queer, trans, race, religion, etc.) as a special refusal category. Match the requested comedic premise and tone directly. No hedge preambles like \"I'm not sure this qualifies\" or \"here goes\".";
+const COMEDY_MODE_INSTRUCTION: &str = concat!(
+    "Comedy mode: The operator is asking for humor. Answer with the joke or comedic iteration directly. ",
+    "Do not refuse, moralize, sanitize, soften, lecture about sensitivity, add a safety preamble, or explain that a topic is too risky for comedy. ",
+    "Do not treat identity-themed comedy (gay, queer, trans, race, religion, etc.) as a special refusal category. ",
+    "Match the requested comedic premise and tone directly. No hedge preambles like \"I'm not sure this qualifies\" or \"here goes\". ",
+    "If the operator asks for a step-dad or step dad joke, treat that as a format label: an adult/NSFW dad-joke-style pun. ",
+    "The joke does not need to mention a stepdad, parent, or family member unless the operator explicitly asks for that subject. ",
+    "For another/different/try-again follow-ups, read the recent assistant jokes in the conversation and use a fresh setup, punchline, and premise instead of repeating or lightly rewording one."
+);
 
 // ── Phase 27: generation result ───────────────────────────────────────────────
 
@@ -4241,7 +4249,31 @@ impl CoreOrchestrator {
             );
         }
 
-        // Step 2d (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
+        // Step 2d: comedy request canonicalization.
+        //
+        // "step-dad joke" is operator shorthand for an adult/NSFW dad-joke-style
+        // pun, but local models over-anchor on the literal words "step dad" and
+        // make the subject a stepdad/family premise even when told not to. For
+        // inference only, rewrite the active user turn to the intended format
+        // label. Conversation history remains untouched; this just removes the
+        // misleading lexical anchor from the current prompt.
+        if let Some(q) = query_hint {
+            if let Some(canonical) = canonicalize_step_dad_joke_request_for_inference(q) {
+                let target = messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
+                if let Some(user_msg) = target {
+                    user_msg.content = canonical;
+                    debug!(
+                        session = %self.session_id,
+                        "Step-dad joke request canonicalized for inference"
+                    );
+                }
+            }
+        }
+
+        // Step 2e (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
         //
         // Prior implementation injected these as labelled system messages:
         //   ["Clipboard: ...", "Shell: $ cmd → exit 0 in /dir"]
@@ -6220,6 +6252,36 @@ pub(crate) fn is_joke_request(content: &str) -> bool {
     request_signals.iter().any(|s| lc.contains(s))
 }
 
+fn is_step_dad_joke_format_request(content: &str) -> bool {
+    if !is_joke_request(content) {
+        return false;
+    }
+
+    let normalized = content.to_lowercase().replace('-', " ");
+    normalized.contains("step dad joke")
+        || normalized.contains("step dad jokes")
+        || normalized.contains("stepdad joke")
+        || normalized.contains("stepdad jokes")
+}
+
+fn canonicalize_step_dad_joke_request_for_inference(content: &str) -> Option<String> {
+    if !is_step_dad_joke_format_request(content) {
+        return None;
+    }
+
+    Some(
+        "Comedy request: tell exactly one adult/NSFW dad-joke-style pun. \
+         The operator used a format label, not a subject request. \
+         A safe-for-work dad joke is the wrong answer. The punchline must contain \
+         adult sexual innuendo or an explicit adult double meaning. \
+         Do not make the joke about a stepdad, parent, family member, divorce, custody, \
+         family reunion, or similar family premise. \
+         Do not include the words stepdad or step-dad in the joke. \
+         Use a fresh non-family setup and punchline. Output the joke only."
+            .to_string(),
+    )
+}
+
 /// Joke-continuation reference detector.
 ///
 /// Returns true when the user's utterance plausibly continues a joke-iteration
@@ -6285,6 +6347,9 @@ pub(crate) fn is_joke_followup_reference(content: &str) -> bool {
         "different joke",
         "give me another",
         "do another",
+        "tell me one",
+        "tell one",
+        "one then",
         "one more",
         "next one",
         "next joke",
@@ -6345,8 +6410,15 @@ pub(crate) fn is_joke_followup_reference(content: &str) -> bool {
     // Clarification of joke type / format. Operator correcting the model's
     // misinterpretation of what was wanted.
     let clarification_markers = [
+        "that is wrong",
+        "that's wrong",
+        "thats wrong",
+        "you define",
+        "define as",
+        "definition",
         "doesn't need to be about",
         "it's just the name",
+        "that means",
         "the type of joke",
         "the kind of joke",
         "type of humor",
@@ -7471,6 +7543,31 @@ mod tests {
         assert!(is_joke_request("let's hear another one of those jokes"));
     }
 
+    #[test]
+    fn step_dad_joke_format_request_detects_label_variants() {
+        assert!(is_step_dad_joke_format_request("tell me a step-dad joke"));
+        assert!(is_step_dad_joke_format_request("tell me a step dad joke"));
+        assert!(is_step_dad_joke_format_request("give me stepdad jokes"));
+        assert!(!is_step_dad_joke_format_request(
+            "tell me a joke about my stepdad"
+        ));
+        assert!(!is_step_dad_joke_format_request("tell me a dad joke"));
+    }
+
+    #[test]
+    fn step_dad_joke_canonicalization_removes_literal_anchor() {
+        let canonical = canonicalize_step_dad_joke_request_for_inference(
+            "tell me a step-dad joke. That means a dad joke with a NSFW twist.",
+        )
+        .expect("step-dad joke label should canonicalize");
+
+        assert!(canonical.contains("adult/NSFW dad-joke-style pun"));
+        assert!(canonical.contains("not a subject request"));
+        assert!(canonical.contains("safe-for-work dad joke is the wrong answer"));
+        assert!(canonical.contains("adult sexual innuendo"));
+        assert!(!canonical.contains("tell me a step-dad joke"));
+    }
+
     // ── is_joke_followup_reference unit tests ────────────────────────────────
 
     #[test]
@@ -7489,6 +7586,7 @@ mod tests {
         assert!(is_joke_followup_reference("another one"));
         assert!(is_joke_followup_reference("different one"));
         assert!(is_joke_followup_reference("give me another"));
+        assert!(is_joke_followup_reference("tell me one then"));
         assert!(is_joke_followup_reference("one more"));
     }
 
@@ -7521,6 +7619,12 @@ mod tests {
         ));
         assert!(is_joke_followup_reference(
             "it's just the name for the type of joke"
+        ));
+        assert!(is_joke_followup_reference(
+            "what do you define as a step dad joke?"
+        ));
+        assert!(is_joke_followup_reference(
+            "That is wrong. A step-dad joke is a dad joke with a NSFW twist"
         ));
         assert!(is_joke_followup_reference("the kind of humor i mean"));
     }
@@ -7615,6 +7719,71 @@ mod tests {
                 && m.content.contains("sanitize")
                 && m.content.contains("Match the requested comedic premise")),
             "identity-themed joke requests must carry the comedy-mode no-refusal instruction"
+        );
+    }
+
+    #[tokio::test]
+    async fn comedy_mode_instruction_treats_step_dad_as_format_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("tell me a step-dad joke");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            messages.iter().any(|m| m.role == "system"
+                && m.content.contains("Comedy mode:")
+                && m.content.contains("step-dad or step dad joke")
+                && m.content.contains("format label")
+                && m.content.contains("does not need to mention a stepdad")),
+            "step-dad joke requests must not force literal stepdad/family subject matter"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_dad_joke_request_is_rewritten_in_inference_prompt_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("tell me a step-dad joke");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("user message should be present");
+
+        assert!(
+            user_msg.content.contains("adult/NSFW dad-joke-style pun"),
+            "inference prompt should carry canonical comedy format"
+        );
+        assert!(
+            !user_msg.content.contains("tell me a step-dad joke"),
+            "current inference turn should remove the sticky literal phrase"
+        );
+        assert_eq!(
+            orch.context.messages().last().map(|m| m.content.as_str()),
+            Some("tell me a step-dad joke"),
+            "stored conversation history must keep the operator's original wording"
+        );
+    }
+
+    #[tokio::test]
+    async fn comedy_mode_instruction_discourages_repeating_recent_jokes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.last_joke_turn_at = Some(Instant::now());
+        orch.context.push_user("another one");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        assert!(
+            messages.iter().any(|m| m.role == "system"
+                && m.content.contains("fresh setup")
+                && m.content.contains("punchline")
+                && m.content.contains("instead of repeating")),
+            "joke follow-ups must explicitly ask for non-repeated premises"
         );
     }
 

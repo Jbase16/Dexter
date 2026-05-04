@@ -169,7 +169,7 @@ make setup-python
 # Regenerate proto artifacts (after proto changes only)
 make proto
 
-# Run (starts Rust core + Swift UI, waits for socket before launching Swift)
+# Run (starts release Rust core + Swift UI, waits for socket before launching Swift)
 make run
 
 # Tests (offline, no Ollama required)
@@ -178,6 +178,10 @@ cd src/rust-core && cargo test --bin dexter-core
 # Release build
 cd src/rust-core && cargo build --release
 ```
+
+`make run` refuses to start if another Dexter core already owns `/tmp/dexter.sock`.
+Stop the existing core/UI first so the Swift UI and `dexter-cli` talk to the same
+freshly built daemon.
 
 **Dev tool** — `dexter-cli` sends typed input to the running daemon without the Swift UI:
 

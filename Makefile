@@ -15,14 +15,14 @@ PROTOC_GEN_GRPC_SWIFT := $(shell find /opt/homebrew/Cellar/protoc-gen-grpc-swift
 #
 # SOCKET_PATH must match constants::SOCKET_PATH in src/rust-core/src/constants.rs.
 # SOCKET_TIMEOUT_SECS must match constants::SOCKET_TIMEOUT_SECS.
-# 30 seconds accommodates a cold cargo build on first run.
+# 90 seconds accommodates a cold release cargo build on first run.
 
 SOCKET_PATH         := /tmp/dexter.sock
-SOCKET_TIMEOUT_SECS := 30
+SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto run-core run-swift wait-for-core run test test-inference test-e2e cli smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -80,9 +80,23 @@ test-inference:
 	@echo "⚠  test-inference is deprecated — use 'make test-e2e' instead"
 	$(MAKE) test-e2e
 
-## run-core: start the Rust daemon
+## ensure-core-not-running: fail if another Dexter core already owns the socket
+ensure-core-not-running:
+	@if python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(1); sys.exit(0 if s.connect_ex('$(SOCKET_PATH)')==0 else 1)" 2>/dev/null; then \
+		echo "ERROR: A Dexter core is already accepting connections at $(SOCKET_PATH)."; \
+		echo "       Stop the existing core/UI first, then run 'make run' again."; \
+		echo "       Current owner:"; \
+		lsof -nU 2>/dev/null | grep -F -- '$(SOCKET_PATH)' || true; \
+		exit 1; \
+	fi
+
+## run-core: start the Rust daemon in release mode (same artifact family used by CLI/live smoke)
 run-core:
-	cargo run --manifest-path $(RUST_CORE_DIR)/Cargo.toml
+	cargo run --manifest-path $(RUST_CORE_DIR)/Cargo.toml --release --bin dexter-core
+
+## run-core-debug: start the Rust daemon in debug mode intentionally
+run-core-debug:
+	cargo run --manifest-path $(RUST_CORE_DIR)/Cargo.toml --bin dexter-core
 
 ## cli: build the dexter-cli release binary (Phase 38 dev tool).
 ##
@@ -100,7 +114,7 @@ cli:
 run-swift:
 	cd $(SWIFT_DIR) && swift run
 
-## wait-for-core: block until the Rust core socket is present and accepting connections.
+## wait-for-core: block until the newly launched Rust core socket is accepting connections.
 ##
 ## Uses a Python one-liner (socket.connect_ex) rather than `nc -z -U` because
 ## BSD netcat on macOS has a known bug where -z and -U combined always return
@@ -131,7 +145,7 @@ wait-for-core:
 ## run: start both processes (requires Ollama to be running for inference). Swift shell waits for the core socket to accept
 ##      connections before launching — no fixed sleep, no silent race condition.
 ##      Ctrl-C kills both processes.
-run:
+run: ensure-core-not-running
 	@trap 'kill 0' INT; \
 	$(MAKE) run-core & \
 	$(MAKE) wait-for-core && $(MAKE) run-swift & \

@@ -13,12 +13,13 @@
 ///
 /// ## Streaming timeout strategy
 ///
-/// `generate_stream` uses inactivity detection, NOT a total-request timeout.
-/// `reqwest::ClientBuilder::timeout` / `RequestBuilder::timeout` applies a wall-clock
-/// deadline to the entire request+response pair and would kill a legitimate 3–4 minute
-/// HEAVY-tier response. Inactivity detection wraps each individual `.next()` await call
-/// with `tokio::time::timeout(inactivity_window, stream.next())`. The window resets on
-/// every received byte chunk and only fires if Ollama stops sending entirely — exactly
+/// `generate_stream` uses streaming-specific timeout boundaries, NOT a total-request
+/// timeout. `reqwest::ClientBuilder::timeout` / `RequestBuilder::timeout` applies a
+/// wall-clock deadline to the entire request+response pair and would kill a legitimate
+/// 3–4 minute HEAVY-tier response. Dexter instead caps the pre-stream response-header
+/// wait, then wraps each individual `.next()` await call with
+/// `tokio::time::timeout(inactivity_window, stream.next())`. The per-chunk window resets
+/// on every received byte chunk and only fires if Ollama stops sending entirely — exactly
 /// the case we want to detect (hung connection, crashed process, OOM kill).
 ///
 /// Non-streaming endpoints (embed, list, unload, pull status check) use
@@ -635,16 +636,25 @@ impl InferenceEngine {
             "Starting streaming generation"
         );
 
-        // Send the request and get the raw response. We explicitly do NOT call
-        // `.timeout()` here — inactivity detection is applied per-chunk in the
-        // spawned task below.
-        let response = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
+        // Send the request and get the raw response headers. We still avoid a
+        // RequestBuilder global timeout because that would cap the full stream,
+        // but the initial `.send().await` happens before we have a byte stream to
+        // apply per-chunk inactivity detection to. If Ollama wedges while loading
+        // a model and never returns headers, this guard is the only thing that can
+        // return control to the orchestrator.
+        let header_timeout = Duration::from_secs(
+            req.inactivity_timeout_override_secs
+                .unwrap_or(self.config.request_timeout_secs.max(
+                    self.config.stream_inactivity_timeout_secs,
+                )),
+        );
+        let response = match timeout(
+            header_timeout,
+            self.client.post(&url).json(&body).send(),
+        )
+        .await
+        {
+            Ok(send_result) => send_result.map_err(|e| {
                 if e.is_connect() {
                     InferenceError::OllamaUnavailable {
                         url: url.clone(),
@@ -653,7 +663,15 @@ impl InferenceEngine {
                 } else {
                     InferenceError::from(e)
                 }
-            })?;
+            })?,
+            Err(_elapsed) => {
+                return Err(InferenceError::StreamInterrupted(format!(
+                    "no response headers from Ollama for {}s before stream started (model: {})",
+                    header_timeout.as_secs(),
+                    req.model_name,
+                )));
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -1223,6 +1241,49 @@ mod tests {
             result.is_ok(),
             "InferenceEngine::new() should not contact Ollama"
         );
+    }
+
+    #[tokio::test]
+    async fn generate_stream_times_out_waiting_for_response_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((_socket, _peer)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let mut cfg = test_config();
+        cfg.ollama_base_url = format!("http://{addr}");
+        cfg.request_timeout_secs = 1;
+        cfg.stream_inactivity_timeout_secs = 1;
+        let engine = InferenceEngine::new(cfg).unwrap();
+        let req = GenerationRequest {
+            model_name: "header-timeout-test".to_string(),
+            messages: vec![Message::user("hello")],
+            temperature: None,
+            unload_after: false,
+            keep_alive_override: None,
+            num_predict: None,
+            inactivity_timeout_override_secs: None,
+            num_ctx_override: None,
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(3), engine.generate_stream(req))
+            .await
+            .expect("generate_stream should return via its own header timeout");
+
+        match result {
+            Err(InferenceError::StreamInterrupted(message)) => {
+                assert!(
+                    message.contains("before stream started"),
+                    "wrong timeout boundary: {message}"
+                );
+            }
+            other => panic!("expected pre-stream timeout, got {other:?}"),
+        }
     }
 
     // AC-2: phi3:mini is present on disk with a non-zero size.
