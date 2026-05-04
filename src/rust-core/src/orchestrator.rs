@@ -212,6 +212,7 @@ const COMEDY_MODE_INSTRUCTION: &str = concat!(
     "Match the requested comedic premise and tone directly. No hedge preambles like \"I'm not sure this qualifies\" or \"here goes\". ",
     "If the operator asks for a step-dad or step dad joke, treat that as a format label: an adult/NSFW dad-joke-style pun. ",
     "The joke does not need to mention a stepdad, parent, or family member unless the operator explicitly asks for that subject. ",
+    "When the operator asks for a specific number of jokes, return exactly that many in one response. ",
     "For another/different/try-again follow-ups, read the recent assistant jokes in the conversation and use a fresh setup, punchline, and premise instead of repeating or lightly rewording one."
 );
 
@@ -4159,6 +4160,8 @@ impl CoreOrchestrator {
                 "Domain blocks loaded for this turn"
             );
         }
+        let compiled_step_dad_joke_task = query_hint
+            .and_then(|q| compile_step_dad_joke_request_for_inference(q, self.context.messages()));
 
         // Step 1: apply personality — returns a new Vec with system prompt at index 0.
         //         The hint conditionally injects matching domain blocks (T1.2).
@@ -4223,7 +4226,8 @@ impl CoreOrchestrator {
         // does not weaken serious safety-sensitive action/tool prompts.
         let comedy_mode_active = query_hint
             .map(|q| {
-                is_joke_request(q)
+                compiled_step_dad_joke_task.is_some()
+                    || is_joke_request(q)
                     || self
                         .last_joke_turn_at
                         .map(|last_joke| {
@@ -4257,19 +4261,17 @@ impl CoreOrchestrator {
         // inference only, rewrite the active user turn to the intended format
         // label. Conversation history remains untouched; this just removes the
         // misleading lexical anchor from the current prompt.
-        if let Some(q) = query_hint {
-            if let Some(canonical) = canonicalize_step_dad_joke_request_for_inference(q) {
-                let target = messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
-                if let Some(user_msg) = target {
-                    user_msg.content = canonical;
-                    debug!(
-                        session = %self.session_id,
-                        "Step-dad joke request canonicalized for inference"
-                    );
-                }
+        if let Some(compiled) = compiled_step_dad_joke_task.as_ref() {
+            let target = messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
+            if let Some(user_msg) = target {
+                user_msg.content = compiled.clone();
+                debug!(
+                    session = %self.session_id,
+                    "Step-dad joke request compiled for inference"
+                );
             }
         }
 
@@ -4299,58 +4301,73 @@ impl CoreOrchestrator {
         // from hours ago) is prepended to every query, overwhelming small models into
         // treating the clipboard as the answer to unrelated questions like "my messages".
         let clipboard_opt = {
-            let raw_clip = self.context_observer.clipboard_summary();
-            let query_lower = messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
-                .map(|m| m.content.to_lowercase())
-                .unwrap_or_default();
-            let user_references_clipboard = query_lower.contains("clipboard")
-                || query_lower.contains("copied")
-                || query_lower.contains("copy")
-                || query_lower.contains("paste")
-                || query_lower.contains("what i just")
-                || query_lower.contains("what did i");
-            let clipboard_is_fresh = self
-                .context_observer
-                .snapshot()
-                .clipboard_changed_at
-                .map(|t| {
-                    (chrono::Utc::now() - t).num_seconds()
-                        < crate::constants::CLIPBOARD_RECENCY_SECS
-                })
-                .unwrap_or(false);
-            if user_references_clipboard || clipboard_is_fresh {
-                raw_clip
-            } else {
-                if raw_clip.is_some() {
-                    debug!(
-                        session = %self.session_id,
-                        "Clipboard available but stale and user didn't reference it — skipping injection"
-                    );
-                }
+            if comedy_mode_active {
+                debug!(
+                    session = %self.session_id,
+                    "Comedy mode active — skipping clipboard injection"
+                );
                 None
+            } else {
+                let raw_clip = self.context_observer.clipboard_summary();
+                let query_lower = messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+                    .map(|m| m.content.to_lowercase())
+                    .unwrap_or_default();
+                let user_references_clipboard = query_lower.contains("clipboard")
+                    || query_lower.contains("copied")
+                    || query_lower.contains("copy")
+                    || query_lower.contains("paste")
+                    || query_lower.contains("what i just")
+                    || query_lower.contains("what did i");
+                let clipboard_is_fresh = self
+                    .context_observer
+                    .snapshot()
+                    .clipboard_changed_at
+                    .map(|t| {
+                        (chrono::Utc::now() - t).num_seconds()
+                            < crate::constants::CLIPBOARD_RECENCY_SECS
+                    })
+                    .unwrap_or(false);
+                if user_references_clipboard || clipboard_is_fresh {
+                    raw_clip
+                } else {
+                    if raw_clip.is_some() {
+                        debug!(
+                            session = %self.session_id,
+                            "Clipboard available but stale and user didn't reference it — skipping injection"
+                        );
+                    }
+                    None
+                }
             }
         };
-        let shell_opt = self
-            .context_observer
-            .snapshot()
-            .last_shell_command
-            .as_ref()
-            .filter(|shell| {
-                let age_secs = (chrono::Utc::now() - shell.received_at).num_seconds();
-                age_secs < crate::constants::SHELL_CONTEXT_MAX_AGE_SECS as i64
-            })
-            .map(|shell| {
-                let exit_str = shell
-                    .exit_code
-                    .map_or_else(|| "?".to_string(), |c| c.to_string());
-                format!(
-                    "$ {} \u{2192} exit {} in {}",
-                    shell.command, exit_str, shell.cwd
-                )
-            });
+        let shell_opt = if comedy_mode_active {
+            debug!(
+                session = %self.session_id,
+                "Comedy mode active — skipping shell injection"
+            );
+            None
+        } else {
+            self.context_observer
+                .snapshot()
+                .last_shell_command
+                .as_ref()
+                .filter(|shell| {
+                    let age_secs = (chrono::Utc::now() - shell.received_at).num_seconds();
+                    age_secs < crate::constants::SHELL_CONTEXT_MAX_AGE_SECS as i64
+                })
+                .map(|shell| {
+                    let exit_str = shell
+                        .exit_code
+                        .map_or_else(|| "?".to_string(), |c| c.to_string());
+                    format!(
+                        "$ {} \u{2192} exit {} in {}",
+                        shell.command, exit_str, shell.cwd
+                    )
+                })
+        };
 
         if clipboard_opt.is_some() || shell_opt.is_some() {
             let target = messages
@@ -6264,22 +6281,110 @@ fn is_step_dad_joke_format_request(content: &str) -> bool {
         || normalized.contains("stepdad jokes")
 }
 
-fn canonicalize_step_dad_joke_request_for_inference(content: &str) -> Option<String> {
-    if !is_step_dad_joke_format_request(content) {
+fn compile_step_dad_joke_request_for_inference(
+    content: &str,
+    history: &[crate::inference::engine::Message],
+) -> Option<String> {
+    let explicit = is_step_dad_joke_format_request(content);
+    let recent_context = recent_step_dad_joke_format_context(history);
+    let followup = recent_context && is_step_dad_joke_iteration_followup(content);
+    if !explicit && !followup {
         return None;
     }
 
-    Some(
-        "Comedy request: tell exactly one adult/NSFW dad-joke-style pun. \
-         The operator used a format label, not a subject request. \
-         A safe-for-work dad joke is the wrong answer. The punchline must contain \
-         adult sexual innuendo or an explicit adult double meaning. \
-         Do not make the joke about a stepdad, parent, family member, divorce, custody, \
-         family reunion, or similar family premise. \
-         Do not include the words stepdad or step-dad in the joke. \
-         Use a fresh non-family setup and punchline. Output the joke only."
-            .to_string(),
-    )
+    let count = requested_step_dad_joke_count(content)
+        .unwrap_or(1)
+        .clamp(1, 10);
+    let count_instruction = if count == 1 {
+        "Generate exactly 1 original adult/NSFW dad-joke-style pun.".to_string()
+    } else {
+        format!(
+            "Generate exactly {count} distinct original adult/NSFW dad-joke-style puns in one response. Number them 1-{count}."
+        )
+    };
+
+    Some(format!(
+        "COMPILED COMEDY TASK - step-dad joke format:\n\
+         {count_instruction}\n\
+         Definition: a step-dad joke means a dad-joke-style pun with an adult/NSFW twist. \
+         It is NOT a request for jokes about stepdads, parents, custody, divorce, family reunions, or family dynamics.\n\
+         Requirements:\n\
+         - Each joke must have a clear setup and punchline with wordplay or double meaning.\n\
+         - Each punchline must include adult sexual innuendo or an explicit adult double meaning.\n\
+         - Do not include the words stepdad or step-dad unless the operator explicitly asks for literal stepdad subject matter.\n\
+         - Do not reuse any setup, punchline, or premise already visible in this conversation.\n\
+         - No preamble, no explanation, no safety note. Output only the requested joke(s)."
+    ))
+}
+
+fn recent_step_dad_joke_format_context(history: &[crate::inference::engine::Message]) -> bool {
+    history.iter().rev().take(10).any(|m| {
+        is_step_dad_joke_format_request(&m.content)
+            || m.content
+                .to_lowercase()
+                .contains("adult/nsfw dad-joke-style pun")
+            || m.content
+                .to_lowercase()
+                .contains("step-dad joke means a dad-joke-style pun")
+    })
+}
+
+fn is_step_dad_joke_iteration_followup(content: &str) -> bool {
+    let t = content.to_lowercase();
+    is_joke_followup_reference(content)
+        || t.contains("10 more")
+        || t.contains("ten more")
+        || t.contains("that isn't ")
+        || t.contains("that isnt ")
+        || t.contains("not 10")
+        || t.contains("not ten")
+        || t.contains("isn't 10")
+        || t.contains("isnt 10")
+        || t.contains("isn't ten")
+        || t.contains("isnt ten")
+        || (t.contains("i want") && (t.contains("more") || t.contains("one response")))
+}
+
+fn requested_step_dad_joke_count(content: &str) -> Option<usize> {
+    let t = content.to_lowercase();
+    if t.contains("10 more") || t.contains("ten more") {
+        return Some(10);
+    }
+
+    for word in t.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        if let Ok(n) = word.parse::<usize>() {
+            return Some(n.clamp(1, 10));
+        }
+    }
+
+    let count = if t.contains("ten") {
+        Some(10)
+    } else if t.contains("nine") {
+        Some(9)
+    } else if t.contains("eight") {
+        Some(8)
+    } else if t.contains("seven") {
+        Some(7)
+    } else if t.contains("six") {
+        Some(6)
+    } else if t.contains("five") {
+        Some(5)
+    } else if t.contains("four") {
+        Some(4)
+    } else if t.contains("three") {
+        Some(3)
+    } else if t.contains("two") {
+        Some(2)
+    } else if t.contains("couple") {
+        Some(2)
+    } else {
+        None
+    };
+
+    count.map(|n| n.clamp(1, 10))
 }
 
 /// Joke-continuation reference detector.
@@ -6333,6 +6438,12 @@ pub(crate) fn is_joke_followup_reference(content: &str) -> bool {
         "do better",
         "try again",
         "do another one",
+        "that isn't",
+        "that isnt",
+        "that wasn't",
+        "that wasnt",
+        "not 10",
+        "not ten",
     ];
     if criticism_markers.iter().any(|p| t.contains(p)) {
         return true;
@@ -6787,6 +6898,7 @@ pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::engine::Message;
     use uuid::Uuid;
 
     /// Build a minimal DexterConfig pointing at a temp state directory.
@@ -7555,17 +7667,127 @@ mod tests {
     }
 
     #[test]
-    fn step_dad_joke_canonicalization_removes_literal_anchor() {
-        let canonical = canonicalize_step_dad_joke_request_for_inference(
+    fn step_dad_joke_compiler_removes_literal_anchor() {
+        let compiled = compile_step_dad_joke_request_for_inference(
             "tell me a step-dad joke. That means a dad joke with a NSFW twist.",
+            &[],
         )
-        .expect("step-dad joke label should canonicalize");
+        .expect("step-dad joke label should compile");
 
-        assert!(canonical.contains("adult/NSFW dad-joke-style pun"));
-        assert!(canonical.contains("not a subject request"));
-        assert!(canonical.contains("safe-for-work dad joke is the wrong answer"));
-        assert!(canonical.contains("adult sexual innuendo"));
-        assert!(!canonical.contains("tell me a step-dad joke"));
+        assert!(compiled.contains("Generate exactly 1"));
+        assert!(compiled.contains("adult/NSFW dad-joke-style pun"));
+        assert!(compiled.contains("NOT a request for jokes about stepdads"));
+        assert!(compiled.contains("adult sexual innuendo"));
+        assert!(!compiled.contains("tell me a step-dad joke"));
+    }
+
+    #[test]
+    fn step_dad_joke_compiler_preserves_ten_count() {
+        let compiled =
+            compile_step_dad_joke_request_for_inference("give me 10 more step-dad jokes", &[])
+                .expect("explicit counted request should compile");
+
+        assert!(compiled.contains("Generate exactly 10"));
+        assert!(compiled.contains("Number them 1-10"));
+        assert!(!compiled.contains("Generate exactly 1 original"));
+    }
+
+    #[test]
+    fn step_dad_joke_compiler_resolves_another_one_from_recent_context() {
+        let history = vec![
+            Message::user("tell me a step-dad joke"),
+            Message::assistant("I tried to write a sexy joke about construction..."),
+        ];
+
+        let compiled = compile_step_dad_joke_request_for_inference("another one", &history)
+            .expect("recent step-dad context should compile iteration");
+
+        assert!(compiled.contains("Generate exactly 1"));
+        assert!(compiled.contains("Do not reuse"));
+    }
+
+    #[test]
+    fn step_dad_joke_compiler_repairs_that_isnt_ten_more_followup() {
+        let history = vec![
+            Message::user("give me 10 more step-dad jokes"),
+            Message::assistant("1. I only gave one joke by mistake."),
+        ];
+
+        let compiled = compile_step_dad_joke_request_for_inference("that isn't 10 more", &history)
+            .expect("recent step-dad context should repair count complaint");
+
+        assert!(compiled.contains("Generate exactly 10"));
+        assert!(compiled.contains("Number them 1-10"));
+    }
+
+    #[test]
+    fn step_dad_joke_compiler_ignores_unrelated_followup_without_context() {
+        assert!(
+            compile_step_dad_joke_request_for_inference("another one", &[]).is_none(),
+            "generic iteration should not compile without recent step-dad context"
+        );
+    }
+
+    #[tokio::test]
+    async fn counted_step_dad_joke_request_is_rewritten_with_requested_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        orch.context
+            .push_user("give me 10 more step-dad jokes".to_string());
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("compiled user message should exist");
+
+        assert!(user_msg.content.contains("COMPILED COMEDY TASK"));
+        assert!(user_msg.content.contains("Generate exactly 10"));
+        assert!(!user_msg.content.contains("give me 10 more step-dad jokes"));
+        assert_eq!(
+            orch.context
+                .messages()
+                .last()
+                .expect("original context turn should remain")
+                .content,
+            "give me 10 more step-dad jokes"
+        );
+    }
+
+    #[tokio::test]
+    async fn comedy_mode_skips_fresh_clipboard_injection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        orch.context
+            .push_user("tell me a step-dad joke".to_string());
+
+        let clipboard_event = SystemEvent {
+            r#type: crate::ipc::proto::SystemEventType::ClipboardChanged.into(),
+            payload: r#"{"text":"This clipboard content should not pollute a comedy request."}"#
+                .to_string(),
+        };
+        orch.handle_system_event(clipboard_event, new_trace())
+            .await
+            .expect("handle_system_event must succeed for CLIPBOARD_CHANGED");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("compiled user message should exist");
+
+        assert!(
+            !user_msg.content.contains("[Env "),
+            "comedy prompt should not inherit ambient env prefix"
+        );
+        assert!(
+            !user_msg
+                .content
+                .contains("clipboard content should not pollute"),
+            "fresh clipboard should not be injected into comedy request"
+        )
     }
 
     // ── is_joke_followup_reference unit tests ────────────────────────────────
@@ -7579,6 +7801,7 @@ mod tests {
         assert!(is_joke_followup_reference("make it dirtier"));
         assert!(is_joke_followup_reference("make it more raunchy"));
         assert!(is_joke_followup_reference("more nsfw"));
+        assert!(is_joke_followup_reference("that isn't 10 more"));
     }
 
     #[test]

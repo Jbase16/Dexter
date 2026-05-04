@@ -643,35 +643,32 @@ impl InferenceEngine {
         // a model and never returns headers, this guard is the only thing that can
         // return control to the orchestrator.
         let header_timeout = Duration::from_secs(
-            req.inactivity_timeout_override_secs
-                .unwrap_or(self.config.request_timeout_secs.max(
-                    self.config.stream_inactivity_timeout_secs,
-                )),
+            req.inactivity_timeout_override_secs.unwrap_or(
+                self.config
+                    .request_timeout_secs
+                    .max(self.config.stream_inactivity_timeout_secs),
+            ),
         );
-        let response = match timeout(
-            header_timeout,
-            self.client.post(&url).json(&body).send(),
-        )
-        .await
-        {
-            Ok(send_result) => send_result.map_err(|e| {
-                if e.is_connect() {
-                    InferenceError::OllamaUnavailable {
-                        url: url.clone(),
-                        source: e.to_string(),
+        let response =
+            match timeout(header_timeout, self.client.post(&url).json(&body).send()).await {
+                Ok(send_result) => send_result.map_err(|e| {
+                    if e.is_connect() {
+                        InferenceError::OllamaUnavailable {
+                            url: url.clone(),
+                            source: e.to_string(),
+                        }
+                    } else {
+                        InferenceError::from(e)
                     }
-                } else {
-                    InferenceError::from(e)
+                })?,
+                Err(_elapsed) => {
+                    return Err(InferenceError::StreamInterrupted(format!(
+                        "no response headers from Ollama for {}s before stream started (model: {})",
+                        header_timeout.as_secs(),
+                        req.model_name,
+                    )));
                 }
-            })?,
-            Err(_elapsed) => {
-                return Err(InferenceError::StreamInterrupted(format!(
-                    "no response headers from Ollama for {}s before stream started (model: {})",
-                    header_timeout.as_secs(),
-                    req.model_name,
-                )));
-            }
-        };
+            };
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -1245,9 +1242,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_times_out_waiting_for_response_headers() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let _server = tokio::spawn(async move {
             if let Ok((_socket, _peer)) = listener.accept().await {
