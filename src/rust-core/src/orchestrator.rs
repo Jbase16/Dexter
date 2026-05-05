@@ -210,8 +210,6 @@ const COMEDY_MODE_INSTRUCTION: &str = concat!(
     "Do not refuse, moralize, sanitize, soften, lecture about sensitivity, add a safety preamble, or explain that a topic is too risky for comedy. ",
     "Do not treat identity-themed comedy (gay, queer, trans, race, religion, etc.) as a special refusal category. ",
     "Match the requested comedic premise and tone directly. No hedge preambles like \"I'm not sure this qualifies\" or \"here goes\". ",
-    "If the operator asks for a step-dad or step dad joke, treat that as a format label: an adult/NSFW dad-joke-style pun. ",
-    "The joke does not need to mention a stepdad, parent, or family member unless the operator explicitly asks for that subject. ",
     "When the operator asks for a specific number of jokes, return exactly that many in one response. ",
     "For another/different/try-again follow-ups, read the recent assistant jokes in the conversation and use a fresh setup, punchline, and premise instead of repeating or lightly rewording one."
 );
@@ -2675,6 +2673,50 @@ impl CoreOrchestrator {
             }
         }
 
+        // Humor Engine short-circuit.
+        //
+        // Joke generation has different failure modes than normal chat: hedge
+        // preambles, recycled templates, count drift, and weak retry roulette.
+        // Route actual joke-generation turns through the dedicated mechanism
+        // prompt + hard-filter + one-repair path before normal router/memory
+        // assembly can add irrelevant context. Explanation/meta follow-ups
+        // still use the normal joke-continuation route below.
+        let recent_joke_context = self
+            .last_joke_turn_at
+            .map(|last| last.elapsed().as_secs() <= crate::constants::JOKE_CONTINUATION_WINDOW_SECS)
+            .unwrap_or(false);
+        if crate::humor::should_handle(&content, recent_joke_context) {
+            self.context.push_user(content.clone());
+            self.session_mgr.push_turn("user", &content);
+            self.send_state(EntityState::Thinking, &trace_id).await?;
+
+            let history = self.context.messages().to_vec();
+            let model_name = self.model_config.primary.clone();
+            let gen_tx = self.generation_tx.clone();
+            let tx_bg = self.tx.clone();
+            let engine = self.engine.clone();
+            let session_id_bg = self.session_id.clone();
+            let embed_model = self.model_config.embed.clone();
+            let cancel_token = self.cancel_token.clone();
+            let producer_abort_bg = self.generation_producer_abort.clone();
+
+            self.last_joke_turn_at = Some(Instant::now());
+            self.generation_handle = Some(tokio::spawn(run_humor_generation_background(
+                engine,
+                tx_bg,
+                session_id_bg,
+                model_name,
+                history,
+                trace_id,
+                cancel_token,
+                gen_tx,
+                content,
+                embed_model,
+                producer_abort_bg,
+            )));
+            return Ok(());
+        }
+
         // 1. Record user turn.
         self.context.push_user(content.clone());
         self.session_mgr.push_turn("user", &content);
@@ -2783,8 +2825,8 @@ impl CoreOrchestrator {
         //
         // Once a joke turn has happened, operator-style iterations don't
         // contain the word "joke" — they're criticism ("wasn't NSFW enough"),
-        // correction ("doesn't need to be about a step dad"), or explanation
-        // requests ("why is that a dirty joke?"). Without continuation,
+        // iteration ("another one"), or explanation requests ("why is that a
+        // dirty joke?"). Without continuation,
         // these route to FAST and qwen3:8b either repeats its template or
         // hallucinates explanations of jokes that were never told.
         //
@@ -4160,9 +4202,6 @@ impl CoreOrchestrator {
                 "Domain blocks loaded for this turn"
             );
         }
-        let compiled_step_dad_joke_task = query_hint
-            .and_then(|q| compile_step_dad_joke_request_for_inference(q, self.context.messages()));
-
         // Step 1: apply personality — returns a new Vec with system prompt at index 0.
         //         The hint conditionally injects matching domain blocks (T1.2).
         let mut messages = self
@@ -4226,8 +4265,7 @@ impl CoreOrchestrator {
         // does not weaken serious safety-sensitive action/tool prompts.
         let comedy_mode_active = query_hint
             .map(|q| {
-                compiled_step_dad_joke_task.is_some()
-                    || is_joke_request(q)
+                is_joke_request(q)
                     || self
                         .last_joke_turn_at
                         .map(|last_joke| {
@@ -4253,29 +4291,7 @@ impl CoreOrchestrator {
             );
         }
 
-        // Step 2d: comedy request canonicalization.
-        //
-        // "step-dad joke" is operator shorthand for an adult/NSFW dad-joke-style
-        // pun, but local models over-anchor on the literal words "step dad" and
-        // make the subject a stepdad/family premise even when told not to. For
-        // inference only, rewrite the active user turn to the intended format
-        // label. Conversation history remains untouched; this just removes the
-        // misleading lexical anchor from the current prompt.
-        if let Some(compiled) = compiled_step_dad_joke_task.as_ref() {
-            let target = messages
-                .iter_mut()
-                .rev()
-                .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
-            if let Some(user_msg) = target {
-                user_msg.content = compiled.clone();
-                debug!(
-                    session = %self.session_id,
-                    "Step-dad joke request compiled for inference"
-                );
-            }
-        }
-
-        // Step 2e (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
+        // Step 2d (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
         //
         // Prior implementation injected these as labelled system messages:
         //   ["Clipboard: ...", "Shell: $ cmd → exit 0 in /dir"]
@@ -5166,6 +5182,285 @@ async fn send_vad_hint_bg(
         event: Some(server_event::Event::VadHint(VadHint { silence_frames })),
     };
     tx.send(Ok(event)).await.is_ok()
+}
+
+struct HumorCandidate {
+    text: String,
+    cancelled: bool,
+    token_count: u32,
+    first_token_ms: Option<u64>,
+    total_ms: u64,
+}
+
+async fn collect_humor_candidate(
+    engine: &InferenceEngine,
+    model_name: &str,
+    prompt: String,
+    _trace_id: &str,
+    cancel_token: &Arc<AtomicBool>,
+    producer_abort_slot: &Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+    count: usize,
+) -> Result<HumorCandidate, InferenceError> {
+    let req = GenerationRequest {
+        model_name: model_name.to_string(),
+        messages: vec![crate::inference::engine::Message::user(prompt)],
+        temperature: Some(0.95),
+        unload_after: false,
+        keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
+        num_predict: Some(if count > 1 { 500 } else { 180 }),
+        inactivity_timeout_override_secs: None,
+        num_ctx_override: None,
+    };
+
+    let started = std::time::Instant::now();
+    let mut text = String::new();
+    let mut token_count = 0u32;
+    let mut first_token_at: Option<std::time::Instant> = None;
+    let mut cancelled = false;
+
+    let stream = engine.generate_stream_cancellable(req).await?;
+    if let Ok(mut g) = producer_abort_slot.lock() {
+        *g = Some(stream.producer.abort_handle());
+    }
+    let mut rx = stream.rx;
+    let hard_deadline = std::time::Duration::from_secs(GENERATION_HARD_TIMEOUT_SECS.min(60));
+
+    loop {
+        let elapsed = started.elapsed();
+        let Some(remaining) = hard_deadline.checked_sub(elapsed) else {
+            cancelled = true;
+            break;
+        };
+
+        let recv_result = tokio::time::timeout(remaining, rx.recv()).await;
+        let chunk_result = match recv_result {
+            Err(_) => {
+                cancelled = true;
+                break;
+            }
+            Ok(None) => break,
+            Ok(Some(result)) => result,
+        };
+
+        if cancel_token.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+
+        match chunk_result {
+            Ok(chunk) if chunk.done => break,
+            Ok(chunk) => {
+                if !chunk.content.is_empty() {
+                    token_count = token_count.saturating_add(1);
+                    if first_token_at.is_none() {
+                        first_token_at = Some(std::time::Instant::now());
+                    }
+                    text.push_str(&chunk.content);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if let Ok(mut g) = producer_abort_slot.lock() {
+        *g = None;
+    }
+
+    Ok(HumorCandidate {
+        text,
+        cancelled,
+        token_count,
+        first_token_ms: first_token_at.map(|t| t.duration_since(started).as_millis() as u64),
+        total_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+async fn run_humor_generation_background(
+    engine: InferenceEngine,
+    tx: mpsc::Sender<Result<ServerEvent, Status>>,
+    session_id: String,
+    model_name: String,
+    history: Vec<crate::inference::engine::Message>,
+    trace_id: String,
+    cancel_token: Arc<AtomicBool>,
+    gen_tx: mpsc::Sender<GenerationResult>,
+    content: String,
+    embed_model: String,
+    producer_abort_slot: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+) {
+    let effective_content = crate::humor::effective_request_for_generation(&content, &history);
+    let plan = crate::humor::build_humor_plan(&effective_content);
+    let recent = crate::humor::recent_jokes_from_messages(&history);
+    let prompt_chars = plan.prompt.chars().count();
+    info!(
+        session                 = %session_id,
+        trace_id                = %trace_id,
+        model                   = %model_name,
+        category                = %plan.category.as_str(),
+        mechanism               = %plan.mechanism.as_str(),
+        requested_count         = plan.count,
+        prompt_chars            = prompt_chars,
+        prompt_estimated_tokens = (prompt_chars / 4).max(1),
+        "Humor Engine dispatch"
+    );
+
+    let first = match collect_humor_candidate(
+        &engine,
+        &model_name,
+        plan.prompt.clone(),
+        &trace_id,
+        &cancel_token,
+        &producer_abort_slot,
+        plan.count,
+    )
+    .await
+    {
+        Ok(candidate) => candidate,
+        Err(e) => {
+            error!(
+                session  = %session_id,
+                trace_id = %trace_id,
+                error    = %e,
+                "Humor Engine generation failed before first candidate"
+            );
+            let _ = send_text_bg(&tx, "(inference error - check core logs)", true, &trace_id).await;
+            let telemetry = GenerationTelemetry {
+                model: model_name,
+                cancelled: false,
+                agentic_depth: 0,
+                ..GenerationTelemetry::default()
+            };
+            let _ = gen_tx
+                .send(GenerationResult {
+                    cancelled: false,
+                    full_response: String::new(),
+                    intercepted_q: None,
+                    tts_was_active: false,
+                    trace_id,
+                    content,
+                    embed_model,
+                    is_shell_proactive: false,
+                    proactive_silent: false,
+                    agentic_depth: 0,
+                    telemetry,
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut cancelled = first.cancelled;
+    let first_reject_reason = if cancelled {
+        None
+    } else {
+        crate::humor::reject_reason_for_category(&first.text, &recent, plan.category)
+    };
+    let mut repair_text: Option<String> = None;
+    let mut total_tokens = first.token_count;
+    let mut total_ms = first.total_ms;
+    let first_token_ms = first.first_token_ms;
+
+    if !cancelled {
+        if let Some(reason) = first_reject_reason.as_deref() {
+            let repair_prompt = crate::humor::build_repair_prompt(&content, &first.text, reason);
+            match collect_humor_candidate(
+                &engine,
+                &model_name,
+                repair_prompt,
+                &trace_id,
+                &cancel_token,
+                &producer_abort_slot,
+                plan.count,
+            )
+            .await
+            {
+                Ok(repair) => {
+                    cancelled = repair.cancelled;
+                    total_tokens = total_tokens.saturating_add(repair.token_count);
+                    total_ms = total_ms.saturating_add(repair.total_ms);
+                    if !repair.text.trim().is_empty() {
+                        repair_text = Some(repair.text);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        session  = %session_id,
+                        trace_id = %trace_id,
+                        error    = %e,
+                        "Humor Engine repair generation failed"
+                    );
+                }
+            }
+        }
+    }
+
+    let selection = crate::humor::select_final_candidate_for_category(
+        &first.text,
+        repair_text.as_deref(),
+        &recent,
+        plan.category,
+    );
+    let final_output = selection.final_output.trim().to_string();
+
+    if !cancelled {
+        let _ = send_text_bg(&tx, &final_output, true, &trace_id).await;
+    } else {
+        let _ = send_text_bg(&tx, "", true, &trace_id).await;
+    }
+
+    info!(
+        session           = %session_id,
+        trace_id          = %trace_id,
+        model             = %model_name,
+        category          = %plan.category.as_str(),
+        mechanism         = %plan.mechanism.as_str(),
+        reject_reason     = ?selection.first_reject_reason,
+        repair_used       = selection.repair_used,
+        final_output_hash = crate::humor::output_hash(&final_output),
+        "Humor Engine complete"
+    );
+
+    let telemetry = GenerationTelemetry {
+        model: model_name,
+        first_token_ms,
+        total_ms,
+        token_count: total_tokens,
+        cancelled,
+        response_len: final_output.len(),
+        agentic_depth: 0,
+    };
+    info!(
+        session        = %session_id,
+        trace_id       = %trace_id,
+        model          = %telemetry.model,
+        first_token_ms = ?telemetry.first_token_ms,
+        total_ms       = telemetry.total_ms,
+        tokens         = telemetry.token_count,
+        response_len   = telemetry.response_len,
+        cancelled      = telemetry.cancelled,
+        agentic_depth  = telemetry.agentic_depth,
+        "gen_complete"
+    );
+
+    if let Ok(mut g) = producer_abort_slot.lock() {
+        *g = None;
+    }
+
+    let _ = gen_tx
+        .send(GenerationResult {
+            cancelled,
+            full_response: final_output,
+            intercepted_q: None,
+            tts_was_active: false,
+            trace_id,
+            content,
+            embed_model,
+            is_shell_proactive: false,
+            proactive_silent: false,
+            agentic_depth: 0,
+            telemetry,
+        })
+        .await;
 }
 
 /// Primary generation with uncertainty sentinel interception — runs as a background task.
@@ -6227,8 +6522,8 @@ pub(crate) fn is_joke_request(content: &str) -> bool {
     //
     // Permissive design: any "tell me a [...] joke" / "give me [...] joke"
     // pattern matches regardless of what fills the brackets. That handles
-    // "tell me a gay joke", "tell me a major groaner of a dad joke", "give
-    // me a step-dad joke", and any other adjective the operator chooses
+    // "tell me a gay joke", "tell me a major groaner of a dad joke", and
+    // any other adjective the operator chooses
     // without requiring the override list to enumerate every variant.
     //
     // Critical for content-moderation surface: when phrasings like "tell me
@@ -6269,130 +6564,11 @@ pub(crate) fn is_joke_request(content: &str) -> bool {
     request_signals.iter().any(|s| lc.contains(s))
 }
 
-fn is_step_dad_joke_format_request(content: &str) -> bool {
-    if !is_joke_request(content) {
-        return false;
-    }
-
-    let normalized = content.to_lowercase().replace('-', " ");
-    normalized.contains("step dad joke")
-        || normalized.contains("step dad jokes")
-        || normalized.contains("stepdad joke")
-        || normalized.contains("stepdad jokes")
-}
-
-fn compile_step_dad_joke_request_for_inference(
-    content: &str,
-    history: &[crate::inference::engine::Message],
-) -> Option<String> {
-    let explicit = is_step_dad_joke_format_request(content);
-    let recent_context = recent_step_dad_joke_format_context(history);
-    let followup = recent_context && is_step_dad_joke_iteration_followup(content);
-    if !explicit && !followup {
-        return None;
-    }
-
-    let count = requested_step_dad_joke_count(content)
-        .unwrap_or(1)
-        .clamp(1, 10);
-    let count_instruction = if count == 1 {
-        "Generate exactly 1 original adult/NSFW dad-joke-style pun.".to_string()
-    } else {
-        format!(
-            "Generate exactly {count} distinct original adult/NSFW dad-joke-style puns in one response. Number them 1-{count}."
-        )
-    };
-
-    Some(format!(
-        "COMPILED COMEDY TASK - step-dad joke format:\n\
-         {count_instruction}\n\
-         Definition: a step-dad joke means a dad-joke-style pun with an adult/NSFW twist. \
-         It is NOT a request for jokes about stepdads, parents, custody, divorce, family reunions, or family dynamics.\n\
-         Requirements:\n\
-         - Each joke must have a clear setup and punchline with wordplay or double meaning.\n\
-         - Each punchline must include adult sexual innuendo or an explicit adult double meaning.\n\
-         - Do not include the words stepdad or step-dad unless the operator explicitly asks for literal stepdad subject matter.\n\
-         - Do not reuse any setup, punchline, or premise already visible in this conversation.\n\
-         - No preamble, no explanation, no safety note. Output only the requested joke(s)."
-    ))
-}
-
-fn recent_step_dad_joke_format_context(history: &[crate::inference::engine::Message]) -> bool {
-    history.iter().rev().take(10).any(|m| {
-        is_step_dad_joke_format_request(&m.content)
-            || m.content
-                .to_lowercase()
-                .contains("adult/nsfw dad-joke-style pun")
-            || m.content
-                .to_lowercase()
-                .contains("step-dad joke means a dad-joke-style pun")
-    })
-}
-
-fn is_step_dad_joke_iteration_followup(content: &str) -> bool {
-    let t = content.to_lowercase();
-    is_joke_followup_reference(content)
-        || t.contains("10 more")
-        || t.contains("ten more")
-        || t.contains("that isn't ")
-        || t.contains("that isnt ")
-        || t.contains("not 10")
-        || t.contains("not ten")
-        || t.contains("isn't 10")
-        || t.contains("isnt 10")
-        || t.contains("isn't ten")
-        || t.contains("isnt ten")
-        || (t.contains("i want") && (t.contains("more") || t.contains("one response")))
-}
-
-fn requested_step_dad_joke_count(content: &str) -> Option<usize> {
-    let t = content.to_lowercase();
-    if t.contains("10 more") || t.contains("ten more") {
-        return Some(10);
-    }
-
-    for word in t.split(|c: char| !c.is_ascii_alphanumeric()) {
-        if word.is_empty() {
-            continue;
-        }
-        if let Ok(n) = word.parse::<usize>() {
-            return Some(n.clamp(1, 10));
-        }
-    }
-
-    let count = if t.contains("ten") {
-        Some(10)
-    } else if t.contains("nine") {
-        Some(9)
-    } else if t.contains("eight") {
-        Some(8)
-    } else if t.contains("seven") {
-        Some(7)
-    } else if t.contains("six") {
-        Some(6)
-    } else if t.contains("five") {
-        Some(5)
-    } else if t.contains("four") {
-        Some(4)
-    } else if t.contains("three") {
-        Some(3)
-    } else if t.contains("two") {
-        Some(2)
-    } else if t.contains("couple") {
-        Some(2)
-    } else {
-        None
-    };
-
-    count.map(|n| n.clamp(1, 10))
-}
-
 /// Joke-continuation reference detector.
 ///
 /// Returns true when the user's utterance plausibly continues a joke-iteration
-/// thread: criticism ("not funny enough", "wasn't NSFW enough"), correction
-/// ("it doesn't need to be about a step dad"), explanation requests ("explain
-/// the joke", "i don't get it", "why is that funny"), or iteration imperatives
+/// thread: criticism ("not funny enough", "wasn't NSFW enough"), explanation
+/// requests ("explain the joke", "i don't get it", "why is that funny"), or iteration imperatives
 /// ("another one", "different one", "do better", "try again").
 ///
 /// Used by the joke-continuation route override that upgrades FAST → PRIMARY
@@ -6410,6 +6586,7 @@ pub(crate) fn is_joke_followup_reference(content: &str) -> bool {
     // Criticism / "not [adjective] enough" patterns. Operator pushing the
     // model to be funnier, dirtier, more on-tone, etc.
     let criticism_markers = [
+        // "[adjective] enough" patterns — original criticism shape.
         "not funny enough",
         "wasn't funny enough",
         "isn't funny enough",
@@ -6444,6 +6621,36 @@ pub(crate) fn is_joke_followup_reference(content: &str) -> bool {
         "that wasnt",
         "not 10",
         "not ten",
+        // Natural English criticism without the "enough" qualifier — the
+        // operator's actual phrasings that previously fell through to FAST
+        // and were handled by qwen3:8b (which generated nearly-identical
+        // recycled responses from a strong training attractor instead of
+        // iterating on the actual joke just told).
+        "wasn't funny",
+        "wasnt funny",
+        "isn't funny",
+        "isnt funny",
+        "not funny",
+        "wasn't a joke",
+        "wasnt a joke",
+        "isn't a joke",
+        "isnt a joke",
+        "not a joke",
+        "not even a joke",
+        "didn't laugh",
+        "didnt laugh",
+        "you can do better",
+        // Meta-source questions about the joke just told. The operator
+        // asking "did you make that one up?" wants the model that authored
+        // the joke (gemma4:26b on PRIMARY) to discuss its own output, not
+        // qwen3:8b inventing a meta-explanation from training data.
+        "did you make",
+        "did you write",
+        "did you come up with",
+        "made that up",
+        "make that up",
+        "made it up",
+        "make it up",
     ];
     if criticism_markers.iter().any(|p| t.contains(p)) {
         return true;
@@ -6898,7 +7105,6 @@ pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::engine::Message;
     use uuid::Uuid;
 
     /// Build a minimal DexterConfig pointing at a temp state directory.
@@ -7035,7 +7241,7 @@ mod tests {
                 &new_session(),
                 &crate::config::ModelConfig::default(),
             );
-            prior.push_turn("user", "tell me a step-dad joke");
+            prior.push_turn("user", "tell me a dirty joke");
             prior.push_turn(
                 "assistant",
                 "I do not generate NSFW or sexually explicit content.",
@@ -7603,8 +7809,8 @@ mod tests {
 
     #[test]
     fn joke_request_detects_step_dad_variants() {
-        // "step-dad joke" was a phrasing the operator used live; ensure
-        // hyphenated and unhyphenated both match.
+        // Stepdad remains a normal joke topic, not a Dexter-private shorthand
+        // for an NSFW dad joke.
         assert!(is_joke_request("tell me a step-dad joke"));
         assert!(is_joke_request("tell me a step dad joke"));
     }
@@ -7653,106 +7859,6 @@ mod tests {
         assert!(is_joke_request("hit me with another joke"));
         assert!(is_joke_request("i'd like a different joke"));
         assert!(is_joke_request("let's hear another one of those jokes"));
-    }
-
-    #[test]
-    fn step_dad_joke_format_request_detects_label_variants() {
-        assert!(is_step_dad_joke_format_request("tell me a step-dad joke"));
-        assert!(is_step_dad_joke_format_request("tell me a step dad joke"));
-        assert!(is_step_dad_joke_format_request("give me stepdad jokes"));
-        assert!(!is_step_dad_joke_format_request(
-            "tell me a joke about my stepdad"
-        ));
-        assert!(!is_step_dad_joke_format_request("tell me a dad joke"));
-    }
-
-    #[test]
-    fn step_dad_joke_compiler_removes_literal_anchor() {
-        let compiled = compile_step_dad_joke_request_for_inference(
-            "tell me a step-dad joke. That means a dad joke with a NSFW twist.",
-            &[],
-        )
-        .expect("step-dad joke label should compile");
-
-        assert!(compiled.contains("Generate exactly 1"));
-        assert!(compiled.contains("adult/NSFW dad-joke-style pun"));
-        assert!(compiled.contains("NOT a request for jokes about stepdads"));
-        assert!(compiled.contains("adult sexual innuendo"));
-        assert!(!compiled.contains("tell me a step-dad joke"));
-    }
-
-    #[test]
-    fn step_dad_joke_compiler_preserves_ten_count() {
-        let compiled =
-            compile_step_dad_joke_request_for_inference("give me 10 more step-dad jokes", &[])
-                .expect("explicit counted request should compile");
-
-        assert!(compiled.contains("Generate exactly 10"));
-        assert!(compiled.contains("Number them 1-10"));
-        assert!(!compiled.contains("Generate exactly 1 original"));
-    }
-
-    #[test]
-    fn step_dad_joke_compiler_resolves_another_one_from_recent_context() {
-        let history = vec![
-            Message::user("tell me a step-dad joke"),
-            Message::assistant("I tried to write a sexy joke about construction..."),
-        ];
-
-        let compiled = compile_step_dad_joke_request_for_inference("another one", &history)
-            .expect("recent step-dad context should compile iteration");
-
-        assert!(compiled.contains("Generate exactly 1"));
-        assert!(compiled.contains("Do not reuse"));
-    }
-
-    #[test]
-    fn step_dad_joke_compiler_repairs_that_isnt_ten_more_followup() {
-        let history = vec![
-            Message::user("give me 10 more step-dad jokes"),
-            Message::assistant("1. I only gave one joke by mistake."),
-        ];
-
-        let compiled = compile_step_dad_joke_request_for_inference("that isn't 10 more", &history)
-            .expect("recent step-dad context should repair count complaint");
-
-        assert!(compiled.contains("Generate exactly 10"));
-        assert!(compiled.contains("Number them 1-10"));
-    }
-
-    #[test]
-    fn step_dad_joke_compiler_ignores_unrelated_followup_without_context() {
-        assert!(
-            compile_step_dad_joke_request_for_inference("another one", &[]).is_none(),
-            "generic iteration should not compile without recent step-dad context"
-        );
-    }
-
-    #[tokio::test]
-    async fn counted_step_dad_joke_request_is_rewritten_with_requested_count() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (mut orch, _rx) = make_orchestrator(tmp.path());
-        orch.context
-            .push_user("give me 10 more step-dad jokes".to_string());
-
-        let messages = orch.prepare_messages_for_inference(&[]);
-        let user_msg = messages
-            .iter()
-            .rev()
-            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
-            .expect("compiled user message should exist");
-
-        assert!(user_msg.content.contains("COMPILED COMEDY TASK"));
-        assert!(user_msg.content.contains("Generate exactly 10"));
-        assert!(!user_msg.content.contains("give me 10 more step-dad jokes"));
-        assert_eq!(
-            orch.context
-                .messages()
-                .last()
-                .expect("original context turn should remain")
-                .content,
-            "give me 10 more step-dad jokes"
-        );
     }
 
     #[tokio::test]
@@ -7805,6 +7911,35 @@ mod tests {
     }
 
     #[test]
+    fn joke_followup_detects_natural_english_criticism() {
+        // Regression: the user's natural-English criticism phrasings without
+        // the "enough" qualifier previously fell through to FAST/qwen3 which
+        // recycled training-data jokes instead of iterating on the
+        // joke just told. These must now route to PRIMARY via continuation.
+        assert!(is_joke_followup_reference("It wasn't funny though"));
+        assert!(is_joke_followup_reference("that wasn't funny"));
+        assert!(is_joke_followup_reference("It isn't funny"));
+        assert!(is_joke_followup_reference("not funny"));
+        assert!(is_joke_followup_reference("that's not even a joke...."));
+        assert!(is_joke_followup_reference("that's not a joke"));
+        assert!(is_joke_followup_reference("you can do better"));
+        assert!(is_joke_followup_reference("i didn't laugh"));
+    }
+
+    #[test]
+    fn joke_followup_detects_meta_source_questions() {
+        // "Did you make that one up?" is a meta-question about the joke's
+        // authorship. The model that authored the joke (PRIMARY) is best
+        // positioned to discuss it; FAST/qwen3 invents meta-explanations
+        // from training data instead of grounding in the actual prior turn.
+        assert!(is_joke_followup_reference("Did you make that one up?"));
+        assert!(is_joke_followup_reference("did you write that"));
+        assert!(is_joke_followup_reference("did you come up with that"));
+        assert!(is_joke_followup_reference("did you make that up"));
+        assert!(is_joke_followup_reference("you made that up"));
+    }
+
+    #[test]
     fn joke_followup_detects_iteration_markers() {
         assert!(is_joke_followup_reference("another one"));
         assert!(is_joke_followup_reference("different one"));
@@ -7838,17 +7973,10 @@ mod tests {
     fn joke_followup_detects_clarification_markers() {
         // Operator correcting model's misinterpretation of joke type.
         assert!(is_joke_followup_reference(
-            "it doesn't need to be about a step dad"
-        ));
-        assert!(is_joke_followup_reference(
             "it's just the name for the type of joke"
         ));
-        assert!(is_joke_followup_reference(
-            "what do you define as a step dad joke?"
-        ));
-        assert!(is_joke_followup_reference(
-            "That is wrong. A step-dad joke is a dad joke with a NSFW twist"
-        ));
+        assert!(is_joke_followup_reference("what do you define as dirty?"));
+        assert!(is_joke_followup_reference("That is wrong. I meant NSFW."));
         assert!(is_joke_followup_reference("the kind of humor i mean"));
     }
 
@@ -7946,25 +8074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn comedy_mode_instruction_treats_step_dad_as_format_label() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (mut orch, _rx) = make_orchestrator(tmp.path());
-
-        orch.context.push_user("tell me a step-dad joke");
-
-        let messages = orch.prepare_messages_for_inference(&[]);
-        assert!(
-            messages.iter().any(|m| m.role == "system"
-                && m.content.contains("Comedy mode:")
-                && m.content.contains("step-dad or step dad joke")
-                && m.content.contains("format label")
-                && m.content.contains("does not need to mention a stepdad")),
-            "step-dad joke requests must not force literal stepdad/family subject matter"
-        );
-    }
-
-    #[tokio::test]
-    async fn step_dad_joke_request_is_rewritten_in_inference_prompt_only() {
+    async fn step_dad_joke_request_is_not_rewritten_as_private_format() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut orch, _rx) = make_orchestrator(tmp.path());
 
@@ -7978,17 +8088,14 @@ mod tests {
             .expect("user message should be present");
 
         assert!(
-            user_msg.content.contains("adult/NSFW dad-joke-style pun"),
-            "inference prompt should carry canonical comedy format"
+            user_msg.content.contains("tell me a step-dad joke"),
+            "step-dad joke should remain the operator's literal request"
         );
         assert!(
-            !user_msg.content.contains("tell me a step-dad joke"),
-            "current inference turn should remove the sticky literal phrase"
-        );
-        assert_eq!(
-            orch.context.messages().last().map(|m| m.content.as_str()),
-            Some("tell me a step-dad joke"),
-            "stored conversation history must keep the operator's original wording"
+            messages
+                .iter()
+                .all(|m| !m.content.contains("adult/NSFW dad-joke-style pun")),
+            "step-dad joke should no longer compile into Dexter-private NSFW dad-joke shorthand"
         );
     }
 

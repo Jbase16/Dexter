@@ -3,6 +3,7 @@ mod browser;
 mod config;
 mod constants;
 mod context_observer;
+mod humor;
 mod inference;
 mod ipc;
 mod logging;
