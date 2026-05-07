@@ -22,7 +22,7 @@ SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli live-smoke-cli live-smoke-hud smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -109,6 +109,25 @@ run-core-debug:
 cli:
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-cli
 	@echo "==> dexter-cli ready: $(RUST_CORE_DIR)/target/release/dexter-cli --help"
+
+## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
+## /tmp/dexter-cli-smoke.log, drives typed inputs through dexter-cli, then
+## asserts routing logs for Humor Engine and normal chat behavior.
+live-smoke-cli: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-cli-smoke.sh --start-core
+
+## live-smoke-hud: run automated Swift HUD live regression (starts Rust core + Swift UI)
+##
+## Builds release-mode dexter-core, starts it with logs at
+## /tmp/dexter-hud-core-smoke.log, launches the real Swift app with a
+## test-only DEXTER_HUD_SMOKE hook, submits one typed turn through
+## HUDWindow.onTextSubmit, and asserts the HUD/client lifecycle logs.
+live-smoke-hud: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-hud-smoke.sh --start-core
 
 ## run-swift: start the Swift UI shell (requires run-core already running)
 run-swift:

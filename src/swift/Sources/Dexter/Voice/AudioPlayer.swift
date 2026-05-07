@@ -48,18 +48,23 @@ final class AudioPlayer: @unchecked Sendable {
     private var pendingBufferCount:  Int    = 0      // buffers currently scheduled or playing
     private var sequenceQueue:       [Item] = []     // ordered pending PCM chunks
     private var nextExpectedSeq:     UInt32 = 0      // next sequence number to drain
+    private var activeTraceID:       String?
+    private var retiredTraceIDs:     [String] = []
+    private var activeStreamID:      String?
+    private var retiredStreamIDs:    [String] = []
 
     /// Callback fired on `self.queue` when the last scheduled buffer in a proactive
     /// TTS sequence finishes playing. Set by `DexterClient` to send
     /// `AUDIO_PLAYBACK_COMPLETE` back to Rust. Swift 6: `@Sendable` required because
     /// this closure is called from `self.queue` (a serial DispatchQueue), which is
     /// not actor-isolated.
-    var onPlaybackFinished: (@Sendable () -> Void)?
+    var onPlaybackFinished: (@Sendable (_ traceID: String?) -> Void)?
 
     /// Set to true when an `AudioResponse` with `is_final = true` is enqueued.
     /// When `pendingBufferCount` reaches zero while this flag is set,
     /// `onPlaybackFinished` is called and the flag is reset. Protected by `self.queue`.
     private var awaitingFinalCallback: Bool = false
+    private var awaitingFinalTraceID: String?
 
     private struct Item {
         let data:           Data
@@ -90,6 +95,19 @@ final class AudioPlayer: @unchecked Sendable {
 
     // MARK: - Playback
 
+    /// Register the current response trace before audio arrives. TextResponse
+    /// chunks normally precede AudioResponse chunks for the same turn, so this lets
+    /// `stop()` retire a cancelled turn even if no PCM frame reached Swift yet.
+    func prepareForResponseTrace(_ traceID: String?) {
+        guard let traceID, !traceID.isEmpty else { return }
+        queue.async { [self] in
+            guard !retiredTraceIDs.contains(traceID) else { return }
+            if activeStreamID == nil || activeTraceID == nil {
+                activeTraceID = traceID
+            }
+        }
+    }
+
     /// Enqueue a PCM chunk for sequenced playback. Dispatches asynchronously to
     /// `self.queue` — returns immediately.
     ///
@@ -101,10 +119,23 @@ final class AudioPlayer: @unchecked Sendable {
     ///   - isFinal:        When `true`, arms `onPlaybackFinished`. When all previously
     ///                     scheduled buffers have played (or immediately if none were
     ///                     scheduled), `onPlaybackFinished` fires.
-    func enqueue(data: Data, sequenceNumber: UInt32, isFinal: Bool = false) {
+    ///   - traceID:         Response trace shared by the text and audio events for one
+    ///                     model turn. Retired traces are ignored after cancel.
+    ///   - streamID:        Fresh per Rust TTS stream. Frames from retired or non-active
+    ///                     streams are ignored so stale post-cancel audio cannot replay
+    ///                     as the next stream's sequence 0.
+    func enqueue(
+        data: Data,
+        sequenceNumber: UInt32,
+        isFinal: Bool = false,
+        traceID: String? = nil,
+        streamID: String? = nil
+    ) {
         queue.async { [self] in
+            guard acceptPlaybackIdentity(traceID: traceID, streamID: streamID) else { return }
             if isFinal {
                 awaitingFinalCallback = true
+                awaitingFinalTraceID = traceID
                 // Empty sentinel: don't add to the sequence queue, but allow
                 // non-empty is_final frames to be scheduled normally (future-proofing).
                 if !data.isEmpty {
@@ -139,12 +170,15 @@ final class AudioPlayer: @unchecked Sendable {
             nextExpectedSeq       = 0
             _isPlaying            = false
             awaitingFinalCallback = false
+            let traceID = awaitingFinalTraceID
+            awaitingFinalTraceID  = nil
+            retireActivePlayback()
             // Phase 18: if a proactive observation was interrupted by barge-in,
             // fire the callback immediately so Rust receives AUDIO_PLAYBACK_COMPLETE
             // and can transition the entity to IDLE. Without this, the entity would
             // stay stuck in THINKING because playback was aborted before the last
             // buffer completion handler ever fired.
-            if wasFinal { onPlaybackFinished?() }
+            if wasFinal { onPlaybackFinished?(traceID) }
         }
     }
 
@@ -211,7 +245,80 @@ final class AudioPlayer: @unchecked Sendable {
         // clearing the stale entries is correct and unblocks the callback.
         sequenceQueue.removeAll()
         awaitingFinalCallback = false
-        onPlaybackFinished?()
+        let traceID = awaitingFinalTraceID
+        awaitingFinalTraceID = nil
+        retireActivePlayback()
+        onPlaybackFinished?(traceID)
+    }
+
+    private func acceptPlaybackIdentity(traceID: String?, streamID: String?) -> Bool {
+        guard acceptTraceID(traceID) else { return false }
+        guard acceptStreamID(streamID) else { return false }
+        return true
+    }
+
+    private func acceptTraceID(_ traceID: String?) -> Bool {
+        guard let traceID, !traceID.isEmpty else {
+            // Backward compatibility for older callers and audio-only responses.
+            return true
+        }
+        if retiredTraceIDs.contains(traceID) {
+            return false
+        }
+        if let activeTraceID, !activeTraceID.isEmpty {
+            if activeTraceID == traceID { return true }
+            if activeStreamID == nil {
+                self.activeTraceID = traceID
+                return true
+            }
+            return false
+        }
+        activeTraceID = traceID
+        return true
+    }
+
+    private func acceptStreamID(_ streamID: String?) -> Bool {
+        guard let streamID, !streamID.isEmpty else {
+            // Backward compatibility for older Rust builds before AudioResponse.stream_id.
+            return activeStreamID == nil || activeStreamID == ""
+        }
+        if retiredStreamIDs.contains(streamID) {
+            return false
+        }
+        if let activeStreamID {
+            return activeStreamID == streamID
+        }
+        activeStreamID = streamID
+        return true
+    }
+
+    private func retireActivePlayback() {
+        retireActiveTrace()
+        retireActiveStream()
+    }
+
+    private func retireActiveTrace() {
+        guard let traceID = activeTraceID, !traceID.isEmpty else {
+            activeTraceID = nil
+            return
+        }
+        retiredTraceIDs.append(traceID)
+        if retiredTraceIDs.count > 16 {
+            retiredTraceIDs.removeFirst(retiredTraceIDs.count - 16)
+        }
+        activeTraceID = nil
+    }
+
+    private func retireActiveStream() {
+        guard let streamID = activeStreamID, !streamID.isEmpty else {
+            activeStreamID = nil
+            return
+        }
+        retiredStreamIDs.append(streamID)
+        if retiredStreamIDs.count > 16 {
+            retiredStreamIDs.removeFirst(retiredStreamIDs.count - 16)
+        }
+        activeStreamID = nil
     }
 
     /// Convert raw int16 LE PCM bytes to an `AVAudioPCMBuffer` in `pcmFormat`.

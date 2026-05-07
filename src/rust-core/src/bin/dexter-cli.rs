@@ -57,6 +57,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use hyper_util::rt::TokioIo;
+use serde_json::json;
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -70,10 +72,11 @@ mod proto {
 
 use proto::{
     client_event, dexter_service_client::DexterServiceClient, server_event, ActionApproval,
-    ActionCategory, ClientEvent, EntityState, PingRequest, TextInput,
+    ActionCategory, ClientEvent, EntityState, PingRequest, SystemEvent, SystemEventType, TextInput,
 };
 
 const DEFAULT_SOCKET: &str = "/tmp/dexter.sock";
+const DEFAULT_SHELL_SOCKET: &str = "/tmp/dexter-shell.sock";
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,15 +90,31 @@ enum ApprovalPolicy {
 #[derive(Debug)]
 struct CliConfig {
     socket_path: String,
-    inputs: Vec<String>,
+    shell_socket_path: String,
+    inputs: Vec<CliInput>,
     from_voice: bool,
     quiet: bool,
     approval_policy: ApprovalPolicy,
     idle_timeout: Duration,
 }
 
+#[derive(Debug, Clone)]
+enum CliInput {
+    Text(String),
+    SystemEvent {
+        event_type: SystemEventType,
+        payload: String,
+    },
+    ShellCommand {
+        command: String,
+        cwd: String,
+        exit_code: Option<i32>,
+    },
+}
+
 fn parse_args() -> Result<CliConfig> {
     let mut socket_path = DEFAULT_SOCKET.to_string();
+    let mut shell_socket_path = DEFAULT_SHELL_SOCKET.to_string();
     let mut from_voice = false;
     let mut quiet = false;
     let mut approval_policy = ApprovalPolicy::Deny;
@@ -110,6 +129,11 @@ fn parse_args() -> Result<CliConfig> {
                     .next()
                     .ok_or_else(|| anyhow!("--socket requires a path argument"))?;
             }
+            "--shell-socket" => {
+                shell_socket_path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--shell-socket requires a path argument"))?;
+            }
             "--from-voice" => from_voice = true,
             "--quiet" | "-q" => quiet = true,
             "--auto-approve" | "-y" => approval_policy = ApprovalPolicy::Approve,
@@ -121,6 +145,33 @@ fn parse_args() -> Result<CliConfig> {
                     .parse()
                     .context("--idle-timeout: not a valid u64 seconds value")?;
                 idle_timeout = Duration::from_secs(secs);
+            }
+            "--system-event" => {
+                let raw_type = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--system-event requires a type argument"))?;
+                let payload = args.next().ok_or_else(|| {
+                    anyhow!("--system-event requires a JSON payload argument after the type")
+                })?;
+                positional.push(format!(
+                    "\u{1f}system-event\u{1f}{}\u{1f}{}",
+                    raw_type, payload
+                ));
+            }
+            "--shell-command" => {
+                let command = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--shell-command requires a command argument"))?;
+                let cwd = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--shell-command requires a cwd argument"))?;
+                let raw_exit = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--shell-command requires an exit-code argument"))?;
+                positional.push(format!(
+                    "\u{1f}shell-command\u{1f}{}\u{1f}{}\u{1f}{}",
+                    command, cwd, raw_exit
+                ));
             }
             "--help" | "-h" => {
                 print_help();
@@ -151,16 +202,42 @@ fn parse_args() -> Result<CliConfig> {
             let line = line.context("reading stdin")?;
             let trimmed = line.trim();
             if !trimmed.is_empty() {
-                lines.push(trimmed.to_string());
+                lines.push(CliInput::Text(trimmed.to_string()));
             }
         }
         lines
     } else {
         positional
+            .into_iter()
+            .map(|arg| {
+                if let Some(rest) = arg.strip_prefix("\u{1f}system-event\u{1f}") {
+                    let mut parts = rest.splitn(2, '\u{1f}');
+                    let raw_type = parts.next().unwrap_or_default();
+                    let payload = parts.next().unwrap_or_default().to_string();
+                    Ok(CliInput::SystemEvent {
+                        event_type: parse_system_event_type(raw_type)?,
+                        payload,
+                    })
+                } else if let Some(rest) = arg.strip_prefix("\u{1f}shell-command\u{1f}") {
+                    let mut parts = rest.splitn(3, '\u{1f}');
+                    let command = parts.next().unwrap_or_default().to_string();
+                    let cwd = parts.next().unwrap_or_default().to_string();
+                    let raw_exit = parts.next().unwrap_or_default();
+                    Ok(CliInput::ShellCommand {
+                        command,
+                        cwd,
+                        exit_code: parse_shell_exit_code(raw_exit)?,
+                    })
+                } else {
+                    Ok(CliInput::Text(arg))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?
     };
 
     Ok(CliConfig {
         socket_path,
+        shell_socket_path,
         inputs,
         from_voice,
         quiet,
@@ -179,12 +256,23 @@ fn print_help() {
     eprintln!();
     eprintln!("FLAGS:");
     eprintln!("  -s, --socket <PATH>      Override gRPC socket path (default: {DEFAULT_SOCKET})");
+    eprintln!("      --shell-socket <PATH>");
+    eprintln!("                           Override shell-context socket path (default: {DEFAULT_SHELL_SOCKET}).");
     eprintln!("      --from-voice         Set TextInput.from_voice = true (enables TTS).");
     eprintln!("                           Default false matches HUD typed-input mode.");
     eprintln!("  -q, --quiet              Suppress state markers — only print model text.");
     eprintln!("  -y, --auto-approve       Auto-approve destructive action requests.");
     eprintln!("  -n, --auto-deny          Auto-deny destructive action requests (default).");
     eprintln!("      --idle-timeout <S>   Wait at most S seconds for IDLE before next turn (default: {DEFAULT_IDLE_TIMEOUT_SECS}).");
+    eprintln!("      --system-event <TYPE> <JSON>");
+    eprintln!("                           Send a synthetic SystemEvent before/among text inputs.");
+    eprintln!(
+        "                           TYPE examples: connected, app_focused, ax_element_changed,"
+    );
+    eprintln!("                           clipboard_changed, app_unfocused, screen_locked.");
+    eprintln!("      --shell-command <COMMAND> <CWD> <EXIT_CODE|null>");
+    eprintln!("                           Send a synthetic shell-completion event through the");
+    eprintln!("                           same /tmp/dexter-shell.sock path as the zsh hook.");
     eprintln!("  -h, --help               Show this help and exit.");
     eprintln!();
     eprintln!("EXAMPLES:");
@@ -192,6 +280,39 @@ fn print_help() {
     eprintln!("  dexter-cli --quiet \"explain how TCP slow-start works\"");
     eprintln!("  printf \"q1\\nq2\\n\" | dexter-cli");
     eprintln!("  dexter-cli --auto-deny \"rm -rf /tmp/foo\"");
+    eprintln!("  dexter-cli --system-event clipboard_changed '{{\"text\":\"copied\"}}' \"summarize clipboard\"");
+    eprintln!("  dexter-cli --shell-command \"cargo test\" /Users/me/project 0 \"what happened?\"");
+}
+
+fn parse_system_event_type(raw: &str) -> Result<SystemEventType> {
+    let normalized = raw
+        .trim()
+        .trim_start_matches("SYSTEM_EVENT_TYPE_")
+        .replace(['-', ' '], "_")
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "connected" => Ok(SystemEventType::Connected),
+        "app_focused" => Ok(SystemEventType::AppFocused),
+        "app_unfocused" => Ok(SystemEventType::AppUnfocused),
+        "screen_locked" => Ok(SystemEventType::ScreenLocked),
+        "ax_element_changed" => Ok(SystemEventType::AxElementChanged),
+        "screen_unlocked" => Ok(SystemEventType::ScreenUnlocked),
+        "hotkey_activated" => Ok(SystemEventType::HotkeyActivated),
+        "audio_playback_complete" => Ok(SystemEventType::AudioPlaybackComplete),
+        "clipboard_changed" => Ok(SystemEventType::ClipboardChanged),
+        other => Err(anyhow!("unknown SystemEventType: {other}")),
+    }
+}
+
+fn parse_shell_exit_code(raw: &str) -> Result<Option<i32>> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let exit_code = trimmed
+        .parse::<i32>()
+        .with_context(|| format!("invalid shell exit code: {trimmed:?}"))?;
+    Ok(Some(exit_code))
 }
 
 #[tokio::main]
@@ -265,30 +386,104 @@ async fn main() -> Result<()> {
     // Drive each input to completion (IDLE state) before sending the next.
     for (i, input) in cfg.inputs.iter().enumerate() {
         let trace_id = Uuid::new_v4().to_string();
-        if !cfg.quiet {
-            eprintln!("[turn {} — sending: {input:?}]", i + 1);
+        match input {
+            CliInput::Text(text) => {
+                if !cfg.quiet {
+                    eprintln!("[turn {} — sending text: {text:?}]", i + 1);
+                }
+
+                let event = ClientEvent {
+                    trace_id: trace_id.clone(),
+                    session_id: session_id.clone(),
+                    event: Some(client_event::Event::TextInput(TextInput {
+                        content: text.clone(),
+                        from_voice: cfg.from_voice,
+                    })),
+                };
+                tx.send(event)
+                    .await
+                    .map_err(|_| anyhow!("session stream closed before TextInput could be sent"))?;
+
+                // Drain server events until we see IDLE (turn complete) or hit the timeout.
+                run_turn(&mut response_stream, &tx, &session_id, &cfg).await?;
+            }
+            CliInput::SystemEvent {
+                event_type,
+                payload,
+            } => {
+                if !cfg.quiet {
+                    eprintln!("[event {} — sending system event: {:?}]", i + 1, event_type);
+                }
+                let event = ClientEvent {
+                    trace_id,
+                    session_id: session_id.clone(),
+                    event: Some(client_event::Event::SystemEvent(SystemEvent {
+                        r#type: *event_type as i32,
+                        payload: payload.clone(),
+                    })),
+                };
+                tx.send(event).await.map_err(|_| {
+                    anyhow!("session stream closed before SystemEvent could be sent")
+                })?;
+                // System events normally do not produce a full turn. Yield briefly so the
+                // daemon's select loop can ingest this context before the next TextInput.
+                tokio::time::sleep(Duration::from_millis(75)).await;
+            }
+            CliInput::ShellCommand {
+                command,
+                cwd,
+                exit_code,
+            } => {
+                if !cfg.quiet {
+                    eprintln!(
+                        "[event {} — sending shell command context: {:?} exit {:?}]",
+                        i + 1,
+                        command,
+                        exit_code
+                    );
+                }
+                send_shell_command_event(&cfg.shell_socket_path, command, cwd, *exit_code)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to send shell context event to {}",
+                            cfg.shell_socket_path
+                        )
+                    })?;
+                // Give the daemon's shell listener task and active session select loop
+                // a brief chance to ingest the event before the next TextInput.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
-
-        let event = ClientEvent {
-            trace_id: trace_id.clone(),
-            session_id: session_id.clone(),
-            event: Some(client_event::Event::TextInput(TextInput {
-                content: input.clone(),
-                from_voice: cfg.from_voice,
-            })),
-        };
-        tx.send(event)
-            .await
-            .map_err(|_| anyhow!("session stream closed before TextInput could be sent"))?;
-
-        // Drain server events until we see IDLE (turn complete) or hit the timeout.
-        run_turn(&mut response_stream, &tx, &session_id, &cfg).await?;
     }
 
     // Close the writer half cleanly so the daemon's session task exits its loop
     // normally. Without this drop, the daemon waits for either the next event or
     // the gRPC stream EOF — `tx.drop()` triggers EOF on the read side.
     drop(tx);
+    Ok(())
+}
+
+async fn send_shell_command_event(
+    socket_path: &str,
+    command: &str,
+    cwd: &str,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    let payload = json!({
+        "command": command,
+        "cwd": cwd,
+        "exit_code": exit_code,
+    })
+    .to_string();
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connect {socket_path}"))?;
+    stream
+        .write_all(payload.as_bytes())
+        .await
+        .context("write shell payload")?;
+    stream.shutdown().await.context("shutdown shell socket")?;
     Ok(())
 }
 
@@ -307,6 +502,37 @@ async fn connect(socket_path: &str) -> Result<DexterServiceClient<tonic::transpo
         .await
         .context("tonic Channel connect failed")?;
     Ok(DexterServiceClient::new(channel))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_shell_exit_code_accepts_integer_and_null() {
+        assert_eq!(parse_shell_exit_code("0").unwrap(), Some(0));
+        assert_eq!(parse_shell_exit_code("130").unwrap(), Some(130));
+        assert_eq!(parse_shell_exit_code("null").unwrap(), None);
+        assert_eq!(parse_shell_exit_code("None").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_shell_exit_code_rejects_invalid_text() {
+        assert!(parse_shell_exit_code("oops").is_err());
+        assert!(parse_shell_exit_code("").is_err());
+    }
+
+    #[test]
+    fn parse_system_event_type_accepts_common_spellings() {
+        assert_eq!(
+            parse_system_event_type("app-focused").unwrap(),
+            SystemEventType::AppFocused
+        );
+        assert_eq!(
+            parse_system_event_type("SYSTEM_EVENT_TYPE_CLIPBOARD_CHANGED").unwrap(),
+            SystemEventType::ClipboardChanged
+        );
+    }
 }
 
 /// Drain server events for one turn — returns when:
@@ -416,6 +642,21 @@ async fn run_turn(
                         write!(stdout_lock, ".")?;
                         stdout_lock.flush()?;
                     }
+                }
+                if audio.is_final {
+                    let event = ClientEvent {
+                        trace_id: Uuid::new_v4().to_string(),
+                        session_id: session_id.to_string(),
+                        event: Some(client_event::Event::SystemEvent(SystemEvent {
+                            r#type: SystemEventType::AudioPlaybackComplete as i32,
+                            payload: "{}".to_string(),
+                        })),
+                    };
+                    tx.send(event).await.map_err(|_| {
+                        anyhow!(
+                            "session stream closed before AUDIO_PLAYBACK_COMPLETE could be sent"
+                        )
+                    })?;
                 }
             }
 

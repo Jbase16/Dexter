@@ -68,6 +68,25 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                 Task { await c?.setTtsMuted(muted) }
             }
 
+            if HUDSmokeConfig.enabled {
+                HUDSmokeConfig.log(
+                    "enabled text='\(HUDSmokeConfig.text)' submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
+                )
+                Task {
+                    try? await Task.sleep(for: .seconds(HUDSmokeConfig.submitDelaySecs))
+                    await MainActor.run {
+                        HUDSmokeConfig.log("autoSubmit")
+                        window.hud.onTextSubmit?(HUDSmokeConfig.text)
+                    }
+
+                    try? await Task.sleep(for: .seconds(HUDSmokeConfig.exitAfterSecs))
+                    await MainActor.run {
+                        HUDSmokeConfig.log("terminating")
+                        NSApp.terminate(nil)
+                    }
+                }
+            }
+
             await c.connect(to: window)
         }
 
@@ -104,5 +123,38 @@ final class DexterApp: NSObject, NSApplicationDelegate {
         // Dexter has no "last window" in the conventional sense.
         // The floating window closing should not terminate the process.
         false
+    }
+}
+
+private enum HUDSmokeConfig {
+    static let enabled: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let text: String = {
+        ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_TEXT"] ?? "what's 2 plus 2"
+    }()
+
+    static let submitDelaySecs: Int64 = {
+        parseSecs("DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS", defaultValue: 3)
+    }()
+
+    static let exitAfterSecs: Int64 = {
+        parseSecs("DEXTER_HUD_SMOKE_EXIT_AFTER_SECS", defaultValue: 18)
+    }()
+
+    static func log(_ message: String) {
+        guard enabled else { return }
+        print("[HUDSmoke] \(message)")
+    }
+
+    private static func parseSecs(_ key: String, defaultValue: Int64) -> Int64 {
+        guard let raw = ProcessInfo.processInfo.environment[key],
+              let value = Int64(raw),
+              value >= 0 else {
+            return defaultValue
+        }
+        return value
     }
 }

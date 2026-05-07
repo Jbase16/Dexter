@@ -58,6 +58,18 @@ enum C {
     static let muteButtonGap:  CGFloat = 6
 }
 
+private enum HUDSmokeLog {
+    static let enabled: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static func log(_ message: String) {
+        guard enabled else { return }
+        print("[HUDSmoke] \(message)")
+    }
+}
+
 // MARK: - HUDWindow
 
 /// Floating conversation HUD — displays Dexter's streaming response text
@@ -357,6 +369,7 @@ final class HUDWindow: NSPanel {
     /// Show the operator's voice transcript or typed text, then make the HUD visible.
     /// Clears any previous response so each turn starts fresh.
     func showOperatorInput(_ text: String) {
+        HUDSmokeLog.log("showOperatorInput chars=\(text.count)")
         pendingTurnOperatorText = text   // capture before clearing textArea
         textArea.clear()
         textArea.showOperatorTurn(text)
@@ -366,6 +379,7 @@ final class HUDWindow: NSPanel {
     /// THINKING state received — response is about to stream in.
     /// Cancels any pending dismiss and ensures the HUD is visible.
     func beginResponseStreaming() {
+        HUDSmokeLog.log("beginResponseStreaming")
         cancelDismiss()
         // Record the insertion point so finalizeWithMarkdown() knows where the
         // operator-turn prefix ends and the response region begins.
@@ -397,6 +411,7 @@ final class HUDWindow: NSPanel {
         }
         pendingTurnOperatorText = ""   // reset so the next proactive response gets ""
 
+        HUDSmokeLog.log("responseComplete responseChars=\(respText.count) visible=\(isHUDVisible)")
         scheduleDismiss()
     }
 
@@ -449,6 +464,7 @@ final class HUDWindow: NSPanel {
 
     private func show() {
         guard alphaValue < 0.5 else { return }   // already visible — no-op
+        HUDSmokeLog.log("show")
         orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = C.fadeDuration
@@ -457,6 +473,7 @@ final class HUDWindow: NSPanel {
     }
 
     private func hide() {
+        HUDSmokeLog.log("hide")
         NSAnimationContext.runAnimationGroup { [weak self] ctx in
             ctx.duration = C.fadeDuration
             self?.animator().alphaValue = 0

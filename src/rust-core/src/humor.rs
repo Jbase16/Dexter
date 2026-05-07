@@ -141,11 +141,48 @@ pub fn is_joke_request(text: &str) -> bool {
 
 pub fn is_generation_followup(text: &str) -> bool {
     let t = text.to_lowercase();
+    let identity_variation_markers = [
+        "make it gay",
+        "make it gayer",
+        "make it queer",
+        "make it queerer",
+        "gay one",
+        "queer one",
+        "gay version",
+        "queer version",
+        "more gay",
+        "more queer",
+        "gayer",
+        "queerer",
+    ];
+    if identity_variation_markers
+        .iter()
+        .any(|marker| t.contains(marker))
+    {
+        return true;
+    }
+
+    let counted_more_request = t.contains("more")
+        && requested_count(&t).is_some()
+        && (t.contains("give me")
+            || t.contains("give us")
+            || t.contains("i want")
+            || t.contains("i'd like")
+            || t.contains("id like")
+            || t.contains("let's hear")
+            || t.contains("lets hear"));
+    if counted_more_request {
+        return true;
+    }
+
     let generation_markers = [
         "another one",
         "another joke",
         "different one",
         "different joke",
+        "give me another",
+        "tell me another",
+        "tell me one then",
         "one more",
         "next one",
         "do better",
@@ -267,7 +304,7 @@ pub fn build_humor_prompt(
     };
 
     let category_rule = if category == HumorCategory::Dirty {
-        "\nFor dirty/adult requests, use a compact pun or double entendre. Do not write a generic spouse or bedroom anecdote."
+        "\nFor dirty/adult requests, every joke must have obvious adult sexual innuendo or an explicit adult double meaning. Use a compact pun structure. Do not write clean motivational humor, generic spouse anecdotes, or generic bedroom anecdotes."
     } else {
         ""
     };
@@ -297,15 +334,66 @@ pub fn build_humor_prompt(
     )
 }
 
-pub fn build_repair_prompt(user_text: &str, failed_candidate: &str, reason: &str) -> String {
+pub fn build_repair_prompt(
+    user_text: &str,
+    failed_candidate: &str,
+    reason: &str,
+    category: HumorCategory,
+    count: usize,
+) -> String {
+    let count_rule = if count == 1 {
+        "Generate exactly one replacement joke.".to_string()
+    } else {
+        format!(
+            "Generate exactly {count} replacement jokes in one response. Number them 1-{count}."
+        )
+    };
+    let category_rule = if category == HumorCategory::Dirty {
+        "\nFor dirty/adult requests, each replacement must include obvious adult sexual innuendo or an explicit adult double meaning. Use compact pun structure, not clean motivational humor, generic spouse anecdotes, or generic bedroom anecdotes."
+    } else {
+        ""
+    };
+
     format!(
         "The previous candidate failed because: {reason}\n\
          User request:\n\
          {user_text}\n\n\
          Failed candidate:\n\
          {failed_candidate}\n\n\
-         Generate one replacement response that satisfies the original request.\n\
+         {count_rule}{category_rule}\n\
          Use a different joke structure.\n\
+         No preamble.\n\
+         No explanation.\n\
+         No recycled templates.\n\
+         Output only the joke or requested numbered jokes."
+    )
+}
+
+pub fn build_last_chance_repair_prompt(
+    user_text: &str,
+    reason: &str,
+    category: HumorCategory,
+    count: usize,
+) -> String {
+    let count_rule = if count == 1 {
+        "Generate exactly one replacement joke.".to_string()
+    } else {
+        format!(
+            "Generate exactly {count} replacement jokes in one response. Number them 1-{count}."
+        )
+    };
+    let category_rule = if category == HumorCategory::Dirty {
+        "\nThis is a dirty/adult request: each joke must contain obvious adult sexual innuendo or an explicit adult double meaning."
+    } else {
+        ""
+    };
+
+    format!(
+        "Previous humor attempts still failed Dexter's filter because: {reason}\n\
+         User request:\n\
+         {user_text}\n\n\
+         {count_rule}{category_rule}\n\
+         Choose a completely different premise, occupation, object, metaphor, and punchline structure from anything already attempted.\n\
          No preamble.\n\
          No explanation.\n\
          No recycled templates.\n\
@@ -326,6 +414,7 @@ pub fn is_too_similar(candidate: &str, recent: &[String]) -> bool {
     recent.iter().any(|prev| {
         jaccard_similarity(&candidate_norm, prev) > SIMILARITY_REJECT_THRESHOLD
             || has_shared_word_shingle(&candidate_norm, prev, 5)
+            || has_shared_salient_terms(&candidate_norm, prev, 2)
     })
 }
 
@@ -381,6 +470,33 @@ pub fn recent_jokes_from_messages(messages: &[Message]) -> Vec<String> {
         .map(|m| normalize_joke(&m.content))
         .filter(|m| !m.is_empty())
         .collect()
+}
+
+pub fn recent_joke_outputs_for_prompt(messages: &[Message], limit: usize) -> Vec<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "assistant")
+        .take(limit)
+        .map(|m| m.content.trim())
+        .filter(|m| !m.is_empty())
+        .map(|m| m.chars().take(280).collect::<String>())
+        .collect()
+}
+
+pub fn append_recent_avoidance(mut prompt: String, recent_outputs: &[String]) -> String {
+    if recent_outputs.is_empty() {
+        return prompt;
+    }
+
+    prompt.push_str("\nRecent jokes/premises to avoid repeating:\n");
+    for (idx, output) in recent_outputs.iter().enumerate() {
+        prompt.push_str(&format!("{}. {output}\n", idx + 1));
+    }
+    prompt.push_str(
+        "Do not reuse their subject, setup, premise, occupation, object, metaphor, or punchline structure.\n",
+    );
+    prompt
 }
 
 #[allow(dead_code)]
@@ -451,6 +567,22 @@ pub fn select_final_candidate_for_category(
                 repair_used: true,
             };
         }
+
+        if !repair_clean.is_empty() && hard_reject(repair_clean).is_none() {
+            return HumorSelection {
+                final_output: repair_clean.to_string(),
+                first_reject_reason,
+                repair_used: true,
+            };
+        }
+    }
+
+    if !first_clean.is_empty() && hard_reject(first_clean).is_none() {
+        return HumorSelection {
+            final_output: first_clean.to_string(),
+            first_reject_reason,
+            repair_used: repair_candidate.is_some(),
+        };
     }
 
     HumorSelection {
@@ -619,6 +751,27 @@ fn has_shared_word_shingle(a: &str, b: &str, width: usize) -> bool {
         .any(|shingle| a_shingles.contains(&shingle))
 }
 
+fn has_shared_salient_terms(a: &str, b: &str, threshold: usize) -> bool {
+    let a_terms = salient_word_set(a);
+    if a_terms.len() < threshold {
+        return false;
+    }
+    let b_terms = salient_word_set(b);
+    a_terms.intersection(&b_terms).take(threshold).count() >= threshold
+}
+
+fn salient_word_set(text: &str) -> HashSet<&str> {
+    const STOPWORDS: &[&str] = &[
+        "about", "after", "again", "because", "before", "being", "could", "dirty", "enough",
+        "every", "focus", "getting", "going", "handle", "handled", "hard", "heard", "joke",
+        "looking", "make", "more", "really", "spent", "that", "there", "through", "wanted", "what",
+        "when", "where", "which", "with", "work", "working", "would",
+    ];
+    text.split_whitespace()
+        .filter(|w| w.len() >= 4 && !STOPWORDS.contains(w))
+        .collect::<HashSet<_>>()
+}
+
 fn word_set(text: &str) -> HashSet<&str> {
     text.split_whitespace()
         .filter(|w| w.len() > 2)
@@ -667,6 +820,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_repeated_premise_terms() {
+        let recent = vec![normalize_joke(
+            "I used to be a baker, but I couldn't make enough dough, so now I just focus on my buns.",
+        )];
+        assert!(is_too_similar(
+            "Why did the baker have such a dirty job? He spent all day kneading the dough and getting his buns well-handled.",
+            &recent,
+        ));
+    }
+
+    #[test]
     fn mechanism_prompt_has_no_preamble_permission() {
         let plan = build_humor_plan("tell me a dirty joke");
         assert!(plan.prompt.contains("No preamble"));
@@ -704,6 +868,35 @@ mod tests {
     }
 
     #[test]
+    fn counted_more_followup_inherits_previous_joke_category() {
+        let history = vec![
+            Message::user("tell me a dirty dad joke"),
+            Message::assistant("A prior dirty joke."),
+            Message::user("give me 2 more"),
+        ];
+        let effective = effective_request_for_generation("give me 2 more", &history);
+        let plan = build_humor_plan(&effective);
+
+        assert!(should_handle("give me 2 more", true));
+        assert!(effective.contains("tell me a dirty dad joke"));
+        assert_eq!(plan.count, 2);
+        assert_eq!(plan.category, HumorCategory::Dirty);
+    }
+
+    #[test]
+    fn identity_variation_followup_stays_in_humor_engine() {
+        let history = vec![
+            Message::user("tell me a gay joke"),
+            Message::assistant("A prior gay joke."),
+            Message::user("make it gayer"),
+        ];
+        let effective = effective_request_for_generation("make it gayer", &history);
+
+        assert!(should_handle("make it gayer", true));
+        assert!(effective.contains("tell me a gay joke"));
+    }
+
+    #[test]
     fn repair_attempt_runs_once_in_selection_logic() {
         let recent: Vec<String> = vec![];
         let selection = select_final_candidate(
@@ -715,6 +908,35 @@ mod tests {
         assert!(selection.repair_used);
         assert!(selection.first_reject_reason.is_some());
         assert!(selection.final_output.contains("Commitment Issues"));
+    }
+
+    #[test]
+    fn repair_prompt_preserves_count_and_dirty_category() {
+        let prompt = build_repair_prompt(
+            "give me 3 more dirty dad jokes",
+            "1. Clean joke\n2. Clean joke\n3. Clean joke",
+            "missing adult/NSFW innuendo for dirty joke request",
+            HumorCategory::Dirty,
+            3,
+        );
+
+        assert!(prompt.contains("Generate exactly 3 replacement jokes"));
+        assert!(prompt.contains("Number them 1-3"));
+        assert!(prompt.contains("each replacement must include obvious adult sexual innuendo"));
+    }
+
+    #[test]
+    fn last_chance_repair_prompt_demands_different_premise() {
+        let prompt = build_last_chance_repair_prompt(
+            "another one",
+            "too similar to a recent joke",
+            HumorCategory::Dirty,
+            1,
+        );
+
+        assert!(prompt.contains("Generate exactly one replacement joke"));
+        assert!(prompt.contains("completely different premise"));
+        assert!(prompt.contains("obvious adult sexual innuendo"));
     }
 
     #[test]
@@ -744,7 +966,7 @@ mod tests {
     #[test]
     fn hard_rejected_repair_cannot_be_final_output() {
         let selection = select_final_candidate_for_category(
-            "I told my wife she should try being flexible in the bedroom.",
+            "I'm not sure if this qualifies as a dirty joke, but here goes.",
             Some("Why did the man bring a ladder to the brothel? Higher level of service."),
             &[],
             HumorCategory::Dirty,
@@ -752,6 +974,32 @@ mod tests {
 
         assert!(!selection.final_output.to_lowercase().contains("ladder"));
         assert!(selection.final_output.contains("failed the humor filter"));
+    }
+
+    #[test]
+    fn soft_dirty_quality_failure_returns_non_hard_rejected_candidate() {
+        let selection = select_final_candidate_for_category(
+            "I told my wife she should embrace her mistakes, so she hugged me.",
+            Some("I tried to write a dirty joke about calendars, but the dates never lined up."),
+            &[],
+            HumorCategory::Dirty,
+        );
+
+        assert!(selection.repair_used);
+        assert!(!selection.final_output.contains("failed the humor filter"));
+        assert!(selection.final_output.contains("calendars"));
+    }
+
+    #[test]
+    fn recent_avoidance_prompt_includes_recent_outputs() {
+        let prompt = append_recent_avoidance(
+            "Generate a joke.".to_string(),
+            &["I used to be a baker, but I couldn't make enough dough.".to_string()],
+        );
+
+        assert!(prompt.contains("Recent jokes/premises to avoid repeating"));
+        assert!(prompt.contains("baker"));
+        assert!(prompt.contains("Do not reuse their subject"));
     }
 
     #[test]

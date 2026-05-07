@@ -43,6 +43,16 @@ private final class TTSGate: @unchecked Sendable {
     }
 }
 
+private func audioPlaybackCompletePayload(traceID: String?) -> String {
+    guard let traceID, !traceID.isEmpty else { return "{}" }
+    guard JSONSerialization.isValidJSONObject(["audio_trace_id": traceID]),
+          let data = try? JSONSerialization.data(withJSONObject: ["audio_trace_id": traceID]),
+          let payload = String(data: data, encoding: .utf8) else {
+        return "{}"
+    }
+    return payload
+}
+
 actor DexterClient {
 
     private static let socketPath = "/tmp/dexter.sock"
@@ -154,7 +164,7 @@ actor DexterClient {
             // so it is always armed before any AudioResponse events can arrive.
             // Task { await client.send } hops from self.queue (DispatchQueue) to the
             // DexterClient actor executor — the established Swift 6 pattern.
-            audioPlayer.onPlaybackFinished = { [weak self, sessionID] in
+            audioPlayer.onPlaybackFinished = { [weak self, sessionID] audioTraceID in
                 guard let client = self else { return }
                 Task {
                     let event = Dexter_V1_ClientEvent.with {
@@ -162,7 +172,7 @@ actor DexterClient {
                         $0.sessionID = sessionID
                         $0.systemEvent = Dexter_V1_SystemEvent.with {
                             $0.type    = .audioPlaybackComplete
-                            $0.payload = "{}"
+                            $0.payload = audioPlaybackCompletePayload(traceID: audioTraceID)
                         }
                     }
                     await client.send(event)
@@ -396,6 +406,7 @@ actor DexterClient {
 
                     case .textResponse(let resp):
                         print("[DexterClient] onResponse ← textResponse: isFinal=\(resp.isFinal), \(resp.content.prefix(40))...")
+                        audioPlayer.prepareForResponseTrace(event.traceID)
                         await MainActor.run {
                             window.hud.appendToken(resp.content)
                             if resp.isFinal { window.hud.responseComplete() }
@@ -465,7 +476,9 @@ actor DexterClient {
                         audioPlayer.enqueue(
                             data:           ttsGate.muted ? Data() : Data(audio.data),
                             sequenceNumber: audio.sequenceNumber,
-                            isFinal:        audio.isFinal
+                            isFinal:        audio.isFinal,
+                            traceID:        event.traceID,
+                            streamID:       audio.streamID
                         )
 
                     case .configSync(let cs):

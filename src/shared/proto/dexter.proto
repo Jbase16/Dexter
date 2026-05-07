@@ -162,6 +162,7 @@ message AudioResponse {
   bool   is_final        = 3;  // Phase 18: final sentinel for proactive TTS.
                                 // Rust sets true with empty data after all PCM chunks.
                                 // Swift uses this to arm the playback-complete callback.
+  string stream_id       = 4;  // Fresh per TTS stream; lets Swift reject stale frames after cancel.
 }
 
 // ── Audio stream ──────────────────────────────────────────────────────────────

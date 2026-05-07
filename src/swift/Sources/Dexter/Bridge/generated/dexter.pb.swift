@@ -576,6 +576,10 @@ struct Dexter_V1_AudioResponse: Sendable {
   /// Phase 18: final sentinel for proactive TTS.
   var isFinal: Bool = false
 
+  /// Rust sets true with empty data after all PCM chunks.
+  /// Swift uses this to arm the playback-complete callback.
+  var streamID: String = String()
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1332,7 +1336,7 @@ extension Dexter_V1_ActionRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Dexter_V1_AudioResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AudioResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}data\0\u{3}sequence_number\0\u{3}is_final\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}data\0\u{3}sequence_number\0\u{3}is_final\0\u{3}stream_id\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1343,6 +1347,7 @@ extension Dexter_V1_AudioResponse: SwiftProtobuf.Message, SwiftProtobuf._Message
       case 1: try { try decoder.decodeSingularBytesField(value: &self.data) }()
       case 2: try { try decoder.decodeSingularUInt32Field(value: &self.sequenceNumber) }()
       case 3: try { try decoder.decodeSingularBoolField(value: &self.isFinal) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.streamID) }()
       default: break
       }
     }
@@ -1358,6 +1363,9 @@ extension Dexter_V1_AudioResponse: SwiftProtobuf.Message, SwiftProtobuf._Message
     if self.isFinal != false {
       try visitor.visitSingularBoolField(value: self.isFinal, fieldNumber: 3)
     }
+    if !self.streamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamID, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1365,6 +1373,7 @@ extension Dexter_V1_AudioResponse: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.data != rhs.data {return false}
     if lhs.sequenceNumber != rhs.sequenceNumber {return false}
     if lhs.isFinal != rhs.isFinal {return false}
+    if lhs.streamID != rhs.streamID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

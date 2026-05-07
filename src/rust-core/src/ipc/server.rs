@@ -38,6 +38,14 @@ use proto::{
     ServerEvent, TranscriptChunk,
 };
 
+fn is_benign_session_stream_close(status: &Status) -> bool {
+    let message = status.message();
+    status.code() == tonic::Code::Unknown
+        && (message.contains("h2 protocol error: error reading a body from connection")
+            || message.contains("operation was canceled")
+            || message.contains("stream closed"))
+}
+
 // ── Internal fast-path events ─────────────────────────────────────────────────
 
 /// Events delivered directly from `stream_audio` to the active session orchestrator.
@@ -508,7 +516,18 @@ impl DexterService for CoreService {
                                 }
                             }
                             Ok(None)  => { info!(session = %session_trace, "Client closed session stream"); break; }
-                            Err(e)    => { error!(session = %session_trace, error = %e, "Session stream error"); break; }
+                            Err(e)    => {
+                                if is_benign_session_stream_close(&e) {
+                                    info!(
+                                        session = %session_trace,
+                                        error   = %e,
+                                        "Client session stream closed during transport shutdown"
+                                    );
+                                } else {
+                                    error!(session = %session_trace, error = %e, "Session stream error");
+                                }
+                                break;
+                            }
                         }
                     }
                     // Phase 24: receive results from background action tasks.
@@ -792,7 +811,8 @@ fn event_kind(event: &proto::client_event::Event) -> &'static str {
 
 #[cfg(test)]
 mod shell_payload_tests {
-    use super::parse_shell_payload;
+    use super::{is_benign_session_stream_close, parse_shell_payload};
+    use tonic::{Code, Status};
 
     #[test]
     fn parse_shell_payload_valid() {
@@ -861,6 +881,24 @@ mod shell_payload_tests {
         assert!(
             parse_shell_payload("{}").is_none(),
             "empty object must be None — missing command and cwd fields"
+        );
+    }
+
+    #[test]
+    fn benign_cli_transport_close_is_not_session_error() {
+        let status = Status::new(
+            Code::Unknown,
+            "h2 protocol error: error reading a body from connection",
+        );
+        assert!(
+            is_benign_session_stream_close(&status),
+            "CLI transport shutdown should be classified as a benign close"
+        );
+
+        let real_error = Status::new(Code::Internal, "orchestrator exploded");
+        assert!(
+            !is_benign_session_stream_close(&real_error),
+            "unrelated stream failures must remain error-level"
         );
     }
 }

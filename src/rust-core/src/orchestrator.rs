@@ -214,6 +214,16 @@ const COMEDY_MODE_INSTRUCTION: &str = concat!(
     "For another/different/try-again follow-ups, read the recent assistant jokes in the conversation and use a fresh setup, punchline, and premise instead of repeating or lightly rewording one."
 );
 
+fn audio_trace_id_from_payload(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    value
+        .get("audio_trace_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 // ── Phase 27: generation result ───────────────────────────────────────────────
 
 /// Result delivered from the background generation task to the orchestrator event loop.
@@ -726,6 +736,14 @@ pub struct CoreOrchestrator {
     /// Phase 27: the most-recently sent entity state, tracked so `handle_barge_in`
     /// knows whether a state transition is needed. Updated in `send_state`.
     current_state: EntityState,
+    /// Trace ID of the newest TTS playback sentinel that may drive
+    /// `AUDIO_PLAYBACK_COMPLETE -> IDLE`.
+    ///
+    /// Swift echoes the final `AudioResponse` trace ID back in the SystemEvent
+    /// payload. New operator turns clear this slot, so a late completion from
+    /// older audio ("Ready.", cancelled speech, etc.) cannot hide the HUD during
+    /// a fresh response.
+    pending_audio_playback_trace_id: Option<String>,
     /// Phase 37.5 / B5: true while a HEAVY-routed generation is in flight after
     /// we explicitly unloaded PRIMARY to make VRAM room. `handle_generation_complete`
     /// checks this; if set, it spawns `warm_up_primary_model()` so PRIMARY is
@@ -783,13 +801,8 @@ pub struct CoreOrchestrator {
     /// barge-in transition. Aborting the TTS task drops its tx_arc lock guard
     /// AND the session_tx clone — both stop pushing audio frames immediately.
     ///
-    /// Note: a residual race remains where AudioResponse frames already in the
-    /// gRPC channel from the OLD generation can still play after Swift's
-    /// `AudioPlayer.stop()` resets `nextExpectedSeq` to 0 (because the new
-    /// generation's seq=0 frame is indistinguishable from a stale old-gen
-    /// seq=0). The structural fix is a per-stream id field on AudioResponse
-    /// (proto change). Deferred to Phase 38b along with the structured
-    /// action types since that phase is already touching the proto.
+    /// AudioResponse now also carries a per-stream id, so Swift can reject any
+    /// already-buffered frames from retired streams after `AudioPlayer.stop()`.
     tts_handle_abort: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
     /// Set to `true` by `warm_up_fast_model()` when qwen3:8b finishes loading.
     /// Checked in `handle_text_input` — if false, the operator is told to wait and the
@@ -926,9 +939,10 @@ impl CoreOrchestrator {
             last_vision_turn_at: None,        // vision-continuation
             last_joke_turn_at: None,          // joke-continuation
             current_state: EntityState::Idle, // Phase 27
+            pending_audio_playback_trace_id: None,
             cancel_token: Arc::new(AtomicBool::new(false)), // Phase 27
-            generation_tx,                    // Phase 27
-            generation_handle: None,          // Phase 33
+            generation_tx,                                  // Phase 27
+            generation_handle: None,                        // Phase 33
             generation_producer_abort: Arc::new(std::sync::Mutex::new(None)), // Phase 38 / Codex [7]
             in_flight_actions: std::collections::HashMap::new(), // Phase 38 / Codex [10]
             tts_handle_abort: Arc::new(std::sync::Mutex::new(None)), // Phase 38 / Codex [13]
@@ -1295,6 +1309,7 @@ impl CoreOrchestrator {
     /// for the no-op case (cancel called when nothing was in flight).
     fn abort_active_generation(&mut self) -> bool {
         let mut aborted_anything = false;
+        self.clear_audio_playback_wait("", "generation/action abort");
 
         if let Some(handle) = self.generation_handle.take() {
             handle.abort();
@@ -1586,6 +1601,9 @@ impl CoreOrchestrator {
         let trace_id = result.trace_id;
         let content = result.content;
         let embed_model = result.embed_model;
+        if !tts_was_active && self.pending_audio_playback_trace_id.as_deref() == Some(&trace_id) {
+            self.clear_audio_playback_wait(&trace_id, "generation completed without TTS playback");
+        }
 
         // 7a. Phase 19 — Uncertainty sentinel handling.
         let mut response_already_recorded = false;
@@ -2228,6 +2246,9 @@ impl CoreOrchestrator {
             } else {
                 None
             };
+            if tts_arc.is_some() {
+                self.arm_audio_playback_wait(&trace_id);
+            }
             let sess = self.session_id.clone();
             let cmd_log = command.clone();
 
@@ -2326,17 +2347,20 @@ impl CoreOrchestrator {
     ) -> (
         Option<tokio::sync::mpsc::UnboundedSender<String>>,
         Option<tokio::task::JoinHandle<()>>,
+        Option<String>,
     ) {
         // Phase 34: TTS is only active when the current turn came from voice input (hotkey).
         // Typed HUD input always stays text-only — no synthesis wasted on muted output.
         if !self.voice.is_tts_available() || !self.voice_mode {
-            return (None, None);
+            return (None, None, None);
         }
         use crate::voice::protocol::msg;
         let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let tts_arc = self.voice.tts_arc();
         let session_tx = self.tx.clone();
         let mut seq = 0u32;
+        let stream_id = uuid::Uuid::new_v4().to_string();
+        let stream_id_bg = stream_id.clone();
 
         // Phase 38 / Codex finding [13]: capture this slot before spawning so
         // we can publish the handle's AbortHandle into it after spawn returns.
@@ -2400,6 +2424,7 @@ impl CoreOrchestrator {
                                             data: pcm,
                                             sequence_number: seq,
                                             is_final: false,
+                                            stream_id: stream_id_bg.clone(),
                                         },
                                     )),
                                 };
@@ -2420,7 +2445,7 @@ impl CoreOrchestrator {
             *g = Some(handle.abort_handle());
         }
 
-        (Some(stx), Some(handle))
+        (Some(stx), Some(handle), Some(stream_id))
     }
 
     ///   5+6. Stream tokens via generate_and_stream() helper
@@ -2610,6 +2635,8 @@ impl CoreOrchestrator {
             // Entity stays in ALERT — do NOT transition. The approval dialog is still live.
             return Ok(());
         }
+
+        self.clear_audio_playback_wait(&trace_id, "new operator turn");
 
         // 0c. [Phase 21] Memory command fast-path.
         //
@@ -3314,7 +3341,10 @@ impl CoreOrchestrator {
         // Phase 10 — TTS: if available, spawn a concurrent synthesis task and wire
         // sentence detection into the generation loop via the unbounded channel.
         // Follow-up + retrieval generations always pass None — not narrated via TTS.
-        let (tts_tx_opt, tts_join_handle) = self.make_tts_channel();
+        let (tts_tx_opt, tts_join_handle, tts_stream_id) = self.make_tts_channel();
+        if tts_tx_opt.is_some() {
+            self.arm_audio_playback_wait(&trace_id);
+        }
 
         // 5+6. Spawn the generation as a background task (Phase 27).
         //
@@ -3384,6 +3414,7 @@ impl CoreOrchestrator {
             needs_context_cap,
             tts_tx_opt,
             tts_join_handle,
+            tts_stream_id,
             cancel_token,
             gen_tx,
             content,
@@ -3733,6 +3764,10 @@ impl CoreOrchestrator {
                 self.prefill_inference_cache();
             }
             Ok(SystemEventType::AudioPlaybackComplete) => {
+                let audio_trace_id = audio_trace_id_from_payload(&sys.payload);
+                if !self.audio_playback_complete_is_current(&trace_id, audio_trace_id.as_deref()) {
+                    return Ok(());
+                }
                 // Phase 18/19: Swift signals that TTS audio (proactive or regular-response)
                 // has finished playing. This is the correct IDLE trigger — after playback
                 // completes, not after synthesis completes.
@@ -4079,7 +4114,10 @@ impl CoreOrchestrator {
         self.send_state(EntityState::Thinking, &result.trace_id)
             .await?;
 
-        let (tts_tx_opt, tts_join_handle) = self.make_tts_channel();
+        let (tts_tx_opt, tts_join_handle, tts_stream_id) = self.make_tts_channel();
+        if tts_tx_opt.is_some() {
+            self.arm_audio_playback_wait(&result.trace_id);
+        }
         let cancel_token = self.cancel_token.clone();
         let gen_tx = self.generation_tx.clone();
         let engine = self.engine.clone();
@@ -4104,6 +4142,7 @@ impl CoreOrchestrator {
             false, // needs_context_cap: FAST fits in VRAM at native context
             tts_tx_opt,
             tts_join_handle,
+            tts_stream_id,
             cancel_token,
             gen_tx,
             original_content, // content = original user query for memory embedding
@@ -4601,6 +4640,78 @@ impl CoreOrchestrator {
         }
     }
 
+    fn arm_audio_playback_wait(&mut self, trace_id: &str) {
+        self.pending_audio_playback_trace_id = Some(trace_id.to_string());
+    }
+
+    fn clear_audio_playback_wait(&mut self, trace_id: &str, reason: &str) {
+        if let Some(prev) = self.pending_audio_playback_trace_id.take() {
+            debug!(
+                session       = %self.session_id,
+                trace_id      = %trace_id,
+                stale_trace_id = %prev,
+                reason        = %reason,
+                "Cleared pending audio playback completion"
+            );
+        }
+    }
+
+    fn audio_playback_complete_is_current(
+        &mut self,
+        event_trace_id: &str,
+        payload_trace_id: Option<&str>,
+    ) -> bool {
+        match (
+            self.pending_audio_playback_trace_id.as_deref(),
+            payload_trace_id,
+        ) {
+            (Some(expected), Some(actual)) if expected == actual => {
+                self.pending_audio_playback_trace_id = None;
+                true
+            }
+            (Some(expected), Some(actual)) => {
+                info!(
+                    session        = %self.session_id,
+                    trace_id       = %event_trace_id,
+                    expected_trace = %expected,
+                    actual_trace   = %actual,
+                    "Ignoring stale audio playback completion"
+                );
+                false
+            }
+            (Some(expected), None) if self.generation_handle.is_some() => {
+                info!(
+                    session        = %self.session_id,
+                    trace_id       = %event_trace_id,
+                    expected_trace = %expected,
+                    "Ignoring unattributed audio playback completion while generation is active"
+                );
+                false
+            }
+            (Some(_), None) => {
+                // Compatibility for older Swift clients that do not include
+                // audio_trace_id. Safe once no generation is active; the tagged
+                // path above is used by current Swift builds.
+                self.pending_audio_playback_trace_id = None;
+                true
+            }
+            (None, Some(actual)) => {
+                info!(
+                    session      = %self.session_id,
+                    trace_id     = %event_trace_id,
+                    actual_trace = %actual,
+                    "Ignoring audio playback completion with no matching pending audio"
+                );
+                false
+            }
+            (None, None) => {
+                // Legacy/manual reset path. Swift still sends an unattributed
+                // AudioPlaybackComplete when STT returns an empty transcript.
+                true
+            }
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Send an entity state change to Swift and track the current state.
@@ -4940,10 +5051,12 @@ impl CoreOrchestrator {
         //    playing, Swift sends AUDIO_PLAYBACK_COMPLETE → orchestrator → EntityState::Idle.
         //    This ensures the entity stays THINKING throughout playback, not just synthesis.
         if self.voice.is_tts_available() {
+            self.arm_audio_playback_wait(trace_id);
             let tts_arc = self.voice.tts_arc();
             let text_bytes = response.trim().as_bytes().to_vec();
             let session_tx = self.tx.clone();
             let trace_id_clone = trace_id.to_string();
+            let stream_id = uuid::Uuid::new_v4().to_string();
 
             let handle = tokio::spawn(async move {
                 use crate::ipc::proto::{server_event, AudioResponse};
@@ -4983,6 +5096,7 @@ impl CoreOrchestrator {
                                                 data: pcm,
                                                 sequence_number: seq,
                                                 is_final: false,
+                                                stream_id: stream_id.clone(),
                                             },
                                         )),
                                     };
@@ -5002,6 +5116,7 @@ impl CoreOrchestrator {
                                                 data: vec![],
                                                 sequence_number: seq,
                                                 is_final: true,
+                                                stream_id: stream_id.clone(),
                                             },
                                         )),
                                     };
@@ -5067,10 +5182,13 @@ impl CoreOrchestrator {
             return Ok(false);
         }
 
+        self.arm_audio_playback_wait(trace_id);
+
         let tts_arc = self.voice.tts_arc();
         let text_bytes = text.as_bytes().to_vec();
         let session_tx = self.tx.clone();
         let trace_id_clone = trace_id.to_string();
+        let stream_id = uuid::Uuid::new_v4().to_string();
 
         // Identical pattern to do_proactive_response §6 (TTS delivery):
         // spawn a task to drive TEXT_INPUT → TTS_AUDIO frames → TTS_DONE → is_final sentinel.
@@ -5112,6 +5230,7 @@ impl CoreOrchestrator {
                                             data: pcm,
                                             sequence_number: seq,
                                             is_final: false,
+                                            stream_id: stream_id.clone(),
                                         },
                                     )),
                                 };
@@ -5129,11 +5248,12 @@ impl CoreOrchestrator {
                                             data: vec![],
                                             sequence_number: seq,
                                             is_final: true,
+                                            stream_id: stream_id.clone(),
                                         },
                                     )),
                                 };
                                 let _ = session_tx.send(Ok(sentinel)).await;
-                                break;
+                                return true;
                             }
                             Ok(Some(_)) => {} // discard unexpected frames
                             _ => break,
@@ -5141,9 +5261,13 @@ impl CoreOrchestrator {
                     }
                 }
             }
+            false
         });
-        let _ = handle.await;
-        Ok(true)
+        let sent_sentinel = handle.await.unwrap_or(false);
+        if !sent_sentinel {
+            self.clear_audio_playback_wait(trace_id, "TTS feedback failed before final sentinel");
+        }
+        Ok(sent_sentinel)
     }
 }
 
@@ -5291,7 +5415,10 @@ async fn run_humor_generation_background(
     let effective_content = crate::humor::effective_request_for_generation(&content, &history);
     let plan = crate::humor::build_humor_plan(&effective_content);
     let recent = crate::humor::recent_jokes_from_messages(&history);
-    let prompt_chars = plan.prompt.chars().count();
+    let recent_outputs = crate::humor::recent_joke_outputs_for_prompt(&history, 5);
+    let generation_prompt =
+        crate::humor::append_recent_avoidance(plan.prompt.clone(), &recent_outputs);
+    let prompt_chars = generation_prompt.chars().count();
     info!(
         session                 = %session_id,
         trace_id                = %trace_id,
@@ -5307,7 +5434,7 @@ async fn run_humor_generation_background(
     let first = match collect_humor_candidate(
         &engine,
         &model_name,
-        plan.prompt.clone(),
+        generation_prompt,
         &trace_id,
         &cancel_token,
         &producer_abort_slot,
@@ -5362,7 +5489,16 @@ async fn run_humor_generation_background(
 
     if !cancelled {
         if let Some(reason) = first_reject_reason.as_deref() {
-            let repair_prompt = crate::humor::build_repair_prompt(&content, &first.text, reason);
+            let repair_prompt = crate::humor::append_recent_avoidance(
+                crate::humor::build_repair_prompt(
+                    &effective_content,
+                    &first.text,
+                    reason,
+                    plan.category,
+                    plan.count,
+                ),
+                &recent_outputs,
+            );
             match collect_humor_candidate(
                 &engine,
                 &model_name,
@@ -5394,12 +5530,63 @@ async fn run_humor_generation_background(
         }
     }
 
-    let selection = crate::humor::select_final_candidate_for_category(
+    let mut selection = crate::humor::select_final_candidate_for_category(
         &first.text,
         repair_text.as_deref(),
         &recent,
         plan.category,
     );
+
+    if !cancelled && selection.final_output.contains("failed the humor filter") {
+        let last_failed_text = repair_text.as_deref().unwrap_or(first.text.as_str());
+        let last_reason =
+            crate::humor::reject_reason_for_category(last_failed_text, &recent, plan.category)
+                .or_else(|| first_reject_reason.clone())
+                .unwrap_or_else(|| "candidate failed quality gates".to_string());
+        let last_chance_prompt = crate::humor::append_recent_avoidance(
+            crate::humor::build_last_chance_repair_prompt(
+                &effective_content,
+                &last_reason,
+                plan.category,
+                plan.count,
+            ),
+            &recent_outputs,
+        );
+        match collect_humor_candidate(
+            &engine,
+            &model_name,
+            last_chance_prompt,
+            &trace_id,
+            &cancel_token,
+            &producer_abort_slot,
+            plan.count,
+        )
+        .await
+        {
+            Ok(last_chance) => {
+                cancelled = last_chance.cancelled;
+                total_tokens = total_tokens.saturating_add(last_chance.token_count);
+                total_ms = total_ms.saturating_add(last_chance.total_ms);
+                if !last_chance.text.trim().is_empty()
+                    && crate::humor::hard_reject(&last_chance.text).is_none()
+                {
+                    selection = crate::humor::HumorSelection {
+                        final_output: last_chance.text.trim().to_string(),
+                        first_reject_reason: first_reject_reason.clone(),
+                        repair_used: true,
+                    };
+                }
+            }
+            Err(e) => {
+                warn!(
+                    session  = %session_id,
+                    trace_id = %trace_id,
+                    error    = %e,
+                    "Humor Engine last-chance repair generation failed"
+                );
+            }
+        }
+    }
     let final_output = selection.final_output.trim().to_string();
 
     if !cancelled {
@@ -5491,6 +5678,7 @@ async fn run_generation_background(
     needs_context_cap: bool,
     tts_tx_opt: Option<UnboundedSender<String>>,
     tts_join_handle: Option<JoinHandle<()>>,
+    tts_stream_id: Option<String>,
     cancel_token: Arc<AtomicBool>,
     gen_tx: mpsc::Sender<GenerationResult>,
     content: String,
@@ -5857,6 +6045,7 @@ async fn run_generation_background(
                     data: vec![],
                     sequence_number: 0, // AudioPlayer ignores seqnum on is_final=true
                     is_final: true,
+                    stream_id: tts_stream_id.clone().unwrap_or_default(),
                 })),
             };
             let _ = tx.send(Ok(sentinel)).await;
@@ -6122,6 +6311,7 @@ async fn run_shell_error_proactive_background(
         let text_bytes = response.trim().as_bytes().to_vec();
         let session_tx = tx.clone();
         let trace_id_clone = trace_id.clone();
+        let stream_id = uuid::Uuid::new_v4().to_string();
 
         let handle = tokio::spawn(async move {
             let mut guard: tokio::sync::MutexGuard<'_, Option<crate::voice::WorkerClient>> =
@@ -6161,6 +6351,7 @@ async fn run_shell_error_proactive_background(
                                             data: pcm,
                                             sequence_number: seq,
                                             is_final: false,
+                                            stream_id: stream_id.clone(),
                                         },
                                     )),
                                 };
@@ -6178,6 +6369,7 @@ async fn run_shell_error_proactive_background(
                                             data: vec![],
                                             sequence_number: seq,
                                             is_final: true,
+                                            stream_id: stream_id.clone(),
                                         },
                                     )),
                                 };
@@ -8663,6 +8855,71 @@ end tell"#;
             }
             other => panic!("Expected EntityStateChange(Idle), got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn audio_playback_complete_ignores_stale_tagged_completion() {
+        // A late playback-complete ack from an older utterance must not send IDLE
+        // after a new turn has already entered THINKING.
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, mut rx) = make_orchestrator(tmp.path());
+        while rx.try_recv().is_ok() {}
+
+        orch.current_state = EntityState::Thinking;
+        orch.pending_audio_playback_trace_id = None;
+
+        let evt = SystemEvent {
+            r#type: crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
+            payload: r#"{"audio_trace_id":"old-ready-trace"}"#.to_string(),
+        };
+        orch.handle_system_event(evt, new_trace()).await.unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "stale tagged AUDIO_PLAYBACK_COMPLETE must not emit EntityState::Idle"
+        );
+        assert_eq!(
+            orch.current_state,
+            EntityState::Thinking,
+            "stale tagged completion must leave the current THINKING turn intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_playback_complete_accepts_matching_tagged_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, mut rx) = make_orchestrator(tmp.path());
+        while rx.try_recv().is_ok() {}
+
+        orch.current_state = EntityState::Thinking;
+        orch.pending_audio_playback_trace_id = Some("current-audio-trace".to_string());
+
+        let evt = SystemEvent {
+            r#type: crate::ipc::proto::SystemEventType::AudioPlaybackComplete.into(),
+            payload: r#"{"audio_trace_id":"current-audio-trace"}"#.to_string(),
+        };
+        orch.handle_system_event(evt, new_trace()).await.unwrap();
+        tokio::task::yield_now().await;
+
+        let server_event = rx
+            .try_recv()
+            .expect("matching AUDIO_PLAYBACK_COMPLETE must emit IDLE")
+            .expect("event must be Ok(...)");
+        match server_event.event {
+            Some(crate::ipc::proto::server_event::Event::EntityState(ref change)) => {
+                assert_eq!(
+                    change.state,
+                    crate::ipc::proto::EntityState::Idle as i32,
+                    "matching completion must transition to IDLE"
+                );
+            }
+            other => panic!("Expected EntityStateChange(Idle), got {:?}", other),
+        }
+        assert!(
+            orch.pending_audio_playback_trace_id.is_none(),
+            "matching completion must clear the pending audio trace"
+        );
     }
 
     // ── Phase 19: action_awaiting_approval guard ──────────────────────────────
