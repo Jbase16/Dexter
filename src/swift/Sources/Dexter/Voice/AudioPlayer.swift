@@ -23,6 +23,10 @@ final class AudioPlayer: @unchecked Sendable {
     // MARK: - Threading
 
     private let queue = DispatchQueue(label: "com.dexter.audioplayer", qos: .userInteractive)
+    private static let smokeLoggingEnabled: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_AUDIO_TRACE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
 
     // MARK: - Audio graph
 
@@ -59,6 +63,7 @@ final class AudioPlayer: @unchecked Sendable {
     /// this closure is called from `self.queue` (a serial DispatchQueue), which is
     /// not actor-isolated.
     var onPlaybackFinished: (@Sendable (_ traceID: String?) -> Void)?
+    private var onNextBufferScheduled: (@Sendable (_ traceID: String?, _ streamID: String?) -> Void)?
 
     /// Set to true when an `AudioResponse` with `is_final = true` is enqueued.
     /// When `pendingBufferCount` reaches zero while this flag is set,
@@ -151,6 +156,17 @@ final class AudioPlayer: @unchecked Sendable {
         }
     }
 
+    /// Test hook for live smoke: invoke once when the next PCM buffer is actually
+    /// scheduled on AVAudioPlayerNode. This is stronger than observing
+    /// AudioResponse arrival because it proves Swift playback accepted the stream.
+    func notifyOnNextBufferScheduled(
+        _ callback: @escaping @Sendable (_ traceID: String?, _ streamID: String?) -> Void
+    ) {
+        queue.async { [self] in
+            onNextBufferScheduled = callback
+        }
+    }
+
     /// Stop playback immediately, clear all pending audio, and re-arm the player node
     /// so the next `enqueue()` call begins a fresh playback sequence.
     ///
@@ -172,6 +188,7 @@ final class AudioPlayer: @unchecked Sendable {
             awaitingFinalCallback = false
             let traceID = awaitingFinalTraceID
             awaitingFinalTraceID  = nil
+            smokeLog("stop traceID=\(traceID ?? "") streamID=\(activeStreamID ?? "") wasFinal=\(wasFinal)")
             retireActivePlayback()
             // Phase 18: if a proactive observation was interrupted by barge-in,
             // fire the callback immediately so Rust receives AUDIO_PLAYBACK_COMPLETE
@@ -201,6 +218,11 @@ final class AudioPlayer: @unchecked Sendable {
 
             _isPlaying = true
             pendingBufferCount += 1
+            smokeLog("schedule seq=\(item.sequenceNumber) traceID=\(activeTraceID ?? "") streamID=\(activeStreamID ?? "")")
+            if let callback = onNextBufferScheduled {
+                onNextBufferScheduled = nil
+                callback(activeTraceID, activeStreamID)
+            }
 
             // Completion fires on AVFoundation's internal thread — dispatch async
             // back to self.queue. The async hop breaks the synchronous call chain that
@@ -252,8 +274,14 @@ final class AudioPlayer: @unchecked Sendable {
     }
 
     private func acceptPlaybackIdentity(traceID: String?, streamID: String?) -> Bool {
-        guard acceptTraceID(traceID) else { return false }
-        guard acceptStreamID(streamID) else { return false }
+        guard acceptTraceID(traceID) else {
+            smokeLog("dropStale reason=trace traceID=\(traceID ?? "") streamID=\(streamID ?? "")")
+            return false
+        }
+        guard acceptStreamID(streamID) else {
+            smokeLog("dropStale reason=stream traceID=\(traceID ?? "") streamID=\(streamID ?? "")")
+            return false
+        }
         return true
     }
 
@@ -319,6 +347,11 @@ final class AudioPlayer: @unchecked Sendable {
             retiredStreamIDs.removeFirst(retiredStreamIDs.count - 16)
         }
         activeStreamID = nil
+    }
+
+    private func smokeLog(_ message: String) {
+        guard Self.smokeLoggingEnabled else { return }
+        print("[AudioPlayerSmoke] \(message)")
     }
 
     /// Convert raw int16 LE PCM bytes to an `AVAudioPCMBuffer` in `pcmFormat`.

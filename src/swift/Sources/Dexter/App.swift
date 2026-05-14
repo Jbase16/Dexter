@@ -76,7 +76,12 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(HUDSmokeConfig.submitDelaySecs))
                     await MainActor.run {
                         HUDSmokeConfig.log("autoSubmit")
-                        window.hud.onTextSubmit?(HUDSmokeConfig.text)
+                        if HUDSmokeConfig.fromVoice {
+                            window.hud.showOperatorInput(HUDSmokeConfig.text)
+                            Task { await c.sendVoiceSmokeInput(HUDSmokeConfig.text) }
+                        } else {
+                            window.hud.onTextSubmit?(HUDSmokeConfig.text)
+                        }
                     }
 
                     try? await Task.sleep(for: .seconds(HUDSmokeConfig.exitAfterSecs))
@@ -142,6 +147,11 @@ private enum HUDSmokeConfig {
 
     static let exitAfterSecs: Int64 = {
         parseSecs("DEXTER_HUD_SMOKE_EXIT_AFTER_SECS", defaultValue: 18)
+    }()
+
+    static let fromVoice: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_FROM_VOICE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
     }()
 
     static func log(_ message: String) {

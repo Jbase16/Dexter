@@ -42,11 +42,11 @@ use crate::{
     action::{ActionEngine, ActionOutcome, ActionResult, ActionSpec, ExecutorHandle, PolicyEngine},
     config::{DexterConfig, ModelConfig},
     constants::{
-        ACTION_BLOCK_CLOSE, ACTION_BLOCK_OPEN, AGENTIC_MAX_DEPTH, CONVERSATION_MAX_TURNS,
-        FAST_MODEL_KEEP_ALIVE, GENERATION_HARD_TIMEOUT_SECS, GENERATION_WALL_TIMEOUT_SECS,
-        LARGE_MODEL_NUM_CTX, MEMORY_DB_FILENAME, PREFILL_DEBOUNCE_SECS,
-        PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE, RETRIEVAL_ACKNOWLEDGMENT,
-        SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
+        ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_BLOCK_CLOSE, ACTION_BLOCK_OPEN, AGENTIC_MAX_DEPTH,
+        CONVERSATION_MAX_TURNS, FAST_MODEL_KEEP_ALIVE, GENERATION_HARD_TIMEOUT_SECS,
+        GENERATION_WALL_TIMEOUT_SECS, LARGE_MODEL_NUM_CTX, MEMORY_DB_FILENAME,
+        PREFILL_DEBOUNCE_SECS, PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE,
+        RETRIEVAL_ACKNOWLEDGMENT, SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
     },
     context_observer::ContextObserver,
     inference::{
@@ -1254,6 +1254,49 @@ impl CoreOrchestrator {
         }
     }
 
+    /// Cross-reference a Messages.app buddy handle against the requested contact.
+    ///
+    /// This is intentionally Rust-owned and deterministic. The model may propose
+    /// a `buddy "+1..."` send script, but the core validates that the handle is
+    /// present in Contacts AND belongs to the contact name the operator requested
+    /// before executing the externally visible send.
+    async fn validate_messages_recipient_in_contacts(
+        &self,
+        handle: &str,
+        requested_recipient: &str,
+        trace_id: &str,
+    ) -> Result<ContactsRecipientValidation, OrchestratorError> {
+        let script = build_contacts_recipient_validation_script(handle, requested_recipient);
+        let result =
+            crate::action::executor::execute_applescript(&script, ACTION_APPLESCRIPT_TIMEOUT_SECS)
+                .await;
+
+        if !result.success {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                handle = %handle,
+                requested_recipient = %requested_recipient,
+                error = %result.error,
+                "iMessage recipient integrity — Contacts validation AppleScript failed"
+            );
+            return Ok(ContactsRecipientValidation::NotFound);
+        }
+
+        let parsed = parse_contacts_recipient_validation_output(&result.output);
+        if matches!(parsed, ContactsRecipientValidation::NotFound) {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                handle = %handle,
+                requested_recipient = %requested_recipient,
+                output_preview = %result.output.chars().take(120).collect::<String>(),
+                "iMessage recipient integrity — Contacts validation returned no match"
+            );
+        }
+        Ok(parsed)
+    }
+
     // ── Public dispatch ───────────────────────────────────────────────────────
 
     /// Route one inbound ClientEvent to the appropriate handler.
@@ -1938,6 +1981,123 @@ impl CoreOrchestrator {
                 }
             }
 
+            // Named/third-party iMessage recipient integrity.
+            //
+            // Personality YAML already tells the model to look up the recipient in
+            // Contacts before sending, but YAML is only model guidance. This Rust
+            // preflight makes recipient identity a hard runtime boundary: a non-self
+            // Messages send may only execute when the `buddy "..."` handle in the
+            // generated script belongs to the contact name the operator requested.
+            // That blocks hallucinated toll-free numbers and wrong-contact handle
+            // substitutions without making normal messaging an approval-spam workflow.
+            if is_terminal_send_action(&spec)
+                && !is_self_reference_request(&content, &self.operator_self_aliases)
+            {
+                let requested_recipient = match extract_requested_messages_recipient(&content) {
+                    Some(name) if !name.trim().is_empty() => name,
+                    _ => {
+                        warn!(
+                            session = %self.session_id,
+                            query   = %content,
+                            agentic_depth = result.agentic_depth,
+                            "iMessage recipient integrity — could not extract requested contact name; refusing unverified send"
+                        );
+                        let reply = "I couldn't determine the exact Contacts recipient from that request, \
+                                     so I didn't send it. Ask again with the contact name exactly as it \
+                                     appears in Contacts.";
+                        self.send_text(reply, true, &trace_id).await?;
+                        self.context.push_assistant(reply);
+                        self.session_mgr.push_turn("assistant", reply);
+                        self.send_state(EntityState::Idle, &trace_id).await?;
+                        return Ok(());
+                    }
+                };
+
+                let recipient_handle = match &spec {
+                    ActionSpec::AppleScript { script, .. } => {
+                        extract_messages_recipient_handle(script)
+                    }
+                    _ => None,
+                };
+                let recipient_handle = match recipient_handle {
+                    Some(handle) if !handle.trim().is_empty() => handle,
+                    _ => {
+                        warn!(
+                            session = %self.session_id,
+                            query   = %content,
+                            agentic_depth = result.agentic_depth,
+                            "iMessage recipient integrity — could not extract direct buddy handle; refusing unverified send"
+                        );
+                        let reply = "I couldn't verify the recipient in Contacts from that send action, \
+                                     so I didn't send it. Ask with the contact name exactly as it appears \
+                                     in Contacts and I'll resolve it there first.";
+                        self.send_text(reply, true, &trace_id).await?;
+                        self.context.push_assistant(reply);
+                        self.session_mgr.push_turn("assistant", reply);
+                        self.send_state(EntityState::Idle, &trace_id).await?;
+                        return Ok(());
+                    }
+                };
+
+                match self
+                    .validate_messages_recipient_in_contacts(
+                        &recipient_handle,
+                        &requested_recipient,
+                        &trace_id,
+                    )
+                    .await?
+                {
+                    ContactsRecipientValidation::Matched { contact_name } => {
+                        info!(
+                            session = %self.session_id,
+                            handle  = %recipient_handle,
+                            requested_recipient = %requested_recipient,
+                            contact = %contact_name,
+                            agentic_depth = result.agentic_depth,
+                            "iMessage recipient integrity — Contacts cross-reference succeeded"
+                        );
+                    }
+                    ContactsRecipientValidation::HandleFoundNameMismatch { contact_name } => {
+                        warn!(
+                            session = %self.session_id,
+                            handle  = %recipient_handle,
+                            requested_recipient = %requested_recipient,
+                            contact = %contact_name,
+                            query   = %content,
+                            agentic_depth = result.agentic_depth,
+                            "iMessage recipient integrity — Contacts handle matched a different contact; refusing send"
+                        );
+                        let reply = format!(
+                            "I found that iMessage handle in Contacts, but it belongs to {contact_name}, \
+                             not {requested_recipient}. I didn't send it."
+                        );
+                        self.send_text(&reply, true, &trace_id).await?;
+                        self.context.push_assistant(&reply);
+                        self.session_mgr.push_turn("assistant", &reply);
+                        self.send_state(EntityState::Idle, &trace_id).await?;
+                        return Ok(());
+                    }
+                    ContactsRecipientValidation::NotFound => {
+                        warn!(
+                            session = %self.session_id,
+                            handle  = %recipient_handle,
+                            requested_recipient = %requested_recipient,
+                            query   = %content,
+                            agentic_depth = result.agentic_depth,
+                            "iMessage recipient integrity — Contacts cross-reference failed; refusing unverified send"
+                        );
+                        let reply = "I couldn't find that iMessage recipient handle in Contacts, \
+                                     so I didn't send it. Add or correct the contact in Contacts.app, \
+                                     then ask again with the contact name.";
+                        self.send_text(reply, true, &trace_id).await?;
+                        self.context.push_assistant(reply);
+                        self.session_mgr.push_turn("assistant", reply);
+                        self.send_state(EntityState::Idle, &trace_id).await?;
+                        return Ok(());
+                    }
+                }
+            }
+
             // Phase 35: phantom-retry guard.
             //
             // qwen3 occasionally enters an agentic loop where it retries the EXACT same
@@ -2044,10 +2204,12 @@ impl CoreOrchestrator {
                 }
             } else {
                 let action_id = uuid::Uuid::new_v4().to_string();
+                let action_description = ActionEngine::describe(&spec);
                 let executor = self.action_engine.executor_handle();
                 let action_tx = self.action_tx.clone();
                 let aid = action_id.clone();
                 let tid = trace_id.clone();
+                let desc = action_description.clone();
 
                 // Phase 36: flag iMessage-send AppleScripts so handle_action_result
                 // skips the continuation after a successful completion.
@@ -2073,6 +2235,7 @@ impl CoreOrchestrator {
                     session       = %self.session_id,
                     trace_id      = %trace_id,
                     action_id     = %action_id,
+                    description   = %action_description,
                     agentic_depth = result.agentic_depth + 1,
                     "Action dispatched to background task"
                 );
@@ -2088,6 +2251,7 @@ impl CoreOrchestrator {
                     let _ = action_tx
                         .send(ActionResult {
                             action_id: aid,
+                            description: Some(desc),
                             outcome,
                             trace_id: tid,
                         })
@@ -3895,11 +4059,7 @@ impl CoreOrchestrator {
                     "Approved action completed"
                 );
                 // Phase 9+: inject action result into conversation context
-                let feedback = if output.trim().is_empty() {
-                    "Done.".to_string()
-                } else {
-                    output.clone()
-                };
+                let feedback = action_completion_status_text(None, &output);
                 self.speak_action_feedback(&feedback, &trace_id).await?
             }
             ActionOutcome::Rejected { action_id, error } => {
@@ -3909,8 +4069,8 @@ impl CoreOrchestrator {
                     error     = %error,
                     "Action rejected"
                 );
-                self.speak_action_feedback(&format!("Action cancelled: {error}"), &trace_id)
-                    .await?
+                let feedback = action_cancelled_status_text(&error);
+                self.speak_action_feedback(&feedback, &trace_id).await?
             }
             ActionOutcome::PendingApproval { .. } => {
                 // resolve() should never return PendingApproval — this is a logic error.
@@ -4090,6 +4250,21 @@ impl CoreOrchestrator {
                 return Ok(());
             }
         }
+
+        let operator_status = action_result_status_text(
+            &result.outcome,
+            result.description.as_deref(),
+            &feedback_text,
+        );
+        self.send_text(&operator_status, false, &result.trace_id)
+            .await?;
+        info!(
+            session     = %self.session_id,
+            action_id   = %result.action_id,
+            trace_id    = %result.trace_id,
+            description = %result.description.as_deref().unwrap_or("<unknown>"),
+            "Action result surfaced to operator"
+        );
 
         if agentic_depth >= AGENTIC_MAX_DEPTH {
             warn!(
@@ -6594,6 +6769,65 @@ fn category_label(cat: &ActionCategory) -> &'static str {
     }
 }
 
+// Operator-facing action result previews should be useful but not become the
+// payload. The full output still goes into bounded tool context separately.
+const ACTION_STATUS_OUTPUT_MAX_CHARS: usize = 600;
+
+fn action_result_status_text(
+    outcome: &ActionOutcome,
+    description: Option<&str>,
+    feedback_text: &str,
+) -> String {
+    match outcome {
+        ActionOutcome::Completed { .. } => {
+            action_completion_status_text(description, feedback_text)
+        }
+        ActionOutcome::Rejected { error, .. } => action_failure_status_text(description, error),
+        ActionOutcome::PendingApproval { .. } => "Action is still awaiting approval.".to_string(),
+    }
+}
+
+fn action_completion_status_text(description: Option<&str>, output: &str) -> String {
+    let subject = action_status_subject(description);
+    let output = output.trim();
+    if output.is_empty() || output == "Done." {
+        return format!("Action completed: {subject}.");
+    }
+
+    let preview = compact_operator_text(output, ACTION_STATUS_OUTPUT_MAX_CHARS);
+    format!("Action completed: {subject}.\n\n{preview}")
+}
+
+fn action_failure_status_text(description: Option<&str>, error: &str) -> String {
+    let subject = action_status_subject(description);
+    let detail = compact_operator_text(error, ACTION_STATUS_OUTPUT_MAX_CHARS);
+    format!("Action failed: {subject}.\n\n{detail}")
+}
+
+fn action_cancelled_status_text(error: &str) -> String {
+    let detail = compact_operator_text(error, ACTION_STATUS_OUTPUT_MAX_CHARS);
+    format!("Action cancelled: {detail}")
+}
+
+fn action_status_subject(description: Option<&str>) -> String {
+    description
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("requested action")
+        .to_string()
+}
+
+fn compact_operator_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let truncated: String = trimmed.chars().take(max_chars).collect();
+    let total = trimmed.chars().count();
+    format!("{truncated}\n... (truncated, {total} chars total)")
+}
+
 /// Phase 37 / B8: detect whether the operator's request is scoped to a host
 /// other than this Mac.
 ///
@@ -7249,6 +7483,329 @@ pub(crate) fn extract_messages_body(script: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContactsRecipientValidation {
+    Matched { contact_name: String },
+    HandleFoundNameMismatch { contact_name: String },
+    NotFound,
+}
+
+/// Extract the direct Messages.app buddy handle from a send AppleScript.
+///
+/// Only accepts literal `buddy "..."` handles. If the model emits a variable or
+/// any other indirect recipient expression, the caller treats the send as
+/// unverified and refuses to execute it.
+pub(crate) fn extract_messages_recipient_handle(script: &str) -> Option<String> {
+    extract_applescript_quoted_after_marker(script, "buddy \"")
+}
+
+/// Extract the named recipient from the operator's original iMessage request.
+///
+/// This is intentionally conservative. For non-self sends, the runtime must be
+/// able to compare the requested contact name against Contacts.app before a
+/// model-proposed `buddy "..."` handle can execute. If the request is ambiguous
+/// ("send that"), return `None` and ask the operator to name the contact.
+pub(crate) fn extract_requested_messages_recipient(text: &str) -> Option<String> {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let lower = normalized.to_lowercase();
+    let lower_with_spaces = format!(" {lower} ");
+    if [
+        " myself ",
+        " my self ",
+        " me ",
+        " myself,",
+        " myself.",
+        " myself:",
+    ]
+    .iter()
+    .any(|needle| lower_with_spaces.contains(needle))
+    {
+        return None;
+    }
+
+    if let Some(after_to) = extract_after_marker_ci(
+        normalized,
+        &[
+            "send a text to ",
+            "send a message to ",
+            "send an imessage to ",
+            "send iMessage to ",
+            "send text to ",
+            "send message to ",
+            "message to ",
+            "text to ",
+        ],
+    ) {
+        return clean_requested_recipient_phrase(after_to);
+    }
+
+    if let Some(after_send) = strip_prefix_ci(normalized, "send ") {
+        for marker in [
+            " a text",
+            " a message",
+            " an imessage",
+            " iMessage",
+            " text",
+            " message",
+        ] {
+            if let Some(idx) = find_ci(after_send, marker) {
+                return clean_requested_recipient_phrase(&after_send[..idx]);
+            }
+        }
+    }
+
+    for prefix in ["text ", "message ", "imessage ", "tell "] {
+        if let Some(rest) = strip_prefix_ci(normalized, prefix) {
+            return clean_requested_recipient_phrase(rest);
+        }
+    }
+
+    None
+}
+
+fn extract_applescript_quoted_after_marker(script: &str, marker: &str) -> Option<String> {
+    let lc = script.to_lowercase();
+    let marker_lc = marker.to_lowercase();
+    let rel_start = lc.find(&marker_lc)?;
+    let value_start = rel_start + marker.len();
+
+    let bytes = script.as_bytes();
+    let mut out = String::new();
+    let mut i = value_start;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if escaped {
+            out.push(c);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            return Some(out);
+        }
+        out.push(c);
+        i += 1;
+    }
+    None
+}
+
+fn extract_after_marker_ci<'a>(text: &'a str, markers: &[&str]) -> Option<&'a str> {
+    for marker in markers {
+        if let Some(idx) = find_ci(text, marker) {
+            return Some(&text[idx + marker.len()..]);
+        }
+    }
+    None
+}
+
+fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    if text
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    {
+        Some(&text[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    haystack.to_lowercase().find(&needle.to_lowercase())
+}
+
+fn clean_requested_recipient_phrase(raw: &str) -> Option<String> {
+    let mut phrase = raw.trim();
+    for marker in [
+        " saying ",
+        " that says ",
+        " that say ",
+        " that ",
+        " to say ",
+        " and say ",
+        " with ",
+        " about ",
+    ] {
+        if let Some(idx) = find_ci(phrase, marker) {
+            phrase = &phrase[..idx];
+        }
+    }
+    if let Some(idx) = phrase.find(':') {
+        phrase = &phrase[..idx];
+    }
+    if let Some(idx) = phrase.find(',') {
+        phrase = &phrase[..idx];
+    }
+
+    let cleaned = phrase
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c.is_ascii_punctuation())
+        .trim();
+
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let lc = cleaned.to_lowercase();
+    if matches!(lc.as_str(), "me" | "myself" | "my self" | "i" | "my") {
+        return None;
+    }
+
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    if words.len() == 1 {
+        return Some(words[0].to_string());
+    }
+
+    let has_explicit_delimiter = raw.contains(':')
+        || find_ci(raw, " saying ").is_some()
+        || find_ci(raw, " that ").is_some()
+        || find_ci(raw, " that says ").is_some()
+        || find_ci(raw, " to say ").is_some()
+        || find_ci(raw, " and say ").is_some();
+
+    if has_explicit_delimiter {
+        Some(cleaned.to_string())
+    } else {
+        Some(words[0].to_string())
+    }
+}
+
+fn escape_applescript_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\" & linefeed & \""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+pub(crate) fn build_contacts_recipient_validation_script(
+    handle: &str,
+    requested_recipient: &str,
+) -> String {
+    let escaped_handle = escape_applescript_literal(handle);
+    let escaped_requested = escape_applescript_literal(requested_recipient);
+    format!(
+        "on dexterLower(rawValue)\n\
+         set upperChars to \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\"\n\
+         set lowerChars to \"abcdefghijklmnopqrstuvwxyz\"\n\
+         set outText to \"\"\n\
+         set s to rawValue as string\n\
+         repeat with ch in characters of s\n\
+         set c to ch as string\n\
+         set replaced to false\n\
+         repeat with i from 1 to length of upperChars\n\
+         if c is character i of upperChars then\n\
+         set outText to outText & character i of lowerChars\n\
+         set replaced to true\n\
+         exit repeat\n\
+         end if\n\
+         end repeat\n\
+         if replaced is false then set outText to outText & c\n\
+         end repeat\n\
+         return outText\n\
+         end dexterLower\n\
+         \n\
+         on dexterDigitsOnly(rawValue)\n\
+         set outText to \"\"\n\
+         set s to rawValue as string\n\
+         repeat with ch in characters of s\n\
+         set c to ch as string\n\
+         if \"0123456789\" contains c then set outText to outText & c\n\
+         end repeat\n\
+         return outText\n\
+         end dexterDigitsOnly\n\
+         \n\
+         on dexterNameMatches(personName, requestedName)\n\
+         set p to my dexterLower(personName)\n\
+         set r to my dexterLower(requestedName)\n\
+         if r is \"\" then return false\n\
+         if p is r then return true\n\
+         if p contains r then return true\n\
+         if r contains p and p is not \"\" then return true\n\
+         return false\n\
+         end dexterNameMatches\n\
+         \n\
+         tell application \"Contacts\"\n\
+         set needle to \"{escaped_handle}\"\n\
+         set requestedName to \"{escaped_requested}\"\n\
+         set needleDigits to my dexterDigitsOnly(needle)\n\
+         set mismatchName to \"\"\n\
+         repeat with p in people\n\
+         set personName to \"\"\n\
+         try\n\
+         set personName to name of p as string\n\
+         end try\n\
+         set personMatchesHandle to false\n\
+         repeat with ph in phones of p\n\
+         set candidate to value of ph\n\
+         if candidate is not missing value then\n\
+         set candidateText to candidate as string\n\
+         set candidateDigits to my dexterDigitsOnly(candidateText)\n\
+         if candidateText is needle then set personMatchesHandle to true\n\
+         if needleDigits is not \"\" and candidateDigits is not \"\" then\n\
+         if candidateDigits is needleDigits then set personMatchesHandle to true\n\
+         if (length of needleDigits) >= 7 and (candidateDigits ends with needleDigits or needleDigits ends with candidateDigits) then set personMatchesHandle to true\n\
+         end if\n\
+         end if\n\
+         end repeat\n\
+         repeat with em in emails of p\n\
+         set candidate to value of em\n\
+         if candidate is not missing value then\n\
+         if (candidate as string) is needle then set personMatchesHandle to true\n\
+         end if\n\
+         end repeat\n\
+         if personMatchesHandle is true then\n\
+         if my dexterNameMatches(personName, requestedName) then return \"CONTACT_MATCH|\" & personName\n\
+         if mismatchName is \"\" then set mismatchName to personName\n\
+         end if\n\
+         end repeat\n\
+         if mismatchName is not \"\" then return \"CONTACT_HANDLE_FOUND_NAME_MISMATCH|\" & mismatchName\n\
+         return \"CONTACT_NOT_FOUND\"\n\
+         end tell"
+    )
+}
+
+pub(crate) fn parse_contacts_recipient_validation_output(
+    output: &str,
+) -> ContactsRecipientValidation {
+    let trimmed = output.trim();
+    if let Some(name) = trimmed.strip_prefix("CONTACT_MATCH|") {
+        let name = name.trim();
+        if !name.is_empty() {
+            return ContactsRecipientValidation::Matched {
+                contact_name: name.to_string(),
+            };
+        }
+    }
+    if let Some(name) = trimmed.strip_prefix("CONTACT_HANDLE_FOUND_NAME_MISMATCH|") {
+        let name = name.trim();
+        if !name.is_empty() {
+            return ContactsRecipientValidation::HandleFoundNameMismatch {
+                contact_name: name.to_string(),
+            };
+        }
+    }
+    ContactsRecipientValidation::NotFound
+}
+
 /// Phase 37.9 / T8: builds a deterministic Messages-send AppleScript.
 ///
 /// Used by the self-send intercept to replace LLM-generated scripts whose
@@ -7261,18 +7818,6 @@ pub(crate) fn extract_messages_body(script: &str) -> Option<String> {
 /// cannot contain raw newlines). `handle` receives the same quote/backslash
 /// escaping as defense against odd config values.
 pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
-    fn escape_applescript_literal(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '"' => out.push_str("\\\""),
-                '\n' => out.push_str("\" & linefeed & \""),
-                _ => out.push(c),
-            }
-        }
-        out
-    }
     let escaped_handle = escape_applescript_literal(handle);
     let escaped_body = escape_applescript_literal(body);
     format!(
@@ -8574,6 +9119,131 @@ end tell"#;
         // or panic — return None so the caller treats it as undeterminable.
         let script = r#"send "no closing quote ever comes"#;
         assert!(extract_messages_body(script).is_none());
+    }
+
+    // ── iMessage recipient integrity helper tests ───────────────────────────
+
+    #[test]
+    fn extract_messages_recipient_handle_basic() {
+        let script = r#"tell application "Messages"
+set targetService to 1st service whose service type = iMessage
+set targetBuddy to buddy "+15551234567" of targetService
+send "hello" to targetBuddy
+end tell"#;
+        assert_eq!(
+            extract_messages_recipient_handle(script).as_deref(),
+            Some("+15551234567")
+        );
+    }
+
+    #[test]
+    fn extract_messages_recipient_handle_unescapes_literal() {
+        let script = r#"set targetBuddy to buddy "odd\"handle\\value" of targetService"#;
+        assert_eq!(
+            extract_messages_recipient_handle(script).as_deref(),
+            Some("odd\"handle\\value")
+        );
+    }
+
+    #[test]
+    fn extract_messages_recipient_handle_returns_none_when_indirect() {
+        let script = r#"set targetBuddy to buddy resolvedHandle of targetService"#;
+        assert!(
+            extract_messages_recipient_handle(script).is_none(),
+            "indirect recipient expressions cannot be cross-referenced safely"
+        );
+    }
+
+    #[test]
+    fn extract_requested_messages_recipient_from_text_prefix() {
+        assert_eq!(
+            extract_requested_messages_recipient("text Mom that I'm running late").as_deref(),
+            Some("Mom")
+        );
+        assert_eq!(
+            extract_requested_messages_recipient("text John Smith: hello").as_deref(),
+            Some("John Smith")
+        );
+    }
+
+    #[test]
+    fn extract_requested_messages_recipient_from_send_to_form() {
+        assert_eq!(
+            extract_requested_messages_recipient("send a message to Sarah saying hey").as_deref(),
+            Some("Sarah")
+        );
+        assert_eq!(
+            extract_requested_messages_recipient("send Mom a text that says hi").as_deref(),
+            Some("Mom")
+        );
+    }
+
+    #[test]
+    fn extract_requested_messages_recipient_single_word_fallback() {
+        assert_eq!(
+            extract_requested_messages_recipient("tell Sarah I'll be late").as_deref(),
+            Some("Sarah")
+        );
+        assert_eq!(
+            extract_requested_messages_recipient("text John Smith hello").as_deref(),
+            Some("John")
+        );
+    }
+
+    #[test]
+    fn extract_requested_messages_recipient_returns_none_for_self() {
+        assert!(extract_requested_messages_recipient("text myself hello").is_none());
+        assert!(extract_requested_messages_recipient("send a text to me saying hi").is_none());
+    }
+
+    #[test]
+    fn build_contacts_recipient_validation_script_escapes_inputs() {
+        let script = build_contacts_recipient_validation_script("+1555\"bad\\id", "Mom \"Home\"");
+        assert!(
+            script.contains("set needle to \"+1555\\\"bad\\\\id\""),
+            "handle literal must be escaped; got: {script}"
+        );
+        assert!(
+            script.contains("set requestedName to \"Mom \\\"Home\\\"\""),
+            "requested name literal must be escaped; got: {script}"
+        );
+        assert!(
+            script.contains("CONTACT_MATCH|")
+                && script.contains("CONTACT_HANDLE_FOUND_NAME_MISMATCH|"),
+            "validation script must distinguish handle match from name mismatch"
+        );
+    }
+
+    #[test]
+    fn parse_contacts_recipient_validation_output_match() {
+        assert_eq!(
+            parse_contacts_recipient_validation_output("CONTACT_MATCH|Mom\n"),
+            ContactsRecipientValidation::Matched {
+                contact_name: "Mom".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_contacts_recipient_validation_output_mismatch() {
+        assert_eq!(
+            parse_contacts_recipient_validation_output("CONTACT_HANDLE_FOUND_NAME_MISMATCH|Bob"),
+            ContactsRecipientValidation::HandleFoundNameMismatch {
+                contact_name: "Bob".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_contacts_recipient_validation_output_not_found() {
+        assert_eq!(
+            parse_contacts_recipient_validation_output("CONTACT_NOT_FOUND"),
+            ContactsRecipientValidation::NotFound
+        );
+        assert_eq!(
+            parse_contacts_recipient_validation_output(""),
+            ContactsRecipientValidation::NotFound
+        );
     }
 
     // ── build_self_send_script unit tests (Phase 37.9 / T8) ───────────────────
@@ -9934,6 +10604,7 @@ end tell"#;
         // Deliver a result for an unknown action_id — no interaction registered.
         let result = ActionResult {
             action_id: "unknown-id".to_string(),
+            description: None,
             outcome: ActionOutcome::Completed {
                 action_id: "unknown-id".to_string(),
                 output: "hello".to_string(),
@@ -9955,7 +10626,9 @@ end tell"#;
     #[tokio::test]
     async fn handle_action_result_transitions_to_feedback_pending() {
         let tmp = tempfile::tempdir().unwrap();
-        let (mut orch, _rx, _action_rx) = make_orchestrator_with_action_rx(tmp.path());
+        let (mut orch, mut rx, _action_rx) = make_orchestrator_with_action_rx(tmp.path());
+        tokio::task::yield_now().await;
+        while rx.try_recv().is_ok() {}
 
         let action_id = Uuid::new_v4().to_string();
 
@@ -9975,6 +10648,7 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            description: Some("Run: echo test output".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
                 output: "test output".to_string(),
@@ -9984,6 +10658,7 @@ end tell"#;
         };
         let r = orch.handle_action_result(result).await;
         assert!(r.is_ok());
+        tokio::task::yield_now().await;
 
         // Interaction should be marked Complete (handle_action_result transitions
         // through FeedbackPending → Complete synchronously when TTS is unavailable).
@@ -9994,6 +10669,26 @@ end tell"#;
         assert!(
             matches!(interaction.stage, InteractionStage::Complete),
             "Stage should be Complete after handle_action_result"
+        );
+
+        let mut saw_status = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let Ok(ServerEvent {
+                event: Some(crate::ipc::proto::server_event::Event::TextResponse(t)),
+                ..
+            }) = evt
+            {
+                if t.content
+                    .contains("Action completed: Run: echo test output.")
+                    && t.content.contains("test output")
+                {
+                    saw_status = true;
+                }
+            }
+        }
+        assert!(
+            saw_status,
+            "Completed background action must emit deterministic operator status"
         );
     }
 
@@ -10039,6 +10734,7 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            description: Some("Run: echo ok".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
                 output: "ok".to_string(),
@@ -10208,6 +10904,7 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            description: Some("Browser extract: page".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
                 output: "page HTML: <a href=\"/video/123\">Big Daddy 4K</a>".to_string(),
@@ -10285,6 +10982,7 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            description: Some("Run: test command".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
                 output: "result".to_string(),
@@ -10345,6 +11043,7 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            description: Some("AppleScript: send message".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
                 output: String::new(), // osascript `send` returns no stdout
@@ -10422,6 +11121,7 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            description: Some("AppleScript: send message".to_string()),
             outcome: ActionOutcome::Rejected {
                 action_id: action_id.clone(),
                 error: "Messages.app could not resolve buddy".to_string(),
@@ -10434,20 +11134,34 @@ end tell"#;
         // THINKING MUST appear — failures need the continuation so the model
         // can explain what went wrong and ask how to proceed.
         let mut saw_thinking = false;
+        let mut saw_failure_status = false;
         while let Ok(evt) = rx.try_recv() {
-            if let Ok(ServerEvent {
-                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)),
-                ..
-            }) = evt
-            {
-                if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
-                    saw_thinking = true;
+            if let Ok(server_event) = evt {
+                match server_event.event {
+                    Some(crate::ipc::proto::server_event::Event::EntityState(s)) => {
+                        if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
+                            saw_thinking = true;
+                        }
+                    }
+                    Some(crate::ipc::proto::server_event::Event::TextResponse(t)) => {
+                        if t.content
+                            .contains("Action failed: AppleScript: send message.")
+                            && t.content.contains("Messages.app could not resolve buddy")
+                        {
+                            saw_failure_status = true;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
         assert!(
             saw_thinking,
             "Rejected terminal action must still spawn a continuation so the model can diagnose"
+        );
+        assert!(
+            saw_failure_status,
+            "Rejected background action must surface the concrete failure before continuation"
         );
     }
 
@@ -10547,6 +11261,7 @@ end tell"#;
             let _ = action_tx
                 .send(ActionResult {
                     action_id: aid,
+                    description: Some("Run: echo test".to_string()),
                     outcome,
                     trace_id: tid,
                 })

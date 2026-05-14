@@ -510,7 +510,7 @@ impl ActionEngine {
     }
 
     /// Human-readable action description for `ActionRequest.description` in the UI.
-    fn describe(spec: &ActionSpec) -> String {
+    pub(crate) fn describe(spec: &ActionSpec) -> String {
         match spec {
             ActionSpec::Shell { args, .. } => {
                 format!("Run: {}", args.join(" "))
@@ -635,6 +635,13 @@ impl ActionEngine {
 #[derive(Debug)]
 pub struct ActionResult {
     pub action_id: String,
+    /// Human-readable description of the attempted action.
+    ///
+    /// Background action results arrive after the model has already emitted the
+    /// action block, so this copies the same sanitized wording used in approval
+    /// prompts into the result path. The orchestrator uses it for deterministic
+    /// operator-visible status messages without re-parsing the original spec.
+    pub description: Option<String>,
     pub outcome: ActionOutcome,
     pub trace_id: String,
 }

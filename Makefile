@@ -22,7 +22,7 @@ SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli live-smoke-cli live-smoke-hud smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli live-smoke-cli live-smoke-hud live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -128,6 +128,48 @@ live-smoke-cli: ensure-core-not-running
 live-smoke-hud: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-smoke.sh --start-core
+
+## live-smoke-hud-approval: run Swift HUD destructive-action approval regression
+##
+## Builds release-mode dexter-core, starts it with logs at
+## /tmp/dexter-hud-approval-core-smoke.log, launches the real Swift app with
+## DEXTER_HUD_SMOKE_ACTION_APPROVAL=deny, and asserts the HUD receives and
+## denies a destructive ActionRequest without executing it.
+live-smoke-hud-approval: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-hud-approval-smoke.sh --start-core
+
+## live-smoke-action-cancel: run long-lived subprocess cancellation regression
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
+## /tmp/dexter-action-cancel-smoke.log, runs a long-lived safe shell action,
+## sends HotkeyActivated after FOCUSED in the same CLI session, and asserts the
+## OS subprocess is gone.
+live-smoke-action-cancel: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-action-cancel-smoke.sh --start-core
+
+## live-smoke-barge-in: run Swift TTS cancellation race regression
+##
+## Builds release-mode dexter-core, starts it with logs at
+## /tmp/dexter-barge-core-smoke.log, launches the real Swift app in smoke mode,
+## sends a fromVoice text turn so TTS reaches AudioPlayer, then interrupts after
+## the first audio frame and asserts no buffer schedules after LISTENING.
+live-smoke-barge-in: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-barge-in-smoke.sh --start-core
+
+## live-smoke-all: run the full live regression suite in a safe sequence
+##
+## Each target starts and stops its own release core. Keep this explicit rather
+## than sharing one daemon so a leaked worker/socket in one smoke fails the next
+## target instead of being hidden by shared process state.
+live-smoke-all:
+	$(MAKE) live-smoke-cli
+	$(MAKE) live-smoke-hud
+	$(MAKE) live-smoke-hud-approval
+	$(MAKE) live-smoke-action-cancel
+	$(MAKE) live-smoke-barge-in
 
 ## run-swift: start the Swift UI shell (requires run-core already running)
 run-swift:

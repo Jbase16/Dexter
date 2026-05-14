@@ -43,6 +43,78 @@ private final class TTSGate: @unchecked Sendable {
     }
 }
 
+/// Test-only live-smoke gate for exercising TTS cancellation from the Swift
+/// session that owns playback. Disabled unless DEXTER_HUD_SMOKE_BARGE_ON_FIRST_AUDIO is set.
+private final class SmokeBargeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let enabled: Bool
+    let delayMillis: UInt64
+    private var armed = false
+    private var fired = false
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        let raw = environment["DEXTER_HUD_SMOKE_BARGE_ON_FIRST_AUDIO"] ?? ""
+        enabled = ["1", "true", "yes"].contains(raw.lowercased())
+        let rawDelay = environment["DEXTER_HUD_SMOKE_BARGE_DELAY_MS"] ?? ""
+        delayMillis = UInt64(rawDelay).map { min($0, 10_000) } ?? 250
+    }
+
+    func armIfEnabled() -> Bool {
+        guard enabled else { return false }
+        lock.lock()
+        armed = true
+        fired = false
+        lock.unlock()
+        return true
+    }
+
+    func markScheduledBufferFired() -> Bool {
+        guard enabled else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        guard armed, !fired else { return false }
+        fired = true
+        return true
+    }
+}
+
+/// Test-only approval policy for live HUD smoke runs.
+///
+/// Disabled unless DEXTER_HUD_SMOKE_ACTION_APPROVAL is set to approve/deny
+/// (or common boolean aliases). Normal operator sessions always show NSAlert.
+private final class SmokeActionApprovalGate: @unchecked Sendable {
+    let decision: Bool?
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        let raw = (environment["DEXTER_HUD_SMOKE_ACTION_APPROVAL"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch raw {
+        case "approve", "approved", "allow", "allowed", "yes", "true", "1":
+            decision = true
+        case "deny", "denied", "reject", "rejected", "no", "false", "0":
+            decision = false
+        default:
+            decision = nil
+        }
+    }
+
+    var enabled: Bool {
+        decision != nil
+    }
+}
+
+private func actionCategoryLabel(_ category: Dexter_V1_ActionCategory) -> String {
+    switch category {
+    case .safe: return "safe"
+    case .cautious: return "cautious"
+    case .destructive: return "destructive"
+    case .unspecified: return "unspecified"
+    case .UNRECOGNIZED(let value): return "unrecognized(\(value))"
+    }
+}
+
 private func audioPlaybackCompletePayload(traceID: String?) -> String {
     guard let traceID, !traceID.isEmpty else { return "{}" }
     guard JSONSerialization.isValidJSONObject(["audio_trace_id": traceID]),
@@ -85,6 +157,8 @@ actor DexterClient {
     /// Shared mute flag — readable from the @Sendable gRPC onResponse closure.
     /// Actor writes it; gRPC closure reads it. See TTSGate for safety rationale.
     private let ttsGate = TTSGate()
+    private let smokeBargeGate = SmokeBargeGate()
+    private let smokeActionApprovalGate = SmokeActionApprovalGate()
 
     // MARK: - Connection lifecycle
 
@@ -358,7 +432,7 @@ actor DexterClient {
                     try await writer.write(event)
                     print("[DexterClient] requestProducer → write OK")
                 }
-            }, onResponse: { [continuation, window, sessionID, audioPlayer, bridge, capture, ttsGate] response in
+            }, onResponse: { [weak self, continuation, window, sessionID, audioPlayer, bridge, capture, ttsGate, smokeActionApprovalGate] response in
                 // continuation is Sendable — safe to capture in @Sendable closure.
                 // window and sessionID are local lets in runSession; captured for
                 // entity state updates and ActionApproval correlation respectively.
@@ -413,6 +487,12 @@ actor DexterClient {
                         }
 
                     case .actionRequest(let req):
+                        let categoryLabel = actionCategoryLabel(req.category)
+                        print("[DexterClient] onResponse ← actionRequest: id=\(req.actionID), category=\(categoryLabel), \(req.description_p.prefix(80))...")
+                        if smokeActionApprovalGate.enabled {
+                            print("[HUDSmoke] actionRequest id=\(req.actionID) category=\(categoryLabel) description=\(req.description_p)")
+                        }
+
                         // Proto contract: SAFE actions are executed by Rust immediately
                         // without waiting for an ActionApproval. Sending one would be
                         // a protocol violation — the Rust side has already moved on.
@@ -434,21 +514,37 @@ actor DexterClient {
                         // The entity stays in whatever state Rust last set (typically
                         // ALERT) for the duration of the modal — the intended Phase 8
                         // behavior: Dexter remains visually active during confirmation.
-                        let approved: Bool = await withCheckedContinuation { continuation in
-                            Task { @MainActor in
-                                let alert = NSAlert()
-                                alert.messageText     = req.category == .destructive
-                                                        ? "⚠️ Destructive Action"
-                                                        : "Action Request"
-                                // description_p: protoc-gen-swift appends _p to field names
-                                // that collide with Swift reserved words. `description` is
-                                // used by CustomStringConvertible, hence the suffix.
-                                alert.informativeText = req.description_p
-                                alert.addButton(withTitle: "Approve")
-                                alert.addButton(withTitle: "Deny")
-                                let response = await alert.beginSheetModal(for: window)
-                                continuation.resume(returning: response == .alertFirstButtonReturn)
+                        let approvalNote: String
+                        let approved: Bool
+                        if let smokeDecision = smokeActionApprovalGate.decision {
+                            approved = smokeDecision
+                            approvalNote = smokeDecision
+                                ? "Swift HUD smoke auto-approved"
+                                : "Swift HUD smoke auto-denied"
+                            print("[HUDSmoke] actionApproval actionID=\(req.actionID) approved=\(approved)")
+                        } else {
+                            approved = await withCheckedContinuation { continuation in
+                                Task { @MainActor in
+                                    let alert = NSAlert()
+                                    alert.messageText = req.category == .destructive
+                                        ? "Destructive Action Requires Approval"
+                                        : "Action Requires Approval"
+                                    // description_p: protoc-gen-swift appends _p to field names
+                                    // that collide with Swift reserved words. `description` is
+                                    // used by CustomStringConvertible, hence the suffix.
+                                    alert.informativeText = """
+                                    Category: \(categoryLabel)
+
+                                    Action:
+                                    \(req.description_p)
+                                    """
+                                    alert.addButton(withTitle: "Approve")
+                                    alert.addButton(withTitle: "Deny")
+                                    let response = await alert.beginSheetModal(for: window)
+                                    continuation.resume(returning: response == .alertFirstButtonReturn)
+                                }
                             }
+                            approvalNote = ""
                         }
 
                         let approval = Dexter_V1_ClientEvent.with {
@@ -457,10 +553,10 @@ actor DexterClient {
                             $0.actionApproval = Dexter_V1_ActionApproval.with {
                                 $0.actionID = req.actionID
                                 $0.approved = approved
-                                // operator_note left empty; Phase 13+ may add a text field
+                                $0.operatorNote = approvalNote
                             }
                         }
-                        await self.send(approval)
+                        await self?.send(approval)
 
                     case .audioResponse(let audio):
                         // When TTS is muted, drop PCM chunks — text path still works.
@@ -531,17 +627,49 @@ actor DexterClient {
     /// No-ops silently if no session is active (submit fires faster than session opens,
     /// or fires during reconnect gap).
     func sendTypedInput(_ text: String) async {
-        print("[DexterClient] sendTypedInput called: '\(text)' | sessionID=\(currentSessionID ?? "NIL") | continuation=\(eventContinuation != nil ? "live" : "NIL")")
+        await sendTextInput(text, fromVoice: false, label: "sendTypedInput")
+    }
+
+    /// Test hook used by live smoke to drive the same Swift AudioPlayer path as voice
+    /// output without requiring a real microphone transcript.
+    func sendVoiceSmokeInput(_ text: String) async {
+        if let sessionID = currentSessionID, smokeBargeGate.armIfEnabled() {
+            let delayMillis = smokeBargeGate.delayMillis
+            audioPlayer.notifyOnNextBufferScheduled { [weak self, smokeBargeGate] traceID, streamID in
+                guard smokeBargeGate.markScheduledBufferFired() else { return }
+                print("[HUDSmoke] bargeInAfterScheduledAudio scheduled delayMs=\(delayMillis) traceID=\(traceID ?? "") streamID=\(streamID ?? "")")
+                Task { [weak self, sessionID] in
+                    try? await Task.sleep(for: .milliseconds(delayMillis))
+                    let hotkeyEvent = Dexter_V1_ClientEvent.with {
+                        $0.traceID   = UUID().uuidString
+                        $0.sessionID = sessionID
+                        $0.systemEvent = Dexter_V1_SystemEvent.with {
+                            $0.type = .hotkeyActivated
+                        }
+                    }
+                    print("[HUDSmoke] bargeInAfterScheduledAudio fired")
+                    await self?.send(hotkeyEvent)
+                }
+            }
+        }
+        await sendTextInput(text, fromVoice: true, label: "sendVoiceSmokeInput")
+    }
+
+    private func sendTextInput(_ text: String, fromVoice: Bool, label: String) async {
+        print("[DexterClient] \(label) called: '\(text)' | fromVoice=\(fromVoice) | sessionID=\(currentSessionID ?? "NIL") | continuation=\(eventContinuation != nil ? "live" : "NIL")")
         guard let sessionID = currentSessionID else {
-            print("[DexterClient] sendTypedInput DROPPED — no active session")
+            print("[DexterClient] \(label) DROPPED — no active session")
             return
         }
         let event = Dexter_V1_ClientEvent.with {
             $0.traceID   = UUID().uuidString
             $0.sessionID = sessionID
-            $0.textInput = Dexter_V1_TextInput.with { $0.content = text }
+            $0.textInput = Dexter_V1_TextInput.with {
+                $0.content = text
+                $0.fromVoice = fromVoice
+            }
         }
         send(event)
-        print("[DexterClient] sendTypedInput enqueued to stream")
+        print("[DexterClient] \(label) enqueued to stream")
     }
 }

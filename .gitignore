@@ -25,6 +25,11 @@ src/python-workers/.venv/
 *.swp
 *.swo
 
+# Claude Code agent worktrees and local agent state. Agents that run with
+# isolation: "worktree" create a full repo clone at .claude/worktrees/<name>/.
+# These are ephemeral working copies, not source — they should never be tracked.
+.claude/
+
 # Local config overrides (operator-specific, never commit)
 ~/.dexter/
 

@@ -96,6 +96,7 @@ struct CliConfig {
     quiet: bool,
     approval_policy: ApprovalPolicy,
     idle_timeout: Duration,
+    interrupt_on_focused_after: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +120,7 @@ fn parse_args() -> Result<CliConfig> {
     let mut quiet = false;
     let mut approval_policy = ApprovalPolicy::Deny;
     let mut idle_timeout = Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS);
+    let mut interrupt_on_focused_after = None;
     let mut positional: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -145,6 +147,18 @@ fn parse_args() -> Result<CliConfig> {
                     .parse()
                     .context("--idle-timeout: not a valid u64 seconds value")?;
                 idle_timeout = Duration::from_secs(secs);
+            }
+            "--interrupt-on-focused-after-ms" => {
+                let millis: u64 = args
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow!("--interrupt-on-focused-after-ms requires a millisecond argument")
+                    })?
+                    .parse()
+                    .context(
+                        "--interrupt-on-focused-after-ms: not a valid u64 millisecond value",
+                    )?;
+                interrupt_on_focused_after = Some(Duration::from_millis(millis));
             }
             "--system-event" => {
                 let raw_type = args
@@ -243,6 +257,7 @@ fn parse_args() -> Result<CliConfig> {
         quiet,
         approval_policy,
         idle_timeout,
+        interrupt_on_focused_after,
     })
 }
 
@@ -264,6 +279,10 @@ fn print_help() {
     eprintln!("  -y, --auto-approve       Auto-approve destructive action requests.");
     eprintln!("  -n, --auto-deny          Auto-deny destructive action requests (default).");
     eprintln!("      --idle-timeout <S>   Wait at most S seconds for IDLE before next turn (default: {DEFAULT_IDLE_TIMEOUT_SECS}).");
+    eprintln!("      --interrupt-on-focused-after-ms <MS>");
+    eprintln!("                           After a turn reaches FOCUSED, send HotkeyActivated");
+    eprintln!("                           after MS milliseconds and finish the turn on LISTENING.");
+    eprintln!("                           Intended for action-cancellation smoke tests.");
     eprintln!("      --system-event <TYPE> <JSON>");
     eprintln!("                           Send a synthetic SystemEvent before/among text inputs.");
     eprintln!(
@@ -568,8 +587,10 @@ async fn run_turn(
     // OR an action request. Either of those proves "Dexter saw the input
     // and started working."
     let mut activity_seen = false;
+    let mut focused_interrupt_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut focused_interrupt_armed = false;
 
-    loop {
+    let turn_result: Result<()> = loop {
         let next = tokio::time::timeout(cfg.idle_timeout, response_stream.next()).await;
         let event = match next {
             Err(_elapsed) => {
@@ -577,16 +598,16 @@ async fn run_turn(
                     "[idle timeout {}s — giving up on this turn]",
                     cfg.idle_timeout.as_secs()
                 );
-                return Ok(());
+                break Ok(());
             }
             Ok(None) => {
                 if !cfg.quiet {
                     eprintln!("[server closed session stream]");
                 }
-                return Ok(());
+                break Ok(());
             }
             Ok(Some(Err(status))) => {
-                return Err(anyhow!("session stream error: {status}"));
+                break Err(anyhow!("session stream error: {status}"));
             }
             Ok(Some(Ok(evt))) => evt,
         };
@@ -619,11 +640,44 @@ async fn run_turn(
                 if is_active {
                     activity_seen = true;
                 }
+                if state == EntityState::Focused && !focused_interrupt_armed {
+                    let Some(delay) = cfg.interrupt_on_focused_after else {
+                        continue;
+                    };
+                    focused_interrupt_armed = true;
+                    let tx_interrupt = tx.clone();
+                    let session_id_interrupt = session_id.to_string();
+                    if !cfg.quiet {
+                        writeln!(
+                            stdout_lock,
+                            "[INTERRUPT armed after focused: {}ms]",
+                            delay.as_millis()
+                        )?;
+                    }
+                    focused_interrupt_task = Some(tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let event = ClientEvent {
+                            trace_id: Uuid::new_v4().to_string(),
+                            session_id: session_id_interrupt,
+                            event: Some(client_event::Event::SystemEvent(SystemEvent {
+                                r#type: SystemEventType::HotkeyActivated as i32,
+                                payload: "{}".to_string(),
+                            })),
+                        };
+                        let _ = tx_interrupt.send(event).await;
+                    }));
+                }
+                if state == EntityState::Listening && focused_interrupt_armed {
+                    if !cfg.quiet {
+                        writeln!(stdout_lock, "[INTERRUPTED]")?;
+                    }
+                    break Ok(());
+                }
                 if state == EntityState::Idle && activity_seen {
                     if !cfg.quiet {
                         writeln!(stdout_lock, "[DONE]")?;
                     }
-                    return Ok(());
+                    break Ok(());
                 }
             }
 
@@ -719,5 +773,11 @@ async fn run_turn(
                 }
             }
         }
+    };
+
+    if let Some(handle) = focused_interrupt_task {
+        handle.abort();
     }
+
+    turn_result
 }

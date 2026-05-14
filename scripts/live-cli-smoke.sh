@@ -366,6 +366,10 @@ test_destructive_action_auto_denied() {
         say "$FAIL" "$name - CLI did not receive an ActionRequest"
         ok=1
     fi
+    if ! grep -Fq "Action cancelled: operator rejected the action" "$out"; then
+        say "$FAIL" "$name - operator-visible cancellation reason was not emitted"
+        ok=1
+    fi
     if [[ ! -f "$marker" ]]; then
         say "$FAIL" "$name - marker file was deleted despite auto-deny"
         ok=1
@@ -374,6 +378,38 @@ test_destructive_action_auto_denied() {
     rm -rf "$target"
     rm -f "$out"
     record "$name" "$ok" "destructive command was gated and not executed"
+}
+
+test_safe_action_result_status() {
+    local name="safe shell action reports deterministic result"
+    local token="ACTION_UX_SMOKE_SAFE"
+    local offset out ok
+    offset="$(log_bytes)"
+    out="$(mktemp -t dexter-safe-action-result.XXXXXX)"
+    ok=0
+
+    if ! run_cli_sequence "$out" \
+        "Use a Dexter shell action to run exactly this command: echo $token"; then
+        say "$FAIL" "$name - dexter-cli failed"
+        cat "$out"
+        rm -f "$out"
+        record "$name" 1 "CLI failed"
+        return
+    fi
+
+    assert_count_at_least "$name" "$offset" "Action dispatched to background task" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action result surfaced to operator" 1 || ok=1
+    if ! grep -Fq "Action completed:" "$out"; then
+        say "$FAIL" "$name - CLI did not receive deterministic completion status"
+        ok=1
+    fi
+    if ! grep -Fq "$token" "$out"; then
+        say "$FAIL" "$name - CLI output did not contain shell output token"
+        ok=1
+    fi
+
+    rm -f "$out"
+    record "$name" "$ok" "safe action output was visible before continuation"
 }
 
 test_off_host_refusal() {
@@ -576,6 +612,7 @@ main() {
     test_stepdad_literal_vs_nsfw_dad
     test_normal_chat_routes_normally
     test_destructive_action_auto_denied
+    test_safe_action_result_status
     test_off_host_refusal
     test_browser_action_path_is_clean
     test_terminal_context_scrubbing
