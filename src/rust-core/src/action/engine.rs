@@ -96,6 +96,13 @@ pub enum ActionSpec {
         script: String,
         rationale: Option<String>,
     },
+    MessageSend {
+        #[serde(alias = "recipient_name")]
+        recipient: String,
+        #[serde(alias = "message", alias = "text")]
+        body: String,
+        rationale: Option<String>,
+    },
     Browser {
         // #[serde(flatten)] merges BrowserActionKind's tag ("action") and variant
         // fields into the parent object level so the model's flat JSON round-trips:
@@ -433,6 +440,14 @@ impl ActionEngine {
             ActionSpec::AppleScript { script, .. } => {
                 executor::execute_applescript(script, ACTION_APPLESCRIPT_TIMEOUT_SECS).await
             }
+            ActionSpec::MessageSend { .. } => executor::ExecutionResult {
+                success: false,
+                output: String::new(),
+                error: "message_send must be resolved by the orchestrator before execution"
+                    .to_string(),
+                exit_code: None,
+                duration_ms: 0,
+            },
             ActionSpec::Browser { action, .. } => {
                 executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
                     .await
@@ -525,6 +540,9 @@ impl ActionEngine {
                 let preview: String = script.chars().take(80).collect();
                 format!("AppleScript: {}", preview)
             }
+            ActionSpec::MessageSend { recipient, .. } => {
+                format!("Send iMessage to: {recipient}")
+            }
             ActionSpec::Browser { action, .. } => match action {
                 BrowserActionKind::Navigate { url } => format!("Browser navigate: {url}"),
                 BrowserActionKind::Click { selector } => format!("Browser click: {selector}"),
@@ -547,6 +565,7 @@ impl ActionEngine {
             ActionSpec::FileRead { .. } => "file_read",
             ActionSpec::FileWrite { .. } => "file_write",
             ActionSpec::AppleScript { .. } => "applescript",
+            ActionSpec::MessageSend { .. } => "message_send",
             ActionSpec::Browser { .. } => "browser",
         }
     }
@@ -597,6 +616,17 @@ impl ActionEngine {
             ActionSpec::AppleScript { rationale, .. } => {
                 // Do not log the script body — it may contain keystrokes or credentials.
                 serde_json::json!({ "rationale": rationale })
+            }
+            ActionSpec::MessageSend {
+                recipient,
+                body,
+                rationale,
+            } => {
+                serde_json::json!({
+                    "recipient": recipient,
+                    "body": format!("<{} bytes omitted>", body.len()),
+                    "rationale": rationale,
+                })
             }
             ActionSpec::Browser {
                 action, rationale, ..
@@ -697,6 +727,14 @@ impl ExecutorHandle {
             ActionSpec::AppleScript { script, .. } => {
                 executor::execute_applescript(script, ACTION_APPLESCRIPT_TIMEOUT_SECS).await
             }
+            ActionSpec::MessageSend { .. } => executor::ExecutionResult {
+                success: false,
+                output: String::new(),
+                error: "message_send must be resolved by the orchestrator before execution"
+                    .to_string(),
+                exit_code: None,
+                duration_ms: 0,
+            },
             ActionSpec::Browser { action, .. } => {
                 executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
                     .await
@@ -810,12 +848,89 @@ mod tests {
         }
     }
 
+    fn make_message_send() -> ActionSpec {
+        ActionSpec::MessageSend {
+            recipient: "Mom".to_string(),
+            body: "I'll be late".to_string(),
+            rationale: Some("structured send".to_string()),
+        }
+    }
+
+    fn make_messages_send_applescript() -> ActionSpec {
+        ActionSpec::AppleScript {
+            script: r#"tell application "Messages"
+                set targetService to 1st service whose service type = iMessage
+                set targetBuddy to buddy "+15551234567" of targetService
+                send "engine approval test" to targetBuddy
+            end tell"#
+                .to_string(),
+            rationale: Some("Structured iMessage send to Test Contact".to_string()),
+        }
+    }
+
     #[test]
     fn engine_new_creates_correctly() {
         let tmp = tempdir().unwrap();
         let engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
         assert_eq!(engine.state_dir, tmp.path());
         assert!(engine.pending_actions.is_empty());
+    }
+
+    #[test]
+    fn message_send_describe_type_and_audit_are_safe() {
+        let spec = make_message_send();
+        assert_eq!(ActionEngine::describe(&spec), "Send iMessage to: Mom");
+        assert_eq!(ActionEngine::type_str(&spec), "message_send");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["recipient"], "Mom");
+        assert_eq!(audit["body"], "<12 bytes omitted>");
+        assert_eq!(audit["rationale"], "structured send");
+    }
+
+    #[tokio::test]
+    async fn message_send_fails_closed_if_it_reaches_action_engine() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let outcome = engine
+            .submit(make_message_send(), "trace-message-send")
+            .await;
+        match outcome {
+            ActionOutcome::Rejected { error, .. } => {
+                assert!(
+                    error.contains("must be resolved by the orchestrator"),
+                    "unexpected error: {error}"
+                );
+            }
+            other => panic!("message_send must not execute generically: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn messages_send_applescript_requires_approval() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let outcome = engine
+            .submit(
+                make_messages_send_applescript(),
+                "trace-message-applescript",
+            )
+            .await;
+        match outcome {
+            ActionOutcome::PendingApproval {
+                category,
+                description,
+                ..
+            } => {
+                assert_eq!(category, ActionCategory::Destructive);
+                assert!(
+                    description.starts_with("AppleScript:"),
+                    "unexpected description: {description}"
+                );
+                assert_eq!(engine.pending_actions.len(), 1);
+            }
+            other => panic!("Messages send AppleScript must await approval: {other:?}"),
+        }
     }
 
     #[tokio::test]

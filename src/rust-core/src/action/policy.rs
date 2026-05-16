@@ -143,11 +143,10 @@ const BROWSER_SENSITIVE_INPUT_TERMS: &[&str] = &[
 /// and strings/comments are stripped before matching. That keeps approval tied
 /// to executable intent, not harmless log text like `log "keystroke happened"`.
 ///
-/// Deliberately NOT included: `tell application "messages"`. Self-send is now
-/// Rust-rewritten via the Phase 37.9 intercept, and named-recipient sends are
-/// the next phase (38b structured imessage:send action). Adding Messages to
-/// this list now would require approval for every iMessage send including ones
-/// the operator routinely uses.
+/// Messages sends are handled as a separate structural check in
+/// `classify_applescript()`: the app name appears inside an AppleScript string
+/// literal, while the executable `send` verb should still be matched only in
+/// code after string/comment stripping.
 const APPLESCRIPT_DESTRUCTIVE_PHRASES: &[&str] = &[
     "do shell script",   // Direct shell execution from AppleScript
     "keystroke",         // System Events keystroke — drives any focused app
@@ -205,6 +204,12 @@ impl PolicyEngine {
                 // containing `do shell script`, `keystroke`, `click`, `delete`,
                 // etc. escalate to Destructive; benign scripts stay Cautious.
                 Self::classify_applescript(script)
+            }
+            ActionSpec::MessageSend { .. } => {
+                // Externally visible, but not destructive: the orchestrator must
+                // resolve this through Contacts and rewrite it to a deterministic
+                // Messages AppleScript before execution.
+                ActionCategory::Cautious
             }
             ActionSpec::Browser {
                 action,
@@ -595,6 +600,10 @@ impl PolicyEngine {
     /// immediately, audit-logged).
     fn classify_applescript(script: &str) -> ActionCategory {
         let signal_text = Self::applescript_signal_text(script).to_ascii_lowercase();
+        if Self::applescript_sends_message(script, &signal_text) {
+            return ActionCategory::Destructive;
+        }
+
         if APPLESCRIPT_DESTRUCTIVE_PHRASES
             .iter()
             .any(|phrase| Self::contains_applescript_phrase(&signal_text, phrase))
@@ -603,6 +612,12 @@ impl PolicyEngine {
         } else {
             ActionCategory::Cautious
         }
+    }
+
+    fn applescript_sends_message(raw_script: &str, signal_text: &str) -> bool {
+        let raw_lc = raw_script.to_ascii_lowercase();
+        raw_lc.contains("tell application \"messages\"")
+            && Self::contains_applescript_phrase(signal_text, "send")
     }
 
     fn applescript_signal_text(script: &str) -> String {
@@ -760,11 +775,27 @@ mod tests {
         }
     }
 
+    fn message_send() -> ActionSpec {
+        ActionSpec::MessageSend {
+            recipient: "Mom".to_string(),
+            body: "I'll be late".to_string(),
+            rationale: None,
+        }
+    }
+
     #[test]
     fn classify_shell_echo_is_safe() {
         assert_eq!(
             PolicyEngine::classify(&shell(&["echo", "hi"])),
             ActionCategory::Safe
+        );
+    }
+
+    #[test]
+    fn classify_message_send_is_cautious() {
+        assert_eq!(
+            PolicyEngine::classify(&message_send()),
+            ActionCategory::Cautious
         );
     }
 
@@ -1357,17 +1388,24 @@ mod tests {
     }
 
     #[test]
-    fn classify_applescript_messages_send_remains_cautious() {
-        // Phase 38 design choice: iMessage send is NOT in the destructive markers
-        // because (a) self-send is now Rust-rewritten via the Phase 37.9 intercept
-        // and (b) named-recipient hardening is the Phase 38b structured
-        // imessage:send action. Adding it here now would require approval for
-        // every iMessage send, including ones the operator routinely uses. The
-        // intercept handles the actual confabulation risk.
+    fn classify_applescript_messages_send_requires_approval() {
+        // iMessage send is externally visible. The model may request it, but
+        // the operator must approve before the core delivers it to Messages.
         let s = "tell application \"Messages\"\n\
                  set targetService to 1st service whose service type = iMessage\n\
                  set targetBuddy to buddy \"+15551234567\" of targetService\n\
                  send \"hi\" to targetBuddy\n\
+                 end tell";
+        assert_eq!(
+            PolicyEngine::classify(&applescript(s)),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_applescript_messages_string_without_send_code_remains_cautious() {
+        let s = "tell application \"Messages\"\n\
+                 log \"send hi to someone\"\n\
                  end tell";
         assert_eq!(
             PolicyEngine::classify(&applescript(s)),

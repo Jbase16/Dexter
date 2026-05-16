@@ -1297,6 +1297,47 @@ impl CoreOrchestrator {
         Ok(parsed)
     }
 
+    /// Resolve a structured `message_send` recipient name to a concrete Messages
+    /// handle through Contacts.app.
+    ///
+    /// Unlike legacy model-written AppleScript, this path never lets the model
+    /// provide the final handle. The model supplies intent (`recipient`, `body`);
+    /// Rust performs the Contacts lookup, handles ambiguity, and builds the final
+    /// Messages send script.
+    async fn resolve_messages_recipient_name_in_contacts(
+        &self,
+        requested_recipient: &str,
+        trace_id: &str,
+    ) -> Result<ContactsNameResolution, OrchestratorError> {
+        let script = build_contacts_name_resolution_script(requested_recipient);
+        let result =
+            crate::action::executor::execute_applescript(&script, ACTION_APPLESCRIPT_TIMEOUT_SECS)
+                .await;
+
+        if !result.success {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                requested_recipient = %requested_recipient,
+                error = %result.error,
+                "Structured iMessage send — Contacts name resolution AppleScript failed"
+            );
+            return Ok(ContactsNameResolution::NotFound);
+        }
+
+        let parsed = parse_contacts_name_resolution_output(&result.output);
+        if matches!(parsed, ContactsNameResolution::NotFound) {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                requested_recipient = %requested_recipient,
+                output_preview = %result.output.chars().take(120).collect::<String>(),
+                "Structured iMessage send — Contacts name resolution returned no match"
+            );
+        }
+        Ok(parsed)
+    }
+
     // ── Public dispatch ───────────────────────────────────────────────────────
 
     /// Route one inbound ClientEvent to the appropriate handler.
@@ -1810,6 +1851,7 @@ impl CoreOrchestrator {
         // 9. Dispatch or gate the action (if present).
         let mut action_is_pending = false;
         let mut action_dispatched = false;
+        let mut message_send_resolved_by_core = false;
         // Phase 37.9 / T8: `spec` is `mut` so the self-send intercept can rewrite
         // the AppleScript body to a deterministic template before dispatch.
         if let Some(mut spec) = action_spec {
@@ -1895,6 +1937,187 @@ impl CoreOrchestrator {
                 }
             }
 
+            // Structured iMessage send path.
+            //
+            // Preferred over model-written Contacts/Message AppleScript. The model
+            // supplies only intent (`recipient`, `body`); Rust resolves Contacts and
+            // builds the final Messages.app script. If anything is ambiguous, fail
+            // closed and ask the operator instead of guessing.
+            let structured_message_send = match &spec {
+                ActionSpec::MessageSend {
+                    recipient,
+                    body,
+                    rationale,
+                } => Some((
+                    recipient.trim().to_string(),
+                    body.clone(),
+                    rationale.clone(),
+                )),
+                _ => None,
+            };
+            if let Some((requested_recipient, message_body, rationale)) = structured_message_send {
+                if requested_recipient.is_empty() {
+                    warn!(
+                        session = %self.session_id,
+                        query   = %content,
+                        agentic_depth = result.agentic_depth,
+                        "Structured iMessage send — missing recipient; refusing send"
+                    );
+                    let reply = "I need the Contacts name before I can send that.";
+                    self.send_text(reply, true, &trace_id).await?;
+                    self.context.push_assistant(reply);
+                    self.session_mgr.push_turn("assistant", reply);
+                    self.send_state(EntityState::Idle, &trace_id).await?;
+                    return Ok(());
+                }
+                if message_body.trim().is_empty() {
+                    warn!(
+                        session = %self.session_id,
+                        recipient = %requested_recipient,
+                        agentic_depth = result.agentic_depth,
+                        "Structured iMessage send — missing body; refusing send"
+                    );
+                    let reply = "What would you like to say?";
+                    self.send_text(reply, true, &trace_id).await?;
+                    self.context.push_assistant(reply);
+                    self.session_mgr.push_turn("assistant", reply);
+                    self.send_state(EntityState::Idle, &trace_id).await?;
+                    return Ok(());
+                }
+
+                if is_self_message_recipient_name(&requested_recipient, &self.operator_self_aliases)
+                    || is_self_reference_request(&content, &self.operator_self_aliases)
+                {
+                    match self.operator_self_handle.as_deref() {
+                        Some(handle) if !handle.trim().is_empty() => {
+                            let new_script = build_messages_send_script(handle, &message_body);
+                            info!(
+                                session = %self.session_id,
+                                handle  = %handle,
+                                body_chars = message_body.chars().count(),
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — self-send resolved through operator_self_handle"
+                            );
+                            spec = ActionSpec::AppleScript {
+                                script: new_script,
+                                rationale: Some(rationale.clone().unwrap_or_else(|| {
+                                    "Structured self-send via configured operator_self_handle"
+                                        .to_string()
+                                })),
+                            };
+                            message_send_resolved_by_core = true;
+                        }
+                        _ => {
+                            warn!(
+                                session = %self.session_id,
+                                query   = %content,
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — no operator_self_handle configured; rejecting"
+                            );
+                            let reply = "I don't have your iMessage handle configured, so I'm \
+                                         not going to guess. Add `operator_self_handle = \"+1…\"` \
+                                         to the `[behavior]` section of `~/.dexter/config.toml`, \
+                                         or name the recipient explicitly.";
+                            self.send_text(reply, true, &trace_id).await?;
+                            self.context.push_assistant(reply);
+                            self.session_mgr.push_turn("assistant", reply);
+                            self.send_state(EntityState::Idle, &trace_id).await?;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    match self
+                        .resolve_messages_recipient_name_in_contacts(
+                            &requested_recipient,
+                            &trace_id,
+                        )
+                        .await?
+                    {
+                        ContactsNameResolution::Resolved {
+                            contact_name,
+                            handle,
+                        } => {
+                            let new_script = build_messages_send_script(&handle, &message_body);
+                            info!(
+                                session = %self.session_id,
+                                requested_recipient = %requested_recipient,
+                                contact = %contact_name,
+                                handle = %handle,
+                                body_chars = message_body.chars().count(),
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — recipient resolved through Contacts"
+                            );
+                            spec = ActionSpec::AppleScript {
+                                script: new_script,
+                                rationale: Some(rationale.clone().unwrap_or_else(|| {
+                                    format!(
+                                        "Structured iMessage send to {contact_name}, resolved through Contacts"
+                                    )
+                                })),
+                            };
+                            message_send_resolved_by_core = true;
+                        }
+                        ContactsNameResolution::Ambiguous { names } => {
+                            warn!(
+                                session = %self.session_id,
+                                requested_recipient = %requested_recipient,
+                                matches = ?names,
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — Contacts name ambiguous; refusing send"
+                            );
+                            let options = if names.is_empty() {
+                                "multiple Contacts matches".to_string()
+                            } else {
+                                names.join(", ")
+                            };
+                            let reply = format!(
+                                "I found more than one Contacts match for {requested_recipient}: \
+                                 {options}. Which one should I use?"
+                            );
+                            self.send_text(&reply, true, &trace_id).await?;
+                            self.context.push_assistant(&reply);
+                            self.session_mgr.push_turn("assistant", &reply);
+                            self.send_state(EntityState::Idle, &trace_id).await?;
+                            return Ok(());
+                        }
+                        ContactsNameResolution::NoReachableHandle { contact_name } => {
+                            warn!(
+                                session = %self.session_id,
+                                requested_recipient = %requested_recipient,
+                                contact = %contact_name,
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — Contacts match has no phone/email handle; refusing send"
+                            );
+                            let reply = format!(
+                                "I found {contact_name} in Contacts, but there isn't a phone number \
+                                 or iMessage email I can use. I didn't send it."
+                            );
+                            self.send_text(&reply, true, &trace_id).await?;
+                            self.context.push_assistant(&reply);
+                            self.session_mgr.push_turn("assistant", &reply);
+                            self.send_state(EntityState::Idle, &trace_id).await?;
+                            return Ok(());
+                        }
+                        ContactsNameResolution::NotFound => {
+                            warn!(
+                                session = %self.session_id,
+                                requested_recipient = %requested_recipient,
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — Contacts name not found; refusing send"
+                            );
+                            let reply = format!(
+                                "I couldn't find {requested_recipient} in Contacts, so I didn't send it."
+                            );
+                            self.send_text(&reply, true, &trace_id).await?;
+                            self.context.push_assistant(&reply);
+                            self.session_mgr.push_turn("assistant", &reply);
+                            self.send_state(EntityState::Idle, &trace_id).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             // Phase 37.9 / T8: iMessage self-send intercept (runs at ALL depths).
             //
             // Live-smoke T8 surfaced a confabulation bug: the operator said
@@ -1920,6 +2143,7 @@ impl CoreOrchestrator {
             // of what buddy the model put in the script — the rewrite is
             // deterministic from operator intent + configured handle.
             if is_terminal_send_action(&spec)
+                && !message_send_resolved_by_core
                 && is_self_reference_request(&content, &self.operator_self_aliases)
             {
                 let body_opt = match &spec {
@@ -1991,6 +2215,7 @@ impl CoreOrchestrator {
             // That blocks hallucinated toll-free numbers and wrong-contact handle
             // substitutions without making normal messaging an approval-spam workflow.
             if is_terminal_send_action(&spec)
+                && !message_send_resolved_by_core
                 && !is_self_reference_request(&content, &self.operator_self_aliases)
             {
                 let requested_recipient = match extract_requested_messages_recipient(&content) {
@@ -2123,6 +2348,7 @@ impl CoreOrchestrator {
                     let action_phrase = match &spec {
                         ActionSpec::Shell { .. } => "run that shell command",
                         ActionSpec::AppleScript { .. } => "run that AppleScript",
+                        ActionSpec::MessageSend { .. } => "send that iMessage",
                         ActionSpec::Browser { .. } => "do that in the browser",
                         ActionSpec::FileRead { .. } => "read that file",
                         ActionSpec::FileWrite { .. } => "save that file",
@@ -3993,6 +4219,73 @@ impl CoreOrchestrator {
         Ok(())
     }
 
+    /// Submit an exact ActionSpec from the dexter-cli synthetic action path.
+    ///
+    /// This is intentionally not exposed through the Swift UI. It exists so live
+    /// smoke tests can verify the Rust-side policy/approval boundary without
+    /// relying on a local model to emit the desired JSON shape.
+    async fn handle_synthetic_action(
+        &mut self,
+        spec: ActionSpec,
+        trace_id: String,
+    ) -> Result<(), OrchestratorError> {
+        let description = ActionEngine::describe(&spec);
+        let category = PolicyEngine::classify(&spec);
+        info!(
+            session     = %self.session_id,
+            trace_id    = %trace_id,
+            category    = ActionEngine::category_str(category),
+            description = %description,
+            "Synthetic ActionSpec received from dexter-cli"
+        );
+
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+        match self.action_engine.submit(spec, &trace_id).await {
+            ActionOutcome::PendingApproval {
+                action_id,
+                description,
+                category,
+            } => {
+                info!(
+                    session     = %self.session_id,
+                    trace_id    = %trace_id,
+                    action_id   = %action_id,
+                    %description,
+                    "DESTRUCTIVE synthetic action awaiting operator approval"
+                );
+                let warning = format!(
+                    "⚠️ Needs approval before I run this ({cat}):\n\n```\n{desc}\n```\n\nSay yes or no.",
+                    cat = category_label(&category),
+                    desc = description,
+                );
+                self.send_text(&warning, false, &trace_id).await?;
+
+                let req = ActionRequest {
+                    action_id,
+                    description,
+                    category: category.into(),
+                    payload: String::new(),
+                };
+                self.send_action_request(req, &trace_id).await?;
+                self.send_state(EntityState::Alert, &trace_id).await?;
+                self.action_awaiting_approval = true;
+            }
+            outcome => {
+                let feedback_text = match &outcome {
+                    ActionOutcome::Completed { output, .. } => output.as_str(),
+                    ActionOutcome::Rejected { error, .. } => error.as_str(),
+                    ActionOutcome::PendingApproval { .. } => "",
+                };
+                let feedback =
+                    action_result_status_text(&outcome, Some(&description), feedback_text);
+                self.send_text(&feedback, true, &trace_id).await?;
+                self.send_state(EntityState::Idle, &trace_id).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle a `UIAction` (dismiss / drag / resize).
     ///
     /// Currently all UIAction types are logged and acknowledged. Phase 16 uses
@@ -4004,11 +4297,34 @@ impl CoreOrchestrator {
         action: UiAction,
         trace_id: String,
     ) -> Result<(), OrchestratorError> {
+        if let Some(result) = parse_synthetic_action_payload(&action.payload) {
+            return match result {
+                Ok(spec) => self.handle_synthetic_action(spec, trace_id).await,
+                Err(error) => {
+                    warn!(
+                        session  = %self.session_id,
+                        trace_id = %trace_id,
+                        error    = %error,
+                        "Synthetic ActionSpec payload rejected"
+                    );
+                    self.send_state(EntityState::Thinking, &trace_id).await?;
+                    self.send_text(
+                        &format!("Synthetic action rejected: {error}"),
+                        true,
+                        &trace_id,
+                    )
+                    .await?;
+                    self.send_state(EntityState::Idle, &trace_id).await?;
+                    Ok(())
+                }
+            };
+        }
+
         info!(
             session  = %self.session_id,
             trace_id = %trace_id,
             ui_type  = action.r#type,
-            payload  = %action.payload,
+            payload_len = action.payload.len(),
             "UIAction received (deferred to Phase 11)"
         );
         Ok(())
@@ -6684,6 +7000,23 @@ fn trim_to_last_brace(s: &str) -> Option<&str> {
     Some(&s[..=last_brace])
 }
 
+fn parse_synthetic_action_payload(payload: &str) -> Option<Result<ActionSpec, String>> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let source = value.get("source").and_then(serde_json::Value::as_str);
+    let kind = value.get("kind").and_then(serde_json::Value::as_str);
+    if source != Some("dexter-cli") || kind != Some("action_json") {
+        return None;
+    }
+
+    let Some(action_json) = value.get("action_json") else {
+        return Some(Err("missing action_json field".to_string()));
+    };
+    Some(
+        serde_json::from_value::<ActionSpec>(action_json.clone())
+            .map_err(|e| format!("invalid ActionSpec JSON: {e}")),
+    )
+}
+
 // ── Command-query classifier ──────────────────────────────────────────────────
 
 /// Returns `true` when `content` is an information request about a command
@@ -7490,6 +7823,21 @@ pub(crate) enum ContactsRecipientValidation {
     NotFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContactsNameResolution {
+    Resolved {
+        contact_name: String,
+        handle: String,
+    },
+    Ambiguous {
+        names: Vec<String>,
+    },
+    NoReachableHandle {
+        contact_name: String,
+    },
+    NotFound,
+}
+
 /// Extract the direct Messages.app buddy handle from a send AppleScript.
 ///
 /// Only accepts literal `buddy "..."` handles. If the model emits a variable or
@@ -7565,6 +7913,24 @@ pub(crate) fn extract_requested_messages_recipient(text: &str) -> Option<String>
     }
 
     None
+}
+
+pub(crate) fn is_self_message_recipient_name(recipient: &str, aliases: &[String]) -> bool {
+    let normalized = recipient
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c.is_ascii_punctuation())
+        .trim()
+        .to_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "me" | "myself" | "my self" | "self" | "my phone"
+    ) {
+        return true;
+    }
+    aliases
+        .iter()
+        .map(|alias| alias.trim().to_lowercase())
+        .any(|alias| !alias.is_empty() && alias == normalized)
 }
 
 fn extract_applescript_quoted_after_marker(script: &str, marker: &str) -> Option<String> {
@@ -7783,6 +8149,147 @@ pub(crate) fn build_contacts_recipient_validation_script(
     )
 }
 
+pub(crate) fn build_contacts_name_resolution_script(requested_recipient: &str) -> String {
+    let escaped_requested = escape_applescript_literal(requested_recipient);
+    format!(
+        "on dexterLower(rawValue)\n\
+         set upperChars to \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\"\n\
+         set lowerChars to \"abcdefghijklmnopqrstuvwxyz\"\n\
+         set outText to \"\"\n\
+         set s to rawValue as string\n\
+         repeat with ch in characters of s\n\
+         set c to ch as string\n\
+         set replaced to false\n\
+         repeat with i from 1 to length of upperChars\n\
+         if c is character i of upperChars then\n\
+         set outText to outText & character i of lowerChars\n\
+         set replaced to true\n\
+         exit repeat\n\
+         end if\n\
+         end repeat\n\
+         if replaced is false then set outText to outText & c\n\
+         end repeat\n\
+         return outText\n\
+         end dexterLower\n\
+         \n\
+         on dexterPersonName(p)\n\
+         tell application \"Contacts\"\n\
+         try\n\
+         return name of p as string\n\
+         on error\n\
+         return \"\"\n\
+         end try\n\
+         end tell\n\
+         end dexterPersonName\n\
+         \n\
+         on dexterFirstReachableHandle(p)\n\
+         tell application \"Contacts\"\n\
+         repeat with ph in phones of p\n\
+         set candidate to value of ph\n\
+         if candidate is not missing value then\n\
+         set candidateText to candidate as string\n\
+         if candidateText is not \"\" then return candidateText\n\
+         end if\n\
+         end repeat\n\
+         repeat with em in emails of p\n\
+         set candidate to value of em\n\
+         if candidate is not missing value then\n\
+         set candidateText to candidate as string\n\
+         if candidateText is not \"\" then return candidateText\n\
+         end if\n\
+         end repeat\n\
+         end tell\n\
+         return \"\"\n\
+         end dexterFirstReachableHandle\n\
+         \n\
+         on dexterDigitsOnly(rawValue)\n\
+         set outText to \"\"\n\
+         set s to rawValue as string\n\
+         repeat with ch in characters of s\n\
+         set c to ch as string\n\
+         if \"0123456789\" contains c then set outText to outText & c\n\
+         end repeat\n\
+         return outText\n\
+         end dexterDigitsOnly\n\
+         \n\
+         on dexterHandleKey(rawValue)\n\
+         set digitsOnly to my dexterDigitsOnly(rawValue)\n\
+         if digitsOnly is not \"\" then return digitsOnly\n\
+         return my dexterLower(rawValue)\n\
+         end dexterHandleKey\n\
+         \n\
+         on dexterUniqueReachableResolution(peopleList)\n\
+         set resolvedName to \"\"\n\
+         set resolvedHandle to \"\"\n\
+         set resolvedKey to \"\"\n\
+         set reachableCount to 0\n\
+         set noHandleName to \"\"\n\
+         repeat with p in peopleList\n\
+         set personName to my dexterPersonName(p)\n\
+         set handleValue to my dexterFirstReachableHandle(p)\n\
+         if handleValue is \"\" then\n\
+         if noHandleName is \"\" then set noHandleName to personName\n\
+         else\n\
+         set handleKey to my dexterHandleKey(handleValue)\n\
+         if resolvedKey is \"\" then\n\
+         set resolvedName to personName\n\
+         set resolvedHandle to handleValue\n\
+         set resolvedKey to handleKey\n\
+         set reachableCount to 1\n\
+         else if handleKey is not resolvedKey then\n\
+         set reachableCount to reachableCount + 1\n\
+         end if\n\
+         end if\n\
+         end repeat\n\
+         if reachableCount is 1 then return \"CONTACT_RESOLVED|\" & resolvedName & \"|\" & resolvedHandle\n\
+         if reachableCount is 0 and noHandleName is not \"\" then return \"CONTACT_NO_REACHABLE_HANDLE|\" & noHandleName\n\
+         return \"\"\n\
+         end dexterUniqueReachableResolution\n\
+         \n\
+         on dexterNameList(peopleList)\n\
+         set outText to \"\"\n\
+         set counter to 0\n\
+         repeat with p in peopleList\n\
+         set personName to my dexterPersonName(p)\n\
+         if personName is not \"\" then\n\
+         if outText is not \"\" then set outText to outText & \", \"\n\
+         set outText to outText & personName\n\
+         set counter to counter + 1\n\
+         if counter >= 5 then exit repeat\n\
+         end if\n\
+         end repeat\n\
+         return outText\n\
+         end dexterNameList\n\
+         \n\
+         on dexterResolutionForPerson(p)\n\
+         set personName to my dexterPersonName(p)\n\
+         set handleValue to my dexterFirstReachableHandle(p)\n\
+         if handleValue is \"\" then return \"CONTACT_NO_REACHABLE_HANDLE|\" & personName\n\
+         return \"CONTACT_RESOLVED|\" & personName & \"|\" & handleValue\n\
+         end dexterResolutionForPerson\n\
+         \n\
+         tell application \"Contacts\"\n\
+         set requestedName to \"{escaped_requested}\"\n\
+         if requestedName is \"\" then return \"CONTACT_NOT_FOUND\"\n\
+         set matches to every person whose name contains requestedName\n\
+         if matches is {{}} then return \"CONTACT_NOT_FOUND\"\n\
+         set exactMatches to {{}}\n\
+         set requestedLower to my dexterLower(requestedName)\n\
+         repeat with p in matches\n\
+         if my dexterLower(my dexterPersonName(p)) is requestedLower then set end of exactMatches to contents of p\n\
+         end repeat\n\
+         if (count of exactMatches) is 1 then return my dexterResolutionForPerson(item 1 of exactMatches)\n\
+         if (count of exactMatches) > 1 then\n\
+         set exactResolution to my dexterUniqueReachableResolution(exactMatches)\n\
+         if exactResolution is not \"\" then return exactResolution\n\
+         return \"CONTACT_AMBIGUOUS|\" & my dexterNameList(exactMatches)\n\
+         end if\n\
+         if (count of matches) is 1 then return my dexterResolutionForPerson(item 1 of matches)\n\
+         return \"CONTACT_AMBIGUOUS|\" & my dexterNameList(matches)\n\
+         end tell"
+    )
+}
+
 pub(crate) fn parse_contacts_recipient_validation_output(
     output: &str,
 ) -> ContactsRecipientValidation {
@@ -7806,6 +8313,39 @@ pub(crate) fn parse_contacts_recipient_validation_output(
     ContactsRecipientValidation::NotFound
 }
 
+pub(crate) fn parse_contacts_name_resolution_output(output: &str) -> ContactsNameResolution {
+    let trimmed = output.trim();
+    if let Some(rest) = trimmed.strip_prefix("CONTACT_RESOLVED|") {
+        let mut parts = rest.splitn(2, '|');
+        let contact_name = parts.next().unwrap_or("").trim();
+        let handle = parts.next().unwrap_or("").trim();
+        if !contact_name.is_empty() && !handle.is_empty() {
+            return ContactsNameResolution::Resolved {
+                contact_name: contact_name.to_string(),
+                handle: handle.to_string(),
+            };
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("CONTACT_AMBIGUOUS|") {
+        let names: Vec<String> = rest
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        return ContactsNameResolution::Ambiguous { names };
+    }
+    if let Some(rest) = trimmed.strip_prefix("CONTACT_NO_REACHABLE_HANDLE|") {
+        let contact_name = rest.trim();
+        if !contact_name.is_empty() {
+            return ContactsNameResolution::NoReachableHandle {
+                contact_name: contact_name.to_string(),
+            };
+        }
+    }
+    ContactsNameResolution::NotFound
+}
+
 /// Phase 37.9 / T8: builds a deterministic Messages-send AppleScript.
 ///
 /// Used by the self-send intercept to replace LLM-generated scripts whose
@@ -7817,7 +8357,7 @@ pub(crate) fn parse_contacts_recipient_validation_output(
 /// and raw `\n` split into `" & linefeed & "` (AppleScript string literals
 /// cannot contain raw newlines). `handle` receives the same quote/backslash
 /// escaping as defense against odd config values.
-pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
+pub(crate) fn build_messages_send_script(handle: &str, body: &str) -> String {
     let escaped_handle = escape_applescript_literal(handle);
     let escaped_body = escape_applescript_literal(body);
     format!(
@@ -7827,6 +8367,10 @@ pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
          send \"{escaped_body}\" to targetBuddy\n\
          end tell"
     )
+}
+
+pub(crate) fn build_self_send_script(handle: &str, body: &str) -> String {
+    build_messages_send_script(handle, body)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -7857,6 +8401,66 @@ mod tests {
     }
     fn new_session() -> String {
         Uuid::new_v4().to_string()
+    }
+
+    #[test]
+    fn synthetic_action_payload_ignores_regular_ui_payload() {
+        assert!(
+            parse_synthetic_action_payload(r#"{"kind":"drag","x":12,"y":34}"#).is_none(),
+            "normal UIAction payloads must not enter the synthetic action path"
+        );
+    }
+
+    #[test]
+    fn synthetic_action_payload_parses_exact_action_spec() {
+        let payload = r#"{
+            "source":"dexter-cli",
+            "kind":"action_json",
+            "action_json":{
+                "type":"shell",
+                "args":["echo","hi"],
+                "rationale":"unit test"
+            }
+        }"#;
+
+        let spec = parse_synthetic_action_payload(payload)
+            .expect("synthetic envelope should be detected")
+            .expect("ActionSpec should parse");
+
+        match spec {
+            ActionSpec::Shell {
+                args,
+                working_dir,
+                rationale,
+                category_override,
+            } => {
+                assert_eq!(args, vec!["echo".to_string(), "hi".to_string()]);
+                assert!(working_dir.is_none());
+                assert_eq!(rationale.as_deref(), Some("unit test"));
+                assert!(category_override.is_none());
+            }
+            other => panic!("expected shell ActionSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthetic_action_payload_rejects_invalid_action_spec() {
+        let payload = r#"{
+            "source":"dexter-cli",
+            "kind":"action_json",
+            "action_json":{
+                "type":"not_real"
+            }
+        }"#;
+
+        let err = parse_synthetic_action_payload(payload)
+            .expect("synthetic envelope should be detected")
+            .expect_err("invalid ActionSpec should be rejected");
+
+        assert!(
+            err.contains("invalid ActionSpec JSON"),
+            "error should explain that the inner ActionSpec was invalid: {err}"
+        );
     }
 
     /// Construct a test orchestrator with an unbounded channel (never blocks).
@@ -8233,6 +8837,50 @@ mod tests {
                 assert_eq!(args, vec!["ls", "-la"]);
             }
             other => panic!("expected Shell, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_action_block_parses_structured_message_send() {
+        let response = format!(
+            "Sending it.{}{}{}",
+            ACTION_BLOCK_OPEN,
+            r#"{"type":"message_send","recipient":"Mom","body":"I'll be late","rationale":"structured send"}"#,
+            ACTION_BLOCK_CLOSE,
+        );
+        let (text, spec) = extract_action_block(&response);
+        assert!(!text.contains(ACTION_BLOCK_OPEN));
+        match spec.expect("message_send action must parse") {
+            ActionSpec::MessageSend {
+                recipient,
+                body,
+                rationale,
+            } => {
+                assert_eq!(recipient, "Mom");
+                assert_eq!(body, "I'll be late");
+                assert_eq!(rationale.as_deref(), Some("structured send"));
+            }
+            other => panic!("expected MessageSend, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_action_block_parses_message_send_aliases() {
+        let response = format!(
+            "{}{}{}",
+            ACTION_BLOCK_OPEN,
+            r#"{"type":"message_send","recipient_name":"Sarah","message":"hello"}"#,
+            ACTION_BLOCK_CLOSE,
+        );
+        let (_text, spec) = extract_action_block(&response);
+        match spec.expect("message_send alias action must parse") {
+            ActionSpec::MessageSend {
+                recipient, body, ..
+            } => {
+                assert_eq!(recipient, "Sarah");
+                assert_eq!(body, "hello");
+            }
+            other => panic!("expected MessageSend, got: {other:?}"),
         }
     }
 
@@ -9197,6 +9845,16 @@ end tell"#;
     }
 
     #[test]
+    fn is_self_message_recipient_name_detects_core_forms_and_aliases() {
+        let aliases = vec!["jay".to_string()];
+        assert!(is_self_message_recipient_name("self", &aliases));
+        assert!(is_self_message_recipient_name("Me", &aliases));
+        assert!(is_self_message_recipient_name("jay", &aliases));
+        assert!(!is_self_message_recipient_name("Jason", &aliases));
+        assert!(!is_self_message_recipient_name("Mom", &aliases));
+    }
+
+    #[test]
     fn build_contacts_recipient_validation_script_escapes_inputs() {
         let script = build_contacts_recipient_validation_script("+1555\"bad\\id", "Mom \"Home\"");
         assert!(
@@ -9243,6 +9901,61 @@ end tell"#;
         assert_eq!(
             parse_contacts_recipient_validation_output(""),
             ContactsRecipientValidation::NotFound
+        );
+    }
+
+    #[test]
+    fn build_contacts_name_resolution_script_escapes_input() {
+        let script = build_contacts_name_resolution_script("Mom \"Home\"");
+        assert!(
+            script.contains("set requestedName to \"Mom \\\"Home\\\"\""),
+            "requested recipient literal must be escaped; got: {script}"
+        );
+        assert!(script.contains("CONTACT_RESOLVED|"));
+        assert!(script.contains("CONTACT_AMBIGUOUS|"));
+        assert!(script.contains("CONTACT_NO_REACHABLE_HANDLE|"));
+    }
+
+    #[test]
+    fn parse_contacts_name_resolution_output_resolved() {
+        assert_eq!(
+            parse_contacts_name_resolution_output("CONTACT_RESOLVED|Mom|+15551234567"),
+            ContactsNameResolution::Resolved {
+                contact_name: "Mom".to_string(),
+                handle: "+15551234567".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_contacts_name_resolution_output_ambiguous() {
+        assert_eq!(
+            parse_contacts_name_resolution_output("CONTACT_AMBIGUOUS|Sarah Jones, Sarah Work"),
+            ContactsNameResolution::Ambiguous {
+                names: vec!["Sarah Jones".to_string(), "Sarah Work".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_contacts_name_resolution_output_no_handle() {
+        assert_eq!(
+            parse_contacts_name_resolution_output("CONTACT_NO_REACHABLE_HANDLE|Mom"),
+            ContactsNameResolution::NoReachableHandle {
+                contact_name: "Mom".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_contacts_name_resolution_output_not_found() {
+        assert_eq!(
+            parse_contacts_name_resolution_output("CONTACT_NOT_FOUND"),
+            ContactsNameResolution::NotFound
+        );
+        assert_eq!(
+            parse_contacts_name_resolution_output(""),
+            ContactsNameResolution::NotFound
         );
     }
 

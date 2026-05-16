@@ -36,25 +36,28 @@ class TestBrowserWorkerHandshake:
 
 class TestBrowserWorkerHandlers:
     async def test_handle_navigate_success(self):
-        """handle_navigate returns (True, final_url, "") on success."""
+        """handle_navigate returns final URL plus page title on success."""
         from workers.browser_worker import handle_navigate
 
         page = AsyncMock()
         page.url = "https://example.com/"
+        page.title = AsyncMock(return_value="Example Domain")
 
         payload = json.dumps({"url": "https://example.com/"}).encode()
         success, output, error = await handle_navigate(page, payload)
 
         assert success is True
-        assert output == "https://example.com/"
+        assert output == "https://example.com/\nPage title: Example Domain"
         assert error == ""
         page.goto.assert_awaited_once_with("https://example.com/", timeout=30_000)
+        page.title.assert_awaited_once()
 
     async def test_handle_extract_full_page(self):
         """handle_extract with selector=None returns page body text (capped at 10k)."""
         from workers.browser_worker import handle_extract
 
         page = AsyncMock()
+        page.query_selector_all = AsyncMock(return_value=[])
         page.inner_text = AsyncMock(return_value="Hello World")
 
         payload = json.dumps({"selector": None}).encode()
@@ -63,6 +66,7 @@ class TestBrowserWorkerHandlers:
         assert success is True
         assert output == "Hello World"
         assert error == ""
+        page.query_selector_all.assert_awaited_once_with("a[href]")
         page.inner_text.assert_awaited_once_with("body")
 
     async def test_handle_navigate_failure(self):

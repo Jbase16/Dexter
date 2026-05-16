@@ -57,7 +57,7 @@ def test_text_input_calls_pipeline():
 
     mock_pipeline.assert_called_once_with(
         text.decode('utf-8'),
-        voice="af_heart",
+        voice="am_michael",
         speed=1.0,
     )
 

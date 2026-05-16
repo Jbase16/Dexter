@@ -73,6 +73,7 @@ mod proto {
 use proto::{
     client_event, dexter_service_client::DexterServiceClient, server_event, ActionApproval,
     ActionCategory, ClientEvent, EntityState, PingRequest, SystemEvent, SystemEventType, TextInput,
+    UiAction, UiActionType,
 };
 
 const DEFAULT_SOCKET: &str = "/tmp/dexter.sock";
@@ -102,6 +103,7 @@ struct CliConfig {
 #[derive(Debug, Clone)]
 enum CliInput {
     Text(String),
+    ActionJson(String),
     SystemEvent {
         event_type: SystemEventType,
         payload: String,
@@ -172,6 +174,14 @@ fn parse_args() -> Result<CliConfig> {
                     raw_type, payload
                 ));
             }
+            "--action-json" => {
+                let raw_json = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--action-json requires an ActionSpec JSON argument"))?;
+                serde_json::from_str::<serde_json::Value>(&raw_json)
+                    .context("--action-json: argument is not valid JSON")?;
+                positional.push(format!("\u{1f}action-json\u{1f}{raw_json}"));
+            }
             "--shell-command" => {
                 let command = args
                     .next()
@@ -232,6 +242,8 @@ fn parse_args() -> Result<CliConfig> {
                         event_type: parse_system_event_type(raw_type)?,
                         payload,
                     })
+                } else if let Some(raw_json) = arg.strip_prefix("\u{1f}action-json\u{1f}") {
+                    Ok(CliInput::ActionJson(raw_json.to_string()))
                 } else if let Some(rest) = arg.strip_prefix("\u{1f}shell-command\u{1f}") {
                     let mut parts = rest.splitn(3, '\u{1f}');
                     let command = parts.next().unwrap_or_default().to_string();
@@ -289,6 +301,9 @@ fn print_help() {
         "                           TYPE examples: connected, app_focused, ax_element_changed,"
     );
     eprintln!("                           clipboard_changed, app_unfocused, screen_locked.");
+    eprintln!("      --action-json <JSON> Send an exact ActionSpec through the dev-only");
+    eprintln!("                           synthetic action path; useful for deterministic");
+    eprintln!("                           action approval smoke tests.");
     eprintln!("      --shell-command <COMMAND> <CWD> <EXIT_CODE|null>");
     eprintln!("                           Send a synthetic shell-completion event through the");
     eprintln!("                           same /tmp/dexter-shell.sock path as the zsh hook.");
@@ -299,6 +314,7 @@ fn print_help() {
     eprintln!("  dexter-cli --quiet \"explain how TCP slow-start works\"");
     eprintln!("  printf \"q1\\nq2\\n\" | dexter-cli");
     eprintln!("  dexter-cli --auto-deny \"rm -rf /tmp/foo\"");
+    eprintln!("  dexter-cli --action-json '{{\"type\":\"shell\",\"args\":[\"echo\",\"hi\"]}}'");
     eprintln!("  dexter-cli --system-event clipboard_changed '{{\"text\":\"copied\"}}' \"summarize clipboard\"");
     eprintln!("  dexter-cli --shell-command \"cargo test\" /Users/me/project 0 \"what happened?\"");
 }
@@ -426,6 +442,32 @@ async fn main() -> Result<()> {
                 // Drain server events until we see IDLE (turn complete) or hit the timeout.
                 run_turn(&mut response_stream, &tx, &session_id, &cfg).await?;
             }
+            CliInput::ActionJson(raw_json) => {
+                if !cfg.quiet {
+                    eprintln!("[turn {} — sending action JSON]", i + 1);
+                }
+
+                let payload = json!({
+                    "source": "dexter-cli",
+                    "kind": "action_json",
+                    "action_json": serde_json::from_str::<serde_json::Value>(raw_json)
+                        .context("--action-json: argument is not valid JSON")?,
+                })
+                .to_string();
+                let event = ClientEvent {
+                    trace_id: trace_id.clone(),
+                    session_id: session_id.clone(),
+                    event: Some(client_event::Event::UiAction(UiAction {
+                        r#type: UiActionType::Unspecified as i32,
+                        payload,
+                    })),
+                };
+                tx.send(event)
+                    .await
+                    .map_err(|_| anyhow!("session stream closed before UIAction could be sent"))?;
+
+                run_turn(&mut response_stream, &tx, &session_id, &cfg).await?;
+            }
             CliInput::SystemEvent {
                 event_type,
                 payload,
@@ -523,6 +565,15 @@ async fn connect(socket_path: &str) -> Result<DexterServiceClient<tonic::transpo
     Ok(DexterServiceClient::new(channel))
 }
 
+fn audio_playback_complete_payload(audio_trace_id: &str) -> String {
+    let audio_trace_id = audio_trace_id.trim();
+    if audio_trace_id.is_empty() {
+        "{}".to_string()
+    } else {
+        json!({ "audio_trace_id": audio_trace_id }).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +602,19 @@ mod tests {
             parse_system_event_type("SYSTEM_EVENT_TYPE_CLIPBOARD_CHANGED").unwrap(),
             SystemEventType::ClipboardChanged
         );
+    }
+
+    #[test]
+    fn audio_playback_complete_payload_tags_audio_trace_id() {
+        assert_eq!(
+            audio_playback_complete_payload("trace-123"),
+            r#"{"audio_trace_id":"trace-123"}"#
+        );
+    }
+
+    #[test]
+    fn audio_playback_complete_payload_preserves_legacy_empty_payload() {
+        assert_eq!(audio_playback_complete_payload("   "), "{}");
     }
 }
 
@@ -612,6 +676,7 @@ async fn run_turn(
             Ok(Some(Ok(evt))) => evt,
         };
 
+        let event_trace_id = event.trace_id.clone();
         match event.event {
             // Streaming text from the model. Print directly without newlines so
             // the response builds up in the terminal the way it streams.
@@ -703,7 +768,7 @@ async fn run_turn(
                         session_id: session_id.to_string(),
                         event: Some(client_event::Event::SystemEvent(SystemEvent {
                             r#type: SystemEventType::AudioPlaybackComplete as i32,
-                            payload: "{}".to_string(),
+                            payload: audio_playback_complete_payload(&event_trace_id),
                         })),
                     };
                     tx.send(event).await.map_err(|_| {

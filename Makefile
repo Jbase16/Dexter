@@ -22,7 +22,7 @@ SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli live-smoke-cli live-smoke-hud live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli live-smoke-cli live-smoke-action-matrix live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -119,6 +119,39 @@ live-smoke-cli: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-cli-smoke.sh --start-core
 
+## live-smoke-action-matrix: run deep CLI action approval matrix (shell/file/browser/AppleScript)
+##
+## Starts a fresh release core and drives the high-consequence action lanes
+## separately from live-smoke-cli so the baseline CLI smoke stays short and less
+## vulnerable to long Ollama runs.
+live-smoke-action-matrix: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-cli-smoke.sh --start-core --action-matrix
+
+## live-smoke-message-contact: opt-in Contacts-backed iMessage approval smoke
+##
+## Requires DEXTER_SMOKE_CONTACT_NAME to name an existing non-self Contacts entry
+## with a reachable phone or iMessage email. The test auto-denies the approval
+## request, so it verifies Contacts resolution + approval gating without sending.
+##
+## Example:
+##   DEXTER_SMOKE_CONTACT_NAME="Some Test Contact" make live-smoke-message-contact
+live-smoke-message-contact: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-message-contact-smoke.sh --start-core
+
+## live-smoke-message-contact-approve: opt-in real iMessage send approval smoke
+##
+## Requires DEXTER_SMOKE_CONTACT_NAME and DEXTER_SMOKE_ALLOW_REAL_SEND=1. This
+## auto-approves the Messages approval request and sends the smoke-test message,
+## so keep it out of broad smoke suites.
+##
+## Example:
+##   DEXTER_SMOKE_CONTACT_NAME="Jason Phillips" DEXTER_SMOKE_ALLOW_REAL_SEND=1 make live-smoke-message-contact-approve
+live-smoke-message-contact-approve: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	DEXTER_SMOKE_APPROVAL_MODE=approve bash scripts/live-message-contact-smoke.sh --start-core
+
 ## live-smoke-hud: run automated Swift HUD live regression (starts Rust core + Swift UI)
 ##
 ## Builds release-mode dexter-core, starts it with logs at
@@ -166,6 +199,7 @@ live-smoke-barge-in: ensure-core-not-running
 ## target instead of being hidden by shared process state.
 live-smoke-all:
 	$(MAKE) live-smoke-cli
+	$(MAKE) live-smoke-action-matrix
 	$(MAKE) live-smoke-hud
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel

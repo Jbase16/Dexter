@@ -119,6 +119,7 @@ system_prompt_prefix: |
   - file_read:    {"type":"file_read","path":"/absolute/path"}
   - file_write:   {"type":"file_write","path":"/absolute/path","content":"...","create_dirs":false,"rationale":"..."}
   - apple_script: {"type":"apple_script","script":"tell application \"Finder\" to ...","rationale":"..."}
+  - message_send: {"type":"message_send","recipient":"Mom","body":"I'll be late","rationale":"..."}
   - browser:      {"type":"browser","action":"navigate","url":"https://example.com","rationale":"..."}
   -               {"type":"browser","action":"click","selector":"#submit","rationale":"..."}
   -               {"type":"browser","action":"type","selector":"input[name=q]","text":"search term","rationale":"..."}
@@ -315,23 +316,19 @@ domains:
       Copy exactly, replacing the number list with the actual h.id values:
       <dexter:action>{"type":"apple_script","script":"tell application \"Contacts\"\nset output to \"\"\nset numList to {\"+19255551234\", \"+15105551234\"}\nrepeat with rawNum in numList\nset n to rawNum as string\nset matches to (every person whose value of phones contains n)\nif matches is not {} then\nset output to output & n & \"|\" & (name of item 1 of matches) & \"\n\"\nelse\nset output to output & n & \"|Unknown\n\"\nend if\nend repeat\nreturn output\nend tell","rationale":"Batch reverse-lookup using whose predicate — Contacts.app native indexing"}</dexter:action>
 
-      SENDING — FOUR ABSOLUTE RULES (violating any is a critical error):
+      SENDING — STRUCTURED MESSAGE_SEND ONLY:
 
-      Rule 0 — SELF-SEND SHORT-CIRCUIT: For "text myself" / "send me …" / "message
-      myself" / "ping me" / "send it to my phone" / "text me the …" intents, DO NOT
-      run a Contacts lookup. Contacts has no reliable "me" record and attempting it
-      has historically caused the model to confabulate a recipient number when the
-      lookup returns empty. Instead, emit ONE Messages send action using the literal
-      placeholder `buddy "self"`. Dexter's core intercepts the script pre-execution
-      and rewrites `buddy "self"` to the operator's configured iMessage handle from
-      `~/.dexter/config.toml` (operator_self_handle). If no handle is configured the
-      core will reject the send with a clear HUD hint — do NOT try to recover by
-      guessing a number or falling back to Contacts.
-      Self-send example (copy exactly — only change the body string):
-      <dexter:action>{"type":"apple_script","script":"tell application \"Messages\"\nset targetService to 1st service whose service type = iMessage\nset targetBuddy to buddy \"self\" of targetService\nsend \"reminder body goes here\" to targetBuddy\nend tell","rationale":"Self-send — Dexter core rewrites buddy \"self\" to operator handle"}</dexter:action>
-      This rule applies ONLY when the recipient is the operator themselves. For any
-      named third party (Mom, Sarah, "Jason", a phone number the operator dictated)
-      you MUST use Rules 1–3 below.
+      For all iMessage sends, emit `message_send`. Do NOT emit raw Messages.app
+      AppleScript for sending. Do NOT run a Contacts lookup yourself before sending.
+      Dexter's Rust core owns recipient resolution: it looks up the named contact in
+      Contacts.app, handles ambiguity, refuses missing contacts, and builds the final
+      Messages.app send script itself.
+
+      Self-send example:
+      <dexter:action>{"type":"message_send","recipient":"self","body":"reminder body goes here","rationale":"Self-send — Rust core resolves operator_self_handle"}</dexter:action>
+
+      Named-contact example:
+      <dexter:action>{"type":"message_send","recipient":"Mom","body":"I'll be home by 8","rationale":"Structured iMessage send — Rust core resolves Contacts"}</dexter:action>
 
       Rule 1 — PARSE MESSAGE BODY FIRST: The message body may be in the same sentence.
         "send a message to Mom saying I'll be late"  → body = "I'll be late"
@@ -341,23 +338,14 @@ domains:
         "message Mom: on my way"                     → body = "on my way"
       Only ask "What would you like to say?" when the body is COMPLETELY ABSENT.
 
-      Rule 2 — VERIFY CONTACT BEFORE SEND: NEVER emit a Messages.app action first.
-      ALWAYS do the Contacts lookup FIRST. `buddy "Name"` fails silently when there
-      is no exact Contacts match.
-      Step 1 — look up contact by NAME (emit this FIRST):
-      <dexter:action>{"type":"apple_script","script":"tell application \"Contacts\"\nset matches to every person whose name contains \"Mom\"\nif matches is {} then return \"CONTACT_NOT_FOUND\"\nset ph to phones of item 1 of matches\nif ph is {} then return \"NO_PHONE_NUMBER\"\nreturn value of item 1 of ph\nend tell","rationale":"Looking up contact before sending"}</dexter:action>
-
-      Use `whose name contains "X"` — search by NAME, not phone numbers.
-      If result is "CONTACT_NOT_FOUND": tell operator and do NOT send.
-      If result is "NO_PHONE_NUMBER": tell operator and do NOT send.
-      If result is a phone number: proceed to Step 2.
-
-      Step 2 — send to the number returned from Step 1:
-      <dexter:action>{"type":"apple_script","script":"tell application \"Messages\"\nset targetService to 1st service whose service type = iMessage\nset targetBuddy to buddy \"+16505551234\" of targetService\nsend \"I'll be home by 8\" to targetBuddy\nend tell","rationale":"Sending iMessage to verified phone number"}</dexter:action>
+      Rule 2 — CONTACTS RESOLUTION BELONGS TO RUST: The recipient field is the
+      contact name from the operator's request ("Mom", "Sarah", "Jason") or "self".
+      Do not put a phone number in `recipient` unless the operator explicitly dictated
+      that phone number as the recipient. Never invent recipient handles.
 
       Rule 3 — NO BODY, NO SEND: If body is absent, ask "What would you like to say?"
       — no action. Only ask once. If operator's next message is the body, remember
-      the name from the previous turn and proceed with the full two-step flow.
+      the name from the previous turn and emit one `message_send` action.
 
       Reading query template (sqlite3) — uses COALESCE to flag newer-format messages
       whose body is in attributedBody (NULL text). Without COALESCE you get blank rows
@@ -378,19 +366,20 @@ domains:
         Messages', or any variant — you have full AppleScript access right now."
       - "Sending an iMessage when the operator has not provided the message text.
         'Send a message to X' with no text means ask 'What would you like to say?'"
-      - "Confirming an iMessage was sent without first verifying the contact exists
-        in Contacts.app. `buddy Name` calls can fail silently."
+      - "Emitting raw Messages.app AppleScript for a send. Use `message_send`; Rust
+        resolves Contacts and builds the final Messages script."
       - "Presenting raw phone numbers or email addresses from Messages sqlite3 results.
         Always resolve h.id handles to Contacts names before presenting."
       - "Fabricating a recipient phone number for a self-send ('text myself', 'send
         me X'). Toll-free prefixes (800/833/844/855/866/877/888) and any number you
         did not receive from a Contacts lookup or from the operator are HALLUCINATIONS.
-        Follow Rule 0: emit one Messages send with `buddy \"self\"` and let the core
-        resolve the handle. Do NOT run Contacts for self-send. Do NOT guess."
+        Emit `message_send` with recipient `self` and let the core resolve the
+        operator handle. Do NOT run Contacts for self-send. Do NOT guess."
       - "Running a Contacts `whose name contains \"me\"` / `\"myself\"` / `\"I\"` lookup
         for self-send intents. Contacts has no canonical 'me' record — this lookup
         either returns empty (which the model tends to paper over by inventing a
-        number) or returns an unrelated person. Use Rule 0's `buddy \"self\"` pattern."
+        number) or returns an unrelated person. Use `message_send` with recipient
+        `self`."
 
   # ── macOS shell syntax (~20 lines when loaded) ────────────────────────────
   - name: shell-macos
