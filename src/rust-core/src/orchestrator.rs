@@ -4219,6 +4219,18 @@ impl CoreOrchestrator {
         Ok(())
     }
 
+    fn inject_action_status_context(&mut self, label: &str, feedback: &str, trace_id: &str) {
+        let content = action_context_status_text(label, feedback);
+        self.context.push_tool_result(&content);
+        info!(
+            session    = %self.session_id,
+            trace_id   = %trace_id,
+            label      = %label,
+            char_count = content.chars().count(),
+            "Action status injected into conversation context"
+        );
+    }
+
     /// Submit an exact ActionSpec from the dexter-cli synthetic action path.
     ///
     /// This is intentionally not exposed through the Swift UI. It exists so live
@@ -4278,6 +4290,9 @@ impl CoreOrchestrator {
                 };
                 let feedback =
                     action_result_status_text(&outcome, Some(&description), feedback_text);
+                if let Some(label) = action_context_label(&outcome, None) {
+                    self.inject_action_status_context(label, &feedback, &trace_id);
+                }
                 self.send_text(&feedback, true, &trace_id).await?;
                 self.send_state(EntityState::Idle, &trace_id).await?;
             }
@@ -4349,11 +4364,14 @@ impl CoreOrchestrator {
             "ActionApproval received"
         );
 
+        let action_description = self.action_engine.pending_description(&approval.action_id);
+        let operator_approved = approval.approved;
+
         let outcome = self
             .action_engine
             .resolve(
                 &approval.action_id,
-                approval.approved,
+                operator_approved,
                 &approval.operator_note,
             )
             .await;
@@ -4375,7 +4393,11 @@ impl CoreOrchestrator {
                     "Approved action completed"
                 );
                 // Phase 9+: inject action result into conversation context
-                let feedback = action_completion_status_text(None, &output);
+                let feedback =
+                    action_completion_status_text(action_description.as_deref(), &output);
+                if action_description.is_some() {
+                    self.inject_action_status_context("Action result", &feedback, &trace_id);
+                }
                 self.speak_action_feedback(&feedback, &trace_id).await?
             }
             ActionOutcome::Rejected { action_id, error } => {
@@ -4385,7 +4407,15 @@ impl CoreOrchestrator {
                     error     = %error,
                     "Action rejected"
                 );
-                let feedback = action_cancelled_status_text(&error);
+                let feedback = if operator_approved {
+                    action_failure_status_text(action_description.as_deref(), &error)
+                } else {
+                    action_denied_status_text(action_description.as_deref(), &error)
+                };
+                if action_description.is_some() {
+                    let label = action_context_label_for_rejection(operator_approved);
+                    self.inject_action_status_context(label, &feedback, &trace_id);
+                }
                 self.speak_action_feedback(&feedback, &trace_id).await?
             }
             ActionOutcome::PendingApproval { .. } => {
@@ -7137,9 +7167,42 @@ fn action_failure_status_text(description: Option<&str>, error: &str) -> String 
     format!("Action failed: {subject}.\n\n{detail}")
 }
 
-fn action_cancelled_status_text(error: &str) -> String {
+fn action_denied_status_text(description: Option<&str>, error: &str) -> String {
+    let subject = action_status_subject(description);
     let detail = compact_operator_text(error, ACTION_STATUS_OUTPUT_MAX_CHARS);
-    format!("Action cancelled: {detail}")
+    if detail.is_empty() || detail == "operator rejected the action" {
+        return format!("Action denied before execution: {subject}.");
+    }
+
+    format!("Action denied before execution: {subject}.\n\n{detail}")
+}
+
+fn action_context_label(
+    outcome: &ActionOutcome,
+    operator_approved: Option<bool>,
+) -> Option<&'static str> {
+    match outcome {
+        ActionOutcome::Completed { .. } => Some("Action result"),
+        ActionOutcome::Rejected { .. } => Some(action_context_label_for_rejection(
+            operator_approved.unwrap_or(true),
+        )),
+        ActionOutcome::PendingApproval { .. } => None,
+    }
+}
+
+fn action_context_label_for_rejection(operator_approved: bool) -> &'static str {
+    if operator_approved {
+        "Action FAILED"
+    } else {
+        "Action denied"
+    }
+}
+
+fn action_context_status_text(label: &str, feedback: &str) -> String {
+    format!(
+        "[{label}: {}]",
+        compact_operator_text(feedback, ACTION_STATUS_OUTPUT_MAX_CHARS)
+    )
 }
 
 fn action_status_subject(description: Option<&str>) -> String {
@@ -8461,6 +8524,30 @@ mod tests {
             err.contains("invalid ActionSpec JSON"),
             "error should explain that the inner ActionSpec was invalid: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn synthetic_safe_action_injects_result_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let before = orch.context.messages().len();
+
+        let spec = ActionSpec::Shell {
+            args: vec!["echo".to_string(), "synthetic-context-token".to_string()],
+            working_dir: None,
+            rationale: Some("synthetic context test".to_string()),
+            category_override: None,
+        };
+        orch.handle_synthetic_action(spec, new_trace())
+            .await
+            .unwrap();
+
+        assert_eq!(orch.context.messages().len(), before + 1);
+        let last = orch.context.messages().last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(last.content.contains("[Action result:"));
+        assert!(last.content.contains("Run: echo synthetic-context-token"));
+        assert!(last.content.contains("synthetic-context-token"));
     }
 
     /// Construct a test orchestrator with an unbounded channel (never blocks).
@@ -10027,6 +10114,128 @@ end tell"#;
         };
         let result = orch.handle_action_approval(appr, new_trace()).await;
         assert!(result.is_ok(), "unknown approval must return Ok, not error");
+    }
+
+    #[tokio::test]
+    async fn handle_action_approval_approved_injects_result_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let spec = ActionSpec::Shell {
+            args: vec!["echo".to_string(), "approval-context-token".to_string()],
+            working_dir: None,
+            rationale: None,
+            category_override: Some("destructive".to_string()),
+        };
+        let outcome = orch.action_engine.submit(spec, &new_trace()).await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval { action_id, .. } => action_id,
+            other => panic!("expected PendingApproval, got: {other:?}"),
+        };
+        let before = orch.context.messages().len();
+
+        let appr = ActionApproval {
+            action_id,
+            approved: true,
+            operator_note: String::new(),
+        };
+        orch.handle_action_approval(appr, new_trace())
+            .await
+            .unwrap();
+
+        assert_eq!(orch.context.messages().len(), before + 1);
+        let last = orch.context.messages().last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(last.content.contains("[Action result:"));
+        assert!(last.content.contains("Run: echo approval-context-token"));
+        assert!(last.content.contains("approval-context-token"));
+    }
+
+    #[tokio::test]
+    async fn handle_action_approval_denied_injects_denial_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let spec = ActionSpec::Shell {
+            args: vec!["echo".to_string(), "denied-context-token".to_string()],
+            working_dir: None,
+            rationale: None,
+            category_override: Some("destructive".to_string()),
+        };
+        let outcome = orch.action_engine.submit(spec, &new_trace()).await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval { action_id, .. } => action_id,
+            other => panic!("expected PendingApproval, got: {other:?}"),
+        };
+        let before = orch.context.messages().len();
+
+        let appr = ActionApproval {
+            action_id,
+            approved: false,
+            operator_note: "not now".to_string(),
+        };
+        orch.handle_action_approval(appr, new_trace())
+            .await
+            .unwrap();
+
+        assert_eq!(orch.context.messages().len(), before + 1);
+        let last = orch.context.messages().last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(last.content.contains("[Action denied:"));
+        assert!(last.content.contains("Run: echo denied-context-token"));
+        assert!(!last.content.contains("Succeeded"));
+    }
+
+    #[test]
+    fn action_denied_status_text_uses_action_description() {
+        assert_eq!(
+            action_denied_status_text(
+                Some("Run: rm -rf /tmp/dexter-test"),
+                "operator rejected the action"
+            ),
+            "Action denied before execution: Run: rm -rf /tmp/dexter-test."
+        );
+    }
+
+    #[test]
+    fn action_completion_status_text_uses_action_description() {
+        assert_eq!(
+            action_completion_status_text(Some("Run: echo hello"), "Done."),
+            "Action completed: Run: echo hello."
+        );
+    }
+
+    #[test]
+    fn action_context_status_text_formats_tool_result_payload() {
+        assert_eq!(
+            action_context_status_text("Action result", "Action completed: Run: echo hi."),
+            "[Action result: Action completed: Run: echo hi.]"
+        );
+    }
+
+    #[test]
+    fn action_context_label_separates_denied_from_failed() {
+        let failed = ActionOutcome::Rejected {
+            action_id: "a".to_string(),
+            error: "boom".to_string(),
+        };
+        assert_eq!(
+            action_context_label(&failed, Some(true)),
+            Some("Action FAILED")
+        );
+        assert_eq!(action_context_label(&failed, None), Some("Action FAILED"));
+        assert_eq!(
+            action_context_label(&failed, Some(false)),
+            Some("Action denied")
+        );
+
+        let completed = ActionOutcome::Completed {
+            action_id: "b".to_string(),
+            output: String::new(),
+            rewritten_to: None,
+        };
+        assert_eq!(
+            action_context_label(&completed, None),
+            Some("Action result")
+        );
     }
 
     // ── Phase 9: Retrieval pipeline integration tests ─────────────────────────

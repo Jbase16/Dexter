@@ -21,6 +21,48 @@ fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAP
   typealias Version = _2
 }
 
+enum Dexter_V1_RestartComponent: SwiftProtobuf.Enum, Swift.CaseIterable {
+  typealias RawValue = Int
+  case unspecified // = 0
+  case stt // = 1
+  case tts // = 2
+  case browser // = 3
+  case UNRECOGNIZED(Int)
+
+  init() {
+    self = .unspecified
+  }
+
+  init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .stt
+    case 2: self = .tts
+    case 3: self = .browser
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .stt: return 1
+    case .tts: return 2
+    case .browser: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  static let allCases: [Dexter_V1_RestartComponent] = [
+    .unspecified,
+    .stt,
+    .tts,
+    .browser,
+  ]
+
+}
+
 enum Dexter_V1_UIActionType: SwiftProtobuf.Enum, Swift.CaseIterable {
   typealias RawValue = Int
   case unspecified // = 0
@@ -282,6 +324,172 @@ struct Dexter_V1_PingResponse: Sendable {
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
+}
+
+struct Dexter_V1_HealthRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_HealthResponse: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String {
+    get {_storage._traceID}
+    set {_uniqueStorage()._traceID = newValue}
+  }
+
+  var coreVersion: String {
+    get {_storage._coreVersion}
+    set {_uniqueStorage()._coreVersion = newValue}
+  }
+
+  /// ready | degraded
+  var status: String {
+    get {_storage._status}
+    set {_uniqueStorage()._status = newValue}
+  }
+
+  var degradedComponents: [String] {
+    get {_storage._degradedComponents}
+    set {_uniqueStorage()._degradedComponents = newValue}
+  }
+
+  var socket: String {
+    get {_storage._socket}
+    set {_uniqueStorage()._socket = newValue}
+  }
+
+  var shellSocket: String {
+    get {_storage._shellSocket}
+    set {_uniqueStorage()._shellSocket = newValue}
+  }
+
+  var configPath: String {
+    get {_storage._configPath}
+    set {_uniqueStorage()._configPath = newValue}
+  }
+
+  var stateDir: String {
+    get {_storage._stateDir}
+    set {_uniqueStorage()._stateDir = newValue}
+  }
+
+  var personalityPath: String {
+    get {_storage._personalityPath}
+    set {_uniqueStorage()._personalityPath = newValue}
+  }
+
+  var ollamaURL: String {
+    get {_storage._ollamaURL}
+    set {_uniqueStorage()._ollamaURL = newValue}
+  }
+
+  var fastModel: String {
+    get {_storage._fastModel}
+    set {_uniqueStorage()._fastModel = newValue}
+  }
+
+  var primaryModel: String {
+    get {_storage._primaryModel}
+    set {_uniqueStorage()._primaryModel = newValue}
+  }
+
+  var embedModel: String {
+    get {_storage._embedModel}
+    set {_uniqueStorage()._embedModel = newValue}
+  }
+
+  var fastModelWarm: Bool {
+    get {_storage._fastModelWarm}
+    set {_uniqueStorage()._fastModelWarm = newValue}
+  }
+
+  var primaryModelWarm: Bool {
+    get {_storage._primaryModelWarm}
+    set {_uniqueStorage()._primaryModelWarm = newValue}
+  }
+
+  var embedModelWarm: Bool {
+    get {_storage._embedModelWarm}
+    set {_uniqueStorage()._embedModelWarm = newValue}
+  }
+
+  /// ready | degraded | pending
+  var sttWorker: String {
+    get {_storage._sttWorker}
+    set {_uniqueStorage()._sttWorker = newValue}
+  }
+
+  /// ready | degraded | pending
+  var ttsWorker: String {
+    get {_storage._ttsWorker}
+    set {_uniqueStorage()._ttsWorker = newValue}
+  }
+
+  /// ready | degraded | pending
+  var browserWorker: String {
+    get {_storage._browserWorker}
+    set {_uniqueStorage()._browserWorker = newValue}
+  }
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+struct Dexter_V1_RestartComponentRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var component: Dexter_V1_RestartComponent = .unspecified
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_RestartComponentResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var component: Dexter_V1_RestartComponent = .unspecified
+
+  var success: Bool = false
+
+  var message: String = String()
+
+  var health: Dexter_V1_HealthResponse {
+    get {_health ?? Dexter_V1_HealthResponse()}
+    set {_health = newValue}
+  }
+  /// Returns true if `health` has been explicitly set.
+  var hasHealth: Bool {self._health != nil}
+  /// Clears the value of `health`. Subsequent reads from it will return its default value.
+  mutating func clearHealth() {self._health = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _health: Dexter_V1_HealthResponse? = nil
 }
 
 struct Dexter_V1_ClientEvent: Sendable {
@@ -700,6 +908,10 @@ struct Dexter_V1_ConfigSync: Sendable {
 
 fileprivate let _protobuf_package = "dexter.v1"
 
+extension Dexter_V1_RestartComponent: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0RESTART_COMPONENT_UNSPECIFIED\0\u{1}RESTART_COMPONENT_STT\0\u{1}RESTART_COMPONENT_TTS\0\u{1}RESTART_COMPONENT_BROWSER\0")
+}
+
 extension Dexter_V1_UIActionType: SwiftProtobuf._ProtoNameProviding {
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UI_ACTION_TYPE_UNSPECIFIED\0\u{1}UI_ACTION_TYPE_DISMISS\0\u{1}UI_ACTION_TYPE_DRAG\0\u{1}UI_ACTION_TYPE_RESIZE\0")
 }
@@ -776,6 +988,317 @@ extension Dexter_V1_PingResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   static func ==(lhs: Dexter_V1_PingResponse, rhs: Dexter_V1_PingResponse) -> Bool {
     if lhs.traceID != rhs.traceID {return false}
     if lhs.coreVersion != rhs.coreVersion {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".HealthRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_HealthRequest, rhs: Dexter_V1_HealthRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".HealthResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0")
+
+  fileprivate class _StorageClass {
+    var _traceID: String = String()
+    var _coreVersion: String = String()
+    var _status: String = String()
+    var _degradedComponents: [String] = []
+    var _socket: String = String()
+    var _shellSocket: String = String()
+    var _configPath: String = String()
+    var _stateDir: String = String()
+    var _personalityPath: String = String()
+    var _ollamaURL: String = String()
+    var _fastModel: String = String()
+    var _primaryModel: String = String()
+    var _embedModel: String = String()
+    var _fastModelWarm: Bool = false
+    var _primaryModelWarm: Bool = false
+    var _embedModelWarm: Bool = false
+    var _sttWorker: String = String()
+    var _ttsWorker: String = String()
+    var _browserWorker: String = String()
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _traceID = source._traceID
+      _coreVersion = source._coreVersion
+      _status = source._status
+      _degradedComponents = source._degradedComponents
+      _socket = source._socket
+      _shellSocket = source._shellSocket
+      _configPath = source._configPath
+      _stateDir = source._stateDir
+      _personalityPath = source._personalityPath
+      _ollamaURL = source._ollamaURL
+      _fastModel = source._fastModel
+      _primaryModel = source._primaryModel
+      _embedModel = source._embedModel
+      _fastModelWarm = source._fastModelWarm
+      _primaryModelWarm = source._primaryModelWarm
+      _embedModelWarm = source._embedModelWarm
+      _sttWorker = source._sttWorker
+      _ttsWorker = source._ttsWorker
+      _browserWorker = source._browserWorker
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._traceID) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._coreVersion) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._status) }()
+        case 4: try { try decoder.decodeRepeatedStringField(value: &_storage._degradedComponents) }()
+        case 5: try { try decoder.decodeSingularStringField(value: &_storage._socket) }()
+        case 6: try { try decoder.decodeSingularStringField(value: &_storage._shellSocket) }()
+        case 7: try { try decoder.decodeSingularStringField(value: &_storage._configPath) }()
+        case 8: try { try decoder.decodeSingularStringField(value: &_storage._stateDir) }()
+        case 9: try { try decoder.decodeSingularStringField(value: &_storage._personalityPath) }()
+        case 10: try { try decoder.decodeSingularStringField(value: &_storage._ollamaURL) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._fastModel) }()
+        case 12: try { try decoder.decodeSingularStringField(value: &_storage._primaryModel) }()
+        case 13: try { try decoder.decodeSingularStringField(value: &_storage._embedModel) }()
+        case 14: try { try decoder.decodeSingularBoolField(value: &_storage._fastModelWarm) }()
+        case 15: try { try decoder.decodeSingularBoolField(value: &_storage._primaryModelWarm) }()
+        case 16: try { try decoder.decodeSingularBoolField(value: &_storage._embedModelWarm) }()
+        case 17: try { try decoder.decodeSingularStringField(value: &_storage._sttWorker) }()
+        case 18: try { try decoder.decodeSingularStringField(value: &_storage._ttsWorker) }()
+        case 19: try { try decoder.decodeSingularStringField(value: &_storage._browserWorker) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      if !_storage._traceID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._traceID, fieldNumber: 1)
+      }
+      if !_storage._coreVersion.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._coreVersion, fieldNumber: 2)
+      }
+      if !_storage._status.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._status, fieldNumber: 3)
+      }
+      if !_storage._degradedComponents.isEmpty {
+        try visitor.visitRepeatedStringField(value: _storage._degradedComponents, fieldNumber: 4)
+      }
+      if !_storage._socket.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._socket, fieldNumber: 5)
+      }
+      if !_storage._shellSocket.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._shellSocket, fieldNumber: 6)
+      }
+      if !_storage._configPath.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._configPath, fieldNumber: 7)
+      }
+      if !_storage._stateDir.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._stateDir, fieldNumber: 8)
+      }
+      if !_storage._personalityPath.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._personalityPath, fieldNumber: 9)
+      }
+      if !_storage._ollamaURL.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._ollamaURL, fieldNumber: 10)
+      }
+      if !_storage._fastModel.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._fastModel, fieldNumber: 11)
+      }
+      if !_storage._primaryModel.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._primaryModel, fieldNumber: 12)
+      }
+      if !_storage._embedModel.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._embedModel, fieldNumber: 13)
+      }
+      if _storage._fastModelWarm != false {
+        try visitor.visitSingularBoolField(value: _storage._fastModelWarm, fieldNumber: 14)
+      }
+      if _storage._primaryModelWarm != false {
+        try visitor.visitSingularBoolField(value: _storage._primaryModelWarm, fieldNumber: 15)
+      }
+      if _storage._embedModelWarm != false {
+        try visitor.visitSingularBoolField(value: _storage._embedModelWarm, fieldNumber: 16)
+      }
+      if !_storage._sttWorker.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._sttWorker, fieldNumber: 17)
+      }
+      if !_storage._ttsWorker.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._ttsWorker, fieldNumber: 18)
+      }
+      if !_storage._browserWorker.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._browserWorker, fieldNumber: 19)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_HealthResponse, rhs: Dexter_V1_HealthResponse) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._traceID != rhs_storage._traceID {return false}
+        if _storage._coreVersion != rhs_storage._coreVersion {return false}
+        if _storage._status != rhs_storage._status {return false}
+        if _storage._degradedComponents != rhs_storage._degradedComponents {return false}
+        if _storage._socket != rhs_storage._socket {return false}
+        if _storage._shellSocket != rhs_storage._shellSocket {return false}
+        if _storage._configPath != rhs_storage._configPath {return false}
+        if _storage._stateDir != rhs_storage._stateDir {return false}
+        if _storage._personalityPath != rhs_storage._personalityPath {return false}
+        if _storage._ollamaURL != rhs_storage._ollamaURL {return false}
+        if _storage._fastModel != rhs_storage._fastModel {return false}
+        if _storage._primaryModel != rhs_storage._primaryModel {return false}
+        if _storage._embedModel != rhs_storage._embedModel {return false}
+        if _storage._fastModelWarm != rhs_storage._fastModelWarm {return false}
+        if _storage._primaryModelWarm != rhs_storage._primaryModelWarm {return false}
+        if _storage._embedModelWarm != rhs_storage._embedModelWarm {return false}
+        if _storage._sttWorker != rhs_storage._sttWorker {return false}
+        if _storage._ttsWorker != rhs_storage._ttsWorker {return false}
+        if _storage._browserWorker != rhs_storage._browserWorker {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_RestartComponentRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".RestartComponentRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}component\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.component) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if self.component != .unspecified {
+      try visitor.visitSingularEnumField(value: self.component, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_RestartComponentRequest, rhs: Dexter_V1_RestartComponentRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.component != rhs.component {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_RestartComponentResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".RestartComponentResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}component\0\u{1}success\0\u{1}message\0\u{1}health\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.component) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.success) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._health) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if self.component != .unspecified {
+      try visitor.visitSingularEnumField(value: self.component, fieldNumber: 2)
+    }
+    if self.success != false {
+      try visitor.visitSingularBoolField(value: self.success, fieldNumber: 3)
+    }
+    if !self.message.isEmpty {
+      try visitor.visitSingularStringField(value: self.message, fieldNumber: 4)
+    }
+    try { if let v = self._health {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_RestartComponentResponse, rhs: Dexter_V1_RestartComponentResponse) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.component != rhs.component {return false}
+    if lhs.success != rhs.success {return false}
+    if lhs.message != rhs.message {return false}
+    if lhs._health != rhs._health {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

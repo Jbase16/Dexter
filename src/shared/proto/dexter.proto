@@ -5,6 +5,14 @@ service DexterService {
   // Liveness probe and version handshake. Called once at connection time.
   rpc Ping(PingRequest) returns (PingResponse);
 
+  // Cheap daemon health snapshot. No session stream, no model generation, and
+  // no side effects beyond logging the request.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Operator-triggered recovery for daemon-lifetime lightweight workers.
+  // No model action path, no session stream, and no model generation.
+  rpc RestartComponent(RestartComponentRequest) returns (RestartComponentResponse);
+
   // Bidirectional session stream.
   // Swift sends ClientEvents (user text, UI actions, context observations, action approvals).
   // Rust sends ServerEvents (responses, entity state changes, action requests, audio).
@@ -22,6 +30,57 @@ service DexterService {
 
 message PingRequest  { string trace_id = 1; }
 message PingResponse { string trace_id = 1; string core_version = 2; }
+
+// ── Health ───────────────────────────────────────────────────────────────────
+
+message HealthRequest { string trace_id = 1; }
+
+message HealthResponse {
+  string trace_id = 1;
+  string core_version = 2;
+  string status = 3;  // ready | degraded
+  repeated string degraded_components = 4;
+
+  string socket = 5;
+  string shell_socket = 6;
+  string config_path = 7;
+  string state_dir = 8;
+  string personality_path = 9;
+  string ollama_url = 10;
+
+  string fast_model = 11;
+  string primary_model = 12;
+  string embed_model = 13;
+  bool fast_model_warm = 14;
+  bool primary_model_warm = 15;
+  bool embed_model_warm = 16;
+
+  string stt_worker = 17;      // ready | degraded | pending
+  string tts_worker = 18;      // ready | degraded | pending
+  string browser_worker = 19;  // ready | degraded | pending
+}
+
+// ── Restart component ────────────────────────────────────────────────────────
+
+message RestartComponentRequest {
+  string trace_id = 1;
+  RestartComponent component = 2;
+}
+
+message RestartComponentResponse {
+  string trace_id = 1;
+  RestartComponent component = 2;
+  bool success = 3;
+  string message = 4;
+  HealthResponse health = 5;
+}
+
+enum RestartComponent {
+  RESTART_COMPONENT_UNSPECIFIED = 0;
+  RESTART_COMPONENT_STT = 1;
+  RESTART_COMPONENT_TTS = 2;
+  RESTART_COMPONENT_BROWSER = 3;
+}
 
 // ── Session stream — client events ────────────────────────────────────────────
 

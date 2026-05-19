@@ -22,7 +22,7 @@ SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli live-smoke-cli live-smoke-action-matrix live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli doctor actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-recovery live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -110,6 +110,39 @@ cli:
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-cli
 	@echo "==> dexter-cli ready: $(RUST_CORE_DIR)/target/release/dexter-cli --help"
 
+## doctor: build dexter-cli and run the lightweight daemon diagnostic
+doctor: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --doctor
+
+## actions-last: build dexter-cli and print the latest local action receipt
+actions-last: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --actions last
+
+## actions-recent: build dexter-cli and print recent local action receipts
+actions-recent: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --actions recent --limit 20
+
+## restart-stt: restart the daemon-lifetime STT worker, then print post-restart health
+restart-stt: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --restart-component stt
+
+## restart-tts: restart the daemon-lifetime TTS worker, then print post-restart health
+restart-tts: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --restart-component tts
+
+## restart-browser: restart the daemon-lifetime browser worker, then print post-restart health
+restart-browser: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --restart-component browser
+
+## live-smoke-recovery: run automated worker recovery smoke (starts Rust core, no Swift UI)
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
+## /tmp/dexter-recovery-smoke.log, waits for doctor OK, restarts browser/TTS/STT,
+## verifies doctor after every restart, then stops the core.
+live-smoke-recovery: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-recovery-smoke.sh --start-core
+
 ## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
@@ -127,6 +160,14 @@ live-smoke-cli: ensure-core-not-running
 live-smoke-action-matrix: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-cli-smoke.sh --start-core --action-matrix
+
+## live-smoke-action-receipts: run live audit receipt regression (starts Rust core, no Swift UI)
+##
+## Drives safe, denied, and approved synthetic actions, then asserts
+## `dexter-cli --actions recent/last` can inspect the resulting audit receipts.
+live-smoke-action-receipts: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-action-receipts-smoke.sh --start-core
 
 ## live-smoke-message-contact: opt-in Contacts-backed iMessage approval smoke
 ##
@@ -198,8 +239,10 @@ live-smoke-barge-in: ensure-core-not-running
 ## than sharing one daemon so a leaked worker/socket in one smoke fails the next
 ## target instead of being hidden by shared process state.
 live-smoke-all:
+	$(MAKE) live-smoke-recovery
 	$(MAKE) live-smoke-cli
 	$(MAKE) live-smoke-action-matrix
+	$(MAKE) live-smoke-action-receipts
 	$(MAKE) live-smoke-hud
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel

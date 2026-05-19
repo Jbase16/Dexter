@@ -1,6 +1,9 @@
 use std::{
     pin::Pin,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use tokio::{
@@ -17,13 +20,12 @@ use uuid::Uuid;
 
 use crate::{
     action::ActionResult,
-    config::DexterConfig,
+    config::{resolve_config_path, DexterConfig},
     constants::{
-        BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH,
-        VOICE_WORKER_HEALTH_INTERVAL_SECS,
+        BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, SHELL_SOCKET_PATH, VOICE_PYTHON_EXE,
+        VOICE_STT_WORKER_PATH, VOICE_WORKER_HEALTH_INTERVAL_SECS,
     },
-    orchestrator::CoreOrchestrator,
-    orchestrator::GenerationResult,
+    orchestrator::{CoreOrchestrator, GenerationResult, SharedDaemonState},
     voice::{worker_client::WorkerClient, WorkerType},
 };
 
@@ -34,7 +36,8 @@ pub mod proto {
 
 use proto::{
     dexter_service_server::{DexterService, DexterServiceServer},
-    AudioChunk, ClientEvent, EntityState, EntityStateChange, PingRequest, PingResponse,
+    AudioChunk, ClientEvent, EntityState, EntityStateChange, HealthRequest, HealthResponse,
+    PingRequest, PingResponse, RestartComponent, RestartComponentRequest, RestartComponentResponse,
     ServerEvent, TranscriptChunk,
 };
 
@@ -44,6 +47,230 @@ fn is_benign_session_stream_close(status: &Status) -> bool {
         && (message.contains("h2 protocol error: error reading a body from connection")
             || message.contains("operation was canceled")
             || message.contains("stream closed"))
+}
+
+// ── Startup health summary ───────────────────────────────────────────────────
+
+const STARTUP_HEALTH_STT_WAIT_SECS: u64 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentStartupStatus {
+    Ready,
+    Degraded,
+    Pending,
+}
+
+impl ComponentStartupStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Pending => "pending",
+        }
+    }
+
+    fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupHealthSnapshot {
+    fast_model: String,
+    primary_model: String,
+    embed_model: String,
+    fast_model_warm: bool,
+    primary_model_warm: bool,
+    embed_model_warm: bool,
+    stt_worker: ComponentStartupStatus,
+    tts_worker: ComponentStartupStatus,
+    browser_worker: ComponentStartupStatus,
+}
+
+impl StartupHealthSnapshot {
+    fn from_runtime(
+        cfg: &DexterConfig,
+        shared: &SharedDaemonState,
+        stt_worker: ComponentStartupStatus,
+    ) -> Self {
+        Self {
+            fast_model: cfg.models.fast.clone(),
+            primary_model: cfg.models.primary.clone(),
+            embed_model: cfg.models.embed.clone(),
+            fast_model_warm: shared.fast_model_warm.load(Ordering::SeqCst),
+            primary_model_warm: shared.primary_model_warm.load(Ordering::SeqCst),
+            embed_model_warm: shared.embed_model_warm.load(Ordering::SeqCst),
+            stt_worker,
+            tts_worker: component_status(shared.voice.is_tts_available()),
+            browser_worker: component_status(shared.browser.is_available()),
+        }
+    }
+
+    fn overall_status(&self) -> &'static str {
+        if self.degraded_components().is_empty() {
+            "ready"
+        } else {
+            "degraded"
+        }
+    }
+
+    fn degraded_components(&self) -> Vec<&'static str> {
+        let mut components = Vec::new();
+        if !self.fast_model_warm {
+            components.push("fast_model");
+        }
+        if !self.primary_model_warm {
+            components.push("primary_model");
+        }
+        if !self.embed_model_warm {
+            components.push("embed_model");
+        }
+        if !self.stt_worker.is_ready() {
+            components.push("stt_worker");
+        }
+        if !self.tts_worker.is_ready() {
+            components.push("tts_worker");
+        }
+        if !self.browser_worker.is_ready() {
+            components.push("browser_worker");
+        }
+        components
+    }
+
+    fn degraded_components_label(&self) -> String {
+        let components = self.degraded_components();
+        if components.is_empty() {
+            "none".to_string()
+        } else {
+            components.join(",")
+        }
+    }
+
+    fn degraded_components_owned(&self) -> Vec<String> {
+        self.degraded_components()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn into_health_response(
+        self,
+        trace_id: String,
+        cfg: &DexterConfig,
+        config_path: String,
+    ) -> HealthResponse {
+        let status = self.overall_status().to_string();
+        let degraded_components = self.degraded_components_owned();
+        HealthResponse {
+            trace_id,
+            core_version: CORE_VERSION.to_string(),
+            status,
+            degraded_components,
+            socket: cfg.core.socket_path.clone(),
+            shell_socket: SHELL_SOCKET_PATH.to_string(),
+            config_path,
+            state_dir: cfg.core.state_dir.display().to_string(),
+            personality_path: cfg.core.personality_path.clone(),
+            ollama_url: cfg.inference.ollama_base_url.clone(),
+            fast_model: self.fast_model,
+            primary_model: self.primary_model,
+            embed_model: self.embed_model,
+            fast_model_warm: self.fast_model_warm,
+            primary_model_warm: self.primary_model_warm,
+            embed_model_warm: self.embed_model_warm,
+            stt_worker: self.stt_worker.as_str().to_string(),
+            tts_worker: self.tts_worker.as_str().to_string(),
+            browser_worker: self.browser_worker.as_str().to_string(),
+        }
+    }
+}
+
+fn component_status(is_ready: bool) -> ComponentStartupStatus {
+    if is_ready {
+        ComponentStartupStatus::Ready
+    } else {
+        ComponentStartupStatus::Degraded
+    }
+}
+
+fn stt_startup_status(
+    stt_ready: &AtomicBool,
+    stt_prewarm_complete: &AtomicBool,
+) -> ComponentStartupStatus {
+    if stt_ready.load(Ordering::SeqCst) {
+        ComponentStartupStatus::Ready
+    } else if stt_prewarm_complete.load(Ordering::SeqCst) {
+        ComponentStartupStatus::Degraded
+    } else {
+        ComponentStartupStatus::Pending
+    }
+}
+
+async fn log_startup_health_summary(
+    cfg: Arc<DexterConfig>,
+    shared: SharedDaemonState,
+    stt_ready: Arc<AtomicBool>,
+    stt_prewarm_complete: Arc<AtomicBool>,
+) {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(STARTUP_HEALTH_STT_WAIT_SECS);
+    while !stt_prewarm_complete.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let stt_worker = stt_startup_status(&stt_ready, &stt_prewarm_complete);
+    let snapshot = StartupHealthSnapshot::from_runtime(&cfg, &shared, stt_worker);
+    let status = snapshot.overall_status();
+    let degraded_components = snapshot.degraded_components_label();
+    let config_path = resolve_config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|e| format!("unresolved: {e}"));
+
+    if status == "ready" {
+        info!(
+            status = %status,
+            degraded_components = %degraded_components,
+            version = CORE_VERSION,
+            socket = %cfg.core.socket_path,
+            shell_socket = SHELL_SOCKET_PATH,
+            config_path = %config_path,
+            state_dir = %cfg.core.state_dir.display(),
+            personality_path = %cfg.core.personality_path,
+            ollama_url = %cfg.inference.ollama_base_url,
+            fast_model = %snapshot.fast_model,
+            primary_model = %snapshot.primary_model,
+            embed_model = %snapshot.embed_model,
+            fast_model_warm = snapshot.fast_model_warm,
+            primary_model_warm = snapshot.primary_model_warm,
+            embed_model_warm = snapshot.embed_model_warm,
+            stt_worker = snapshot.stt_worker.as_str(),
+            tts_worker = snapshot.tts_worker.as_str(),
+            browser_worker = snapshot.browser_worker.as_str(),
+            "Dexter startup health summary"
+        );
+    } else {
+        warn!(
+            status = %status,
+            degraded_components = %degraded_components,
+            version = CORE_VERSION,
+            socket = %cfg.core.socket_path,
+            shell_socket = SHELL_SOCKET_PATH,
+            config_path = %config_path,
+            state_dir = %cfg.core.state_dir.display(),
+            personality_path = %cfg.core.personality_path,
+            ollama_url = %cfg.inference.ollama_base_url,
+            fast_model = %snapshot.fast_model,
+            primary_model = %snapshot.primary_model,
+            embed_model = %snapshot.embed_model,
+            fast_model_warm = snapshot.fast_model_warm,
+            primary_model_warm = snapshot.primary_model_warm,
+            embed_model_warm = snapshot.embed_model_warm,
+            stt_worker = snapshot.stt_worker.as_str(),
+            tts_worker = snapshot.tts_worker.as_str(),
+            browser_worker = snapshot.browser_worker.as_str(),
+            "Dexter startup health summary — degraded components present"
+        );
+    }
 }
 
 // ── Internal fast-path events ─────────────────────────────────────────────────
@@ -231,24 +458,34 @@ pub struct CoreService {
     /// each session spawning its own. See `SharedDaemonState` doc for the full
     /// architecture rationale.
     shared: crate::orchestrator::SharedDaemonState,
+    /// STT prewarm readiness for health diagnostics. Kept outside the worker mutex so
+    /// `Health()` can report status without blocking on an active utterance.
+    stt_ready: Arc<AtomicBool>,
+    stt_prewarm_complete: Arc<AtomicBool>,
 }
 
 impl CoreService {
     pub fn new(cfg: Arc<DexterConfig>) -> Self {
         let stt: Arc<Mutex<Option<WorkerClient>>> = Arc::new(Mutex::new(None));
+        let stt_ready = Arc::new(AtomicBool::new(false));
+        let stt_prewarm_complete = Arc::new(AtomicBool::new(false));
         // Pre-warm the STT worker in the background — model load takes ~8 s.
         // stream_audio() falls back to on-demand spawn if this hasn't completed.
         let stt_warm = stt.clone();
+        let stt_ready_warm = stt_ready.clone();
+        let stt_prewarm_complete_warm = stt_prewarm_complete.clone();
         tokio::spawn(async move {
             match WorkerClient::spawn(WorkerType::Stt, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH)
                 .await
             {
                 Ok(client) => {
                     *stt_warm.lock().await = Some(client);
+                    stt_ready_warm.store(true, Ordering::SeqCst);
                     info!("STT worker pre-warmed and ready");
                 }
                 Err(e) => warn!(error = %e, "STT pre-warm failed — will spawn on first utterance"),
             }
+            stt_prewarm_complete_warm.store(true, Ordering::SeqCst);
         });
 
         // Phase 38c: construct daemon-lifetime shared state and spawn the
@@ -257,8 +494,19 @@ impl CoreService {
         let shared = crate::orchestrator::SharedDaemonState::new_degraded();
         let shared_for_warmup = shared.clone();
         let cfg_for_warmup = cfg.clone();
+        let stt_ready_for_summary = stt_ready.clone();
+        let stt_prewarm_complete_for_summary = stt_prewarm_complete.clone();
         tokio::spawn(async move {
-            shared_for_warmup.run_startup_warmup(cfg_for_warmup).await;
+            shared_for_warmup
+                .run_startup_warmup(cfg_for_warmup.clone())
+                .await;
+            log_startup_health_summary(
+                cfg_for_warmup,
+                shared_for_warmup,
+                stt_ready_for_summary,
+                stt_prewarm_complete_for_summary,
+            )
+            .await;
         });
 
         let service = Self {
@@ -266,6 +514,8 @@ impl CoreService {
             stt,
             orchestrator_tx: Arc::new(Mutex::new(None)),
             shared,
+            stt_ready,
+            stt_prewarm_complete,
         };
 
         // Phase 30: spawn shell context listener. Accepts one-shot connections from the
@@ -276,6 +526,40 @@ impl CoreService {
         tokio::spawn(run_shell_listener(shell_tx));
 
         service
+    }
+
+    fn health_response_for_trace(&self, trace_id: String) -> HealthResponse {
+        let stt_worker = stt_startup_status(&self.stt_ready, &self.stt_prewarm_complete);
+        let snapshot = StartupHealthSnapshot::from_runtime(&self.cfg, &self.shared, stt_worker);
+        let config_path = resolve_config_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|e| format!("unresolved: {e}"));
+        snapshot.into_health_response(trace_id, &self.cfg, config_path)
+    }
+
+    async fn restart_stt_now(&self) -> bool {
+        self.stt_ready.store(false, Ordering::SeqCst);
+        self.stt_prewarm_complete.store(false, Ordering::SeqCst);
+
+        let existing = self.stt.lock().await.take();
+        if let Some(client) = existing {
+            client.shutdown().await;
+        }
+
+        match WorkerClient::spawn(WorkerType::Stt, VOICE_PYTHON_EXE, VOICE_STT_WORKER_PATH).await {
+            Ok(client) => {
+                *self.stt.lock().await = Some(client);
+                self.stt_ready.store(true, Ordering::SeqCst);
+                self.stt_prewarm_complete.store(true, Ordering::SeqCst);
+                info!("STT worker restarted by operator request");
+                true
+            }
+            Err(e) => {
+                self.stt_prewarm_complete.store(true, Ordering::SeqCst);
+                warn!(error = %e, "STT worker restart failed by operator request");
+                false
+            }
+        }
     }
 
     // Phase 38c: daemon shutdown of shared workers happens implicitly via
@@ -303,6 +587,97 @@ impl DexterService for CoreService {
         Ok(Response::new(PingResponse {
             trace_id,
             core_version: CORE_VERSION.to_string(),
+        }))
+    }
+
+    async fn health(
+        &self,
+        request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        let trace_id = request.into_inner().trace_id;
+        let health = self.health_response_for_trace(trace_id.clone());
+
+        info!(
+            trace_id = %trace_id,
+            status = %health.status,
+            degraded_components = %health.degraded_components.join(","),
+            "Health snapshot requested"
+        );
+
+        Ok(Response::new(health))
+    }
+
+    async fn restart_component(
+        &self,
+        request: Request<RestartComponentRequest>,
+    ) -> Result<Response<RestartComponentResponse>, Status> {
+        let req = request.into_inner();
+        let trace_id = req.trace_id;
+        let component =
+            RestartComponent::try_from(req.component).unwrap_or(RestartComponent::Unspecified);
+
+        info!(
+            trace_id = %trace_id,
+            component = ?component,
+            "Component restart requested"
+        );
+
+        let (success, message) = match component {
+            RestartComponent::Stt => {
+                let success = self.restart_stt_now().await;
+                (
+                    success,
+                    if success {
+                        "STT worker restarted".to_string()
+                    } else {
+                        "STT worker restart failed".to_string()
+                    },
+                )
+            }
+            RestartComponent::Tts => {
+                let success = self.shared.voice.restart_tts_now().await;
+                (
+                    success,
+                    if success {
+                        "TTS worker restarted".to_string()
+                    } else {
+                        "TTS worker restart failed".to_string()
+                    },
+                )
+            }
+            RestartComponent::Browser => {
+                let success = self.shared.browser.restart_now().await;
+                (
+                    success,
+                    if success {
+                        "Browser worker restarted".to_string()
+                    } else {
+                        "Browser worker restart failed".to_string()
+                    },
+                )
+            }
+            RestartComponent::Unspecified => {
+                return Err(Status::invalid_argument(
+                    "restart_component requires stt, tts, or browser",
+                ));
+            }
+        };
+
+        let health = self.health_response_for_trace(trace_id.clone());
+        info!(
+            trace_id = %trace_id,
+            component = ?component,
+            success,
+            health_status = %health.status,
+            "Component restart complete"
+        );
+
+        Ok(Response::new(RestartComponentResponse {
+            trace_id,
+            component: component as i32,
+            success,
+            message,
+            health: Some(health),
         }))
     }
 
@@ -642,6 +1017,8 @@ impl DexterService for CoreService {
         let (tx, rx) = mpsc::channel::<Result<TranscriptChunk, Status>>(16);
         let stt_arc = self.stt.clone();
         let orchestrator_tx_fp = self.orchestrator_tx.clone();
+        let stt_ready = self.stt_ready.clone();
+        let stt_prewarm_complete = self.stt_prewarm_complete.clone();
 
         tokio::spawn(async move {
             // Acquire the persistent STT worker.  If not yet ready, spawn on-demand.
@@ -653,8 +1030,11 @@ impl DexterService for CoreService {
                     Ok(c) => {
                         info!("STT worker ready (on-demand spawn)");
                         *guard = Some(c);
+                        stt_ready.store(true, Ordering::SeqCst);
+                        stt_prewarm_complete.store(true, Ordering::SeqCst);
                     }
                     Err(e) => {
+                        stt_prewarm_complete.store(true, Ordering::SeqCst);
                         warn!(error = %e, "STT worker unavailable — returning empty transcript");
                         return;
                     }
@@ -756,6 +1136,8 @@ impl DexterService for CoreService {
                 // Worker died — clear slot so next call re-spawns cleanly.
                 warn!("STT worker died — clearing for restart on next utterance");
                 *guard = None;
+                stt_ready.store(false, Ordering::SeqCst);
+                stt_prewarm_complete.store(true, Ordering::SeqCst);
             }
             // guard drops → mutex released. Worker stays alive for next utterance.
         });
@@ -808,6 +1190,122 @@ fn event_kind(event: &proto::client_event::Event) -> &'static str {
 }
 
 // ── Phase 30: parse_shell_payload unit tests ──────────────────────────────────
+
+#[cfg(test)]
+mod startup_health_tests {
+    use super::{
+        component_status, stt_startup_status, ComponentStartupStatus, DexterConfig,
+        StartupHealthSnapshot,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn component_status_maps_bool_to_label() {
+        assert_eq!(component_status(true), ComponentStartupStatus::Ready);
+        assert_eq!(component_status(false), ComponentStartupStatus::Degraded);
+        assert_eq!(ComponentStartupStatus::Ready.as_str(), "ready");
+        assert_eq!(ComponentStartupStatus::Degraded.as_str(), "degraded");
+        assert_eq!(ComponentStartupStatus::Pending.as_str(), "pending");
+    }
+
+    #[test]
+    fn stt_startup_status_distinguishes_pending_from_degraded() {
+        let ready = AtomicBool::new(false);
+        let complete = AtomicBool::new(false);
+        assert_eq!(
+            stt_startup_status(&ready, &complete),
+            ComponentStartupStatus::Pending
+        );
+
+        complete.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            stt_startup_status(&ready, &complete),
+            ComponentStartupStatus::Degraded
+        );
+
+        ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            stt_startup_status(&ready, &complete),
+            ComponentStartupStatus::Ready
+        );
+    }
+
+    #[test]
+    fn startup_health_snapshot_reports_degraded_components() {
+        let snapshot = StartupHealthSnapshot {
+            fast_model: "fast".to_string(),
+            primary_model: "primary".to_string(),
+            embed_model: "embed".to_string(),
+            fast_model_warm: true,
+            primary_model_warm: false,
+            embed_model_warm: true,
+            stt_worker: ComponentStartupStatus::Ready,
+            tts_worker: ComponentStartupStatus::Degraded,
+            browser_worker: ComponentStartupStatus::Ready,
+        };
+
+        assert_eq!(snapshot.overall_status(), "degraded");
+        assert_eq!(
+            snapshot.degraded_components(),
+            vec!["primary_model", "tts_worker"]
+        );
+        assert_eq!(
+            snapshot.degraded_components_label(),
+            "primary_model,tts_worker"
+        );
+    }
+
+    #[test]
+    fn startup_health_snapshot_ready_when_no_components_degraded() {
+        let snapshot = StartupHealthSnapshot {
+            fast_model: "fast".to_string(),
+            primary_model: "primary".to_string(),
+            embed_model: "embed".to_string(),
+            fast_model_warm: true,
+            primary_model_warm: true,
+            embed_model_warm: true,
+            stt_worker: ComponentStartupStatus::Ready,
+            tts_worker: ComponentStartupStatus::Ready,
+            browser_worker: ComponentStartupStatus::Ready,
+        };
+
+        assert_eq!(snapshot.overall_status(), "ready");
+        assert!(snapshot.degraded_components().is_empty());
+        assert_eq!(snapshot.degraded_components_label(), "none");
+    }
+
+    #[test]
+    fn startup_health_snapshot_builds_health_response() {
+        let snapshot = StartupHealthSnapshot {
+            fast_model: "fast".to_string(),
+            primary_model: "primary".to_string(),
+            embed_model: "embed".to_string(),
+            fast_model_warm: true,
+            primary_model_warm: true,
+            embed_model_warm: false,
+            stt_worker: ComponentStartupStatus::Ready,
+            tts_worker: ComponentStartupStatus::Ready,
+            browser_worker: ComponentStartupStatus::Degraded,
+        };
+        let cfg = DexterConfig::default();
+
+        let response = snapshot.into_health_response(
+            "trace-123".to_string(),
+            &cfg,
+            "/Users/jason/.dexter/config.toml".to_string(),
+        );
+
+        assert_eq!(response.trace_id, "trace-123");
+        assert_eq!(response.status, "degraded");
+        assert_eq!(
+            response.degraded_components,
+            vec!["embed_model".to_string(), "browser_worker".to_string()]
+        );
+        assert_eq!(response.embed_model, "embed");
+        assert_eq!(response.browser_worker, "degraded");
+        assert_eq!(response.config_path, "/Users/jason/.dexter/config.toml");
+    }
+}
 
 #[cfg(test)]
 mod shell_payload_tests {

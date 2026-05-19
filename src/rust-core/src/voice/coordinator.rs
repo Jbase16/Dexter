@@ -81,6 +81,27 @@ impl VoiceCoordinator {
         }
     }
 
+    /// Operator-triggered TTS recovery path.
+    ///
+    /// Drops any existing worker, clears permanent-degradation state, and attempts
+    /// one fresh spawn immediately. This is deliberately separate from the periodic
+    /// health-check restart path so `dexter-cli --restart-component tts` can recover
+    /// without waiting for the next timer tick or being blocked by a prior max-attempts
+    /// state.
+    pub async fn restart_tts_now(&self) -> bool {
+        self.tts_ready.store(false, Ordering::Relaxed);
+        self.permanently_degraded.store(false, Ordering::Relaxed);
+        self.restarts.store(0, Ordering::Relaxed);
+
+        let existing = self.tts.lock().await.take();
+        if let Some(client) = existing {
+            client.shutdown().await;
+        }
+
+        self.start_tts().await;
+        self.is_tts_available()
+    }
+
     /// True if the TTS worker is alive and ready. Lock-free.
     pub fn is_tts_available(&self) -> bool {
         self.tts_ready.load(Ordering::Relaxed)

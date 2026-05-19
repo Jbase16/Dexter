@@ -220,6 +220,8 @@ cd /Users/jason/Developer/Dex && make run
 cd src/rust-core && cargo build --release --bin dexter-cli
 ./target/release/dexter-cli "what's 2 plus 2"
 ./target/release/dexter-cli --quiet --auto-deny "rm -rf /tmp/foo"
+./target/release/dexter-cli --actions last
+./target/release/dexter-cli --actions recent --limit 20
 printf "q1\nq2\n" | ./target/release/dexter-cli
 ```
 
@@ -236,6 +238,55 @@ What the CLI deliberately does NOT cover: actual audio playback (no
 speakers), HUD visual rendering (markdown beautification, animated entity),
 voice-input pipeline (STT — needs real microphone). Everything else is
 identical to HUD typed input — same gRPC stream, same orchestrator code.
+
+`dexter-cli --actions last` and `dexter-cli --actions recent --limit N` are
+offline inspection commands. They read `{state_dir}/audit.jsonl` directly, so
+they work even when the daemon is stopped and do not generate model output.
+
+## Operator health and recovery
+
+`dexter-cli --doctor` is the first-line live diagnostic for daemon health. It
+does not open a session stream or generate model output; it pings the daemon,
+calls the `Health` RPC, checks worker/model readiness, and verifies Ollama.
+
+Operator commands:
+```bash
+cd /Users/jason/Developer/Dex
+make run-core          # Rust daemon only, no Swift UI
+make doctor            # build dexter-cli and print daemon health
+make actions-last      # print the latest local action receipt
+make actions-recent    # print the latest 20 local action receipts
+make restart-stt       # restart STT worker, then print post-restart health
+make restart-tts       # restart TTS worker, then print post-restart health
+make restart-browser   # restart browser worker, then print post-restart health
+make live-smoke-action-receipts
+```
+
+Equivalent direct CLI commands:
+```bash
+./src/rust-core/target/release/dexter-cli --doctor
+./src/rust-core/target/release/dexter-cli --actions last
+./src/rust-core/target/release/dexter-cli --actions recent --limit 20
+./src/rust-core/target/release/dexter-cli --restart-component stt
+./src/rust-core/target/release/dexter-cli --restart-component tts
+./src/rust-core/target/release/dexter-cli --restart-component browser
+```
+
+The recovery commands only restart daemon-lifetime Python workers. They do not
+unload, reload, or otherwise churn Ollama models. If `--doctor` reports a worker
+failure, it should print the matching restart command as a suggested fix.
+
+Regression command:
+```bash
+make live-smoke-recovery
+make live-smoke-action-receipts
+```
+
+The recovery smoke starts a release core without Swift UI, waits for `doctor`
+to report clean health, restarts browser/TTS/STT one by one, verifies `doctor`
+after each restart, and shuts the daemon down. The action-receipts smoke drives
+safe, denied, and approved synthetic actions, then verifies `--actions recent`
+and `--actions last` against the audit log.
 
 ## File pointers (orientation)
 

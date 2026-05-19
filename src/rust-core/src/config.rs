@@ -561,7 +561,11 @@ pub fn ensure_state_dir(state_dir: &Path) -> Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn resolve_config_path() -> Result<PathBuf> {
+/// Resolve the operator config file path (`~/.dexter/config.toml`).
+///
+/// Exposed for startup diagnostics so logs can point at the exact file Dexter
+/// attempted to load. `load()` still owns parsing and validation semantics.
+pub fn resolve_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context(
         "Cannot resolve home directory — HOME environment variable unset and no passwd entry found",
     )?;

@@ -220,6 +220,17 @@ impl ActionEngine {
         }
     }
 
+    /// Human-readable description for a pending approval, if the action is still queued.
+    ///
+    /// `PendingAction` stays private to keep the approval queue owned by
+    /// `ActionEngine`; callers only need the operator-facing label for receipts
+    /// and status messages.
+    pub fn pending_description(&self, action_id: &str) -> Option<String> {
+        self.pending_actions
+            .get(action_id)
+            .map(|pending| Self::describe(&pending.spec))
+    }
+
     // Phase 38c: `start_browser` removed — the browser worker is now spawned
     // at daemon startup via `SharedDaemonState::run_startup_warmup`. The
     // shared `BrowserCoordinator` is passed into `ActionEngine::new` and is
@@ -536,7 +547,14 @@ impl ActionEngine {
             ActionSpec::FileWrite { path, .. } => {
                 format!("Write: {}", path.display())
             }
-            ActionSpec::AppleScript { script, .. } => {
+            ActionSpec::AppleScript { script, rationale } => {
+                if let Some(rationale) = rationale
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return format!("AppleScript: {rationale}");
+                }
                 let preview: String = script.chars().take(80).collect();
                 format!("AppleScript: {}", preview)
             }
@@ -927,10 +945,47 @@ mod tests {
                     description.starts_with("AppleScript:"),
                     "unexpected description: {description}"
                 );
+                assert!(
+                    description.contains("Structured iMessage send to Test Contact"),
+                    "AppleScript descriptions should prefer rationale over script body: {description}"
+                );
                 assert_eq!(engine.pending_actions.len(), 1);
             }
             other => panic!("Messages send AppleScript must await approval: {other:?}"),
         }
+    }
+
+    #[test]
+    fn describe_applescript_prefers_rationale_over_script_preview() {
+        let spec = make_messages_send_applescript();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "AppleScript: Structured iMessage send to Test Contact"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_description_returns_label_for_queued_action() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let spec = ActionSpec::Shell {
+            args: vec!["echo".to_string(), "pending-description".to_string()],
+            working_dir: None,
+            rationale: None,
+            category_override: Some("destructive".to_string()),
+        };
+
+        let outcome = engine.submit(spec, "trace-pending-description").await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval { action_id, .. } => action_id,
+            other => panic!("expected PendingApproval, got: {other:?}"),
+        };
+
+        assert_eq!(
+            engine.pending_description(&action_id).as_deref(),
+            Some("Run: echo pending-description")
+        );
+        assert!(engine.pending_description("missing-action").is_none());
     }
 
     #[tokio::test]

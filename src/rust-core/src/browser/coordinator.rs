@@ -64,6 +64,24 @@ impl BrowserCoordinator {
         }
     }
 
+    /// Operator-triggered browser recovery path.
+    ///
+    /// Drops any existing worker, resets the restart counter, and attempts one fresh
+    /// spawn immediately. This bypasses the periodic backoff loop intentionally so
+    /// a human can recover browser automation from `dexter-cli --restart-component browser`.
+    pub async fn restart_now(&self) -> bool {
+        self.is_available.store(false, Ordering::Relaxed);
+        self.restart_count.store(0, Ordering::Relaxed);
+
+        let existing = self.client.lock().await.take();
+        if let Some(client) = existing {
+            client.shutdown().await;
+        }
+
+        self.start().await;
+        self.is_available()
+    }
+
     #[allow(dead_code)] // used in unit tests; available for future callers (e.g. degraded-mode UI feedback)
     pub fn is_available(&self) -> bool {
         self.is_available.load(Ordering::Relaxed)

@@ -32,6 +32,30 @@ internal enum Dexter_V1_DexterService: Sendable {
                 method: "Ping"
             )
         }
+        /// Namespace for "Health" metadata.
+        internal enum Health: Sendable {
+            /// Request type for "Health".
+            internal typealias Input = Dexter_V1_HealthRequest
+            /// Response type for "Health".
+            internal typealias Output = Dexter_V1_HealthResponse
+            /// Descriptor for "Health".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "Health"
+            )
+        }
+        /// Namespace for "RestartComponent" metadata.
+        internal enum RestartComponent: Sendable {
+            /// Request type for "RestartComponent".
+            internal typealias Input = Dexter_V1_RestartComponentRequest
+            /// Response type for "RestartComponent".
+            internal typealias Output = Dexter_V1_RestartComponentResponse
+            /// Descriptor for "RestartComponent".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "RestartComponent"
+            )
+        }
         /// Namespace for "Session" metadata.
         internal enum Session: Sendable {
             /// Request type for "Session".
@@ -59,6 +83,8 @@ internal enum Dexter_V1_DexterService: Sendable {
         /// Descriptors for all methods in the "dexter.v1.DexterService" service.
         internal static let descriptors: [GRPCCore.MethodDescriptor] = [
             Ping.descriptor,
+            Health.descriptor,
+            RestartComponent.descriptor,
             Session.descriptor,
             StreamAudio.descriptor
         ]
@@ -103,6 +129,44 @@ extension Dexter_V1_DexterService {
             request: GRPCCore.StreamingServerRequest<Dexter_V1_PingRequest>,
             context: GRPCCore.ServerContext
         ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_PingResponse>
+
+        /// Handle the "Health" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Cheap daemon health snapshot. No session stream, no model generation, and
+        /// > no side effects beyond logging the request.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_HealthRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_HealthResponse` messages.
+        func health(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_HealthRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_HealthResponse>
+
+        /// Handle the "RestartComponent" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+        /// > No model action path, no session stream, and no model generation.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_RestartComponentRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_RestartComponentResponse` messages.
+        func restartComponent(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_RestartComponentRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_RestartComponentResponse>
 
         /// Handle the "Session" method.
         ///
@@ -173,6 +237,44 @@ extension Dexter_V1_DexterService {
             context: GRPCCore.ServerContext
         ) async throws -> GRPCCore.ServerResponse<Dexter_V1_PingResponse>
 
+        /// Handle the "Health" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Cheap daemon health snapshot. No session stream, no model generation, and
+        /// > no side effects beyond logging the request.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_HealthRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_HealthResponse` message.
+        func health(
+            request: GRPCCore.ServerRequest<Dexter_V1_HealthRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_HealthResponse>
+
+        /// Handle the "RestartComponent" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+        /// > No model action path, no session stream, and no model generation.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_RestartComponentRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_RestartComponentResponse` message.
+        func restartComponent(
+            request: GRPCCore.ServerRequest<Dexter_V1_RestartComponentRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_RestartComponentResponse>
+
         /// Handle the "Session" method.
         ///
         /// > Source IDL Documentation:
@@ -240,6 +342,44 @@ extension Dexter_V1_DexterService {
             context: GRPCCore.ServerContext
         ) async throws -> Dexter_V1_PingResponse
 
+        /// Handle the "Health" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Cheap daemon health snapshot. No session stream, no model generation, and
+        /// > no side effects beyond logging the request.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_HealthRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_HealthResponse` to respond with.
+        func health(
+            request: Dexter_V1_HealthRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_HealthResponse
+
+        /// Handle the "RestartComponent" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+        /// > No model action path, no session stream, and no model generation.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_RestartComponentRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_RestartComponentResponse` to respond with.
+        func restartComponent(
+            request: Dexter_V1_RestartComponentRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_RestartComponentResponse
+
         /// Handle the "Session" method.
         ///
         /// > Source IDL Documentation:
@@ -302,6 +442,28 @@ extension Dexter_V1_DexterService.StreamingServiceProtocol {
             }
         )
         router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.Health.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_HealthRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_HealthResponse>(),
+            handler: { request, context in
+                try await self.health(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.RestartComponent.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_RestartComponentRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_RestartComponentResponse>(),
+            handler: { request, context in
+                try await self.restartComponent(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
             forMethod: Dexter_V1_DexterService.Method.Session.descriptor,
             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_ClientEvent>(),
             serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_ServerEvent>(),
@@ -339,6 +501,28 @@ extension Dexter_V1_DexterService.ServiceProtocol {
         )
         return GRPCCore.StreamingServerResponse(single: response)
     }
+
+    internal func health(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_HealthRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_HealthResponse> {
+        let response = try await self.health(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
+
+    internal func restartComponent(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_RestartComponentRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_RestartComponentResponse> {
+        let response = try await self.restartComponent(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
 }
 
 // Default implementation of methods from 'ServiceProtocol'.
@@ -350,6 +534,32 @@ extension Dexter_V1_DexterService.SimpleServiceProtocol {
     ) async throws -> GRPCCore.ServerResponse<Dexter_V1_PingResponse> {
         return GRPCCore.ServerResponse<Dexter_V1_PingResponse>(
             message: try await self.ping(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func health(
+        request: GRPCCore.ServerRequest<Dexter_V1_HealthRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_HealthResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_HealthResponse>(
+            message: try await self.health(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func restartComponent(
+        request: GRPCCore.ServerRequest<Dexter_V1_RestartComponentRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_RestartComponentResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_RestartComponentResponse>(
+            message: try await self.restartComponent(
                 request: request.message,
                 context: context
             ),
@@ -422,6 +632,54 @@ extension Dexter_V1_DexterService {
             deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_PingResponse>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_PingResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "Health" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Cheap daemon health snapshot. No session stream, no model generation, and
+        /// > no side effects beyond logging the request.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_HealthRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_HealthRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_HealthResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func health<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_HealthRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_HealthRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_HealthResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_HealthResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "RestartComponent" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+        /// > No model action path, no session stream, and no model generation.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_RestartComponentRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_RestartComponentRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_RestartComponentResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func restartComponent<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_RestartComponentRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_RestartComponentRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_RestartComponentResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_RestartComponentResponse>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "Session" method.
@@ -520,6 +778,76 @@ extension Dexter_V1_DexterService {
             try await self.client.unary(
                 request: request,
                 descriptor: Dexter_V1_DexterService.Method.Ping.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "Health" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Cheap daemon health snapshot. No session stream, no model generation, and
+        /// > no side effects beyond logging the request.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_HealthRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_HealthRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_HealthResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func health<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_HealthRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_HealthRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_HealthResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_HealthResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.Health.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "RestartComponent" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+        /// > No model action path, no session stream, and no model generation.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_RestartComponentRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_RestartComponentRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_RestartComponentResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func restartComponent<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_RestartComponentRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_RestartComponentRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_RestartComponentResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_RestartComponentResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.RestartComponent.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -631,6 +959,66 @@ extension Dexter_V1_DexterService.ClientProtocol {
         )
     }
 
+    /// Call the "Health" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Cheap daemon health snapshot. No session stream, no model generation, and
+    /// > no side effects beyond logging the request.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_HealthRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func health<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_HealthRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_HealthResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.health(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_HealthRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_HealthResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "RestartComponent" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+    /// > No model action path, no session stream, and no model generation.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_RestartComponentRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func restartComponent<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_RestartComponentRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_RestartComponentResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.restartComponent(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_RestartComponentRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_RestartComponentResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "Session" method.
     ///
     /// > Source IDL Documentation:
@@ -722,6 +1110,74 @@ extension Dexter_V1_DexterService.ClientProtocol {
             metadata: metadata
         )
         return try await self.ping(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "Health" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Cheap daemon health snapshot. No session stream, no model generation, and
+    /// > no side effects beyond logging the request.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func health<Result>(
+        _ message: Dexter_V1_HealthRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_HealthResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_HealthRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.health(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "RestartComponent" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Operator-triggered recovery for daemon-lifetime lightweight workers.
+    /// > No model action path, no session stream, and no model generation.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func restartComponent<Result>(
+        _ message: Dexter_V1_RestartComponentRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_RestartComponentResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_RestartComponentRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.restartComponent(
             request: request,
             options: options,
             onResponse: handleResponse
