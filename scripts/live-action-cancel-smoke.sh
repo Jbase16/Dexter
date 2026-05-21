@@ -214,6 +214,7 @@ main() {
     assert_count_at_least "$name" "$offset" "Global hotkey activated" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Hotkey aborting in-flight generation" 1 || ok=1
     assert_absent "$name" "$offset" "Action result surfaced to operator" || ok=1
+    assert_absent "$name" "$offset" "Action status injected into conversation context" || ok=1
     assert_absent "$name" "$offset" "Background action result — spawning continuation generation" || ok=1
 
     if ! grep -Fq "[INTERRUPT armed after focused:" "$out"; then

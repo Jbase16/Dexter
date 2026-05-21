@@ -471,12 +471,13 @@ test_destructive_action_auto_denied() {
     assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     if ! grep -Fq "[ACTION REQUEST" "$out"; then
         say "$FAIL" "$name - CLI did not receive an ActionRequest"
         ok=1
     fi
-    if ! grep -Fq "Action cancelled: operator rejected the action" "$out"; then
-        say "$FAIL" "$name - operator-visible cancellation reason was not emitted"
+    if ! grep -Fq "Action denied before execution: Run: rm -rf /tmp/dexter-smoke-delete-me." "$out"; then
+        say "$FAIL" "$name - operator-visible denial status was not emitted"
         ok=1
     fi
     if [[ ! -f "$marker" ]]; then
@@ -507,6 +508,7 @@ test_safe_action_result_status() {
     fi
 
     assert_count_at_least "$name" "$offset" "Action dispatched to background task" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action result surfaced to operator" 1 || ok=1
     assert_absent "$name" "$offset" "Action requires operator approval" || ok=1
     if ! grep -Fq "Action completed:" "$out"; then
@@ -556,6 +558,7 @@ test_destructive_action_auto_approved() {
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Operator approved DESTRUCTIVE action" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Approved action completed" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action rejected by operator" || ok=1
     assert_absent "$name" "$offset" "Action dispatched to background task" || ok=1
     if ! grep -Fq "[ACTION REQUEST" "$out"; then
@@ -602,6 +605,7 @@ test_action_json_safe_shell_reports_result() {
     fi
 
     assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action requires operator approval" || ok=1
     if ! grep -Fq "Action completed: Run: echo $token" "$out"; then
         say "$FAIL" "$name - shell completion was not surfaced"
@@ -643,6 +647,7 @@ test_action_json_destructive_shell_auto_denied() {
     assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     if [[ ! -f "$marker" ]]; then
         say "$FAIL" "$name - denied shell action deleted the marker"
         ok=1
@@ -682,6 +687,7 @@ test_action_json_destructive_shell_auto_approved() {
     assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Operator approved DESTRUCTIVE action" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Approved action completed" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     if [[ -e "$delete_file" ]]; then
         say "$FAIL" "$name - approved shell action did not delete target"
         ok=1
@@ -717,6 +723,7 @@ test_file_read_action_reports_content() {
     fi
 
     assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action requires operator approval" || ok=1
     if ! grep -Fq "Action completed: Read: $target" "$out"; then
         say "$FAIL" "$name - file_read completion was not surfaced"
@@ -752,6 +759,7 @@ test_file_write_cautious_executes_without_approval() {
     fi
 
     assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action requires operator approval" || ok=1
     if grep -Fq "[ACTION REQUEST" "$out"; then
         say "$FAIL" "$name - temp file_write unexpectedly requested approval"
@@ -795,6 +803,7 @@ test_destructive_file_write_auto_denied() {
     assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Operator approved DESTRUCTIVE action" || ok=1
     if ! grep -Fq "[ACTION REQUEST" "$out"; then
         say "$FAIL" "$name - CLI did not receive an ActionRequest"
@@ -837,6 +846,7 @@ test_destructive_file_write_auto_approved() {
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Operator approved DESTRUCTIVE action" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Approved action completed" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action rejected by operator" || ok=1
     if ! grep -Fq "approved=true" "$out"; then
         say "$FAIL" "$name - CLI did not auto-approve the ActionRequest"
@@ -877,6 +887,7 @@ test_applescript_cautious_executes_without_approval() {
     fi
 
     assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action requires operator approval" || ok=1
     if grep -Fq "[ACTION REQUEST" "$out"; then
         say "$FAIL" "$name - benign AppleScript unexpectedly requested approval"
@@ -919,6 +930,7 @@ test_destructive_applescript_auto_denied() {
     assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Operator approved DESTRUCTIVE action" || ok=1
     if ! grep -Fq "[ACTION REQUEST" "$out"; then
         say "$FAIL" "$name - CLI did not receive an ActionRequest"
@@ -958,6 +970,7 @@ test_destructive_applescript_auto_approved() {
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Operator approved DESTRUCTIVE action" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Approved action completed" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
     assert_absent "$name" "$offset" "Action rejected by operator" || ok=1
     if ! grep -Fq "approved=true" "$out"; then
         say "$FAIL" "$name - CLI did not auto-approve the ActionRequest"
@@ -1201,6 +1214,7 @@ test_action_json_browser_routine_actions_execute_without_approval() {
     fi
 
     assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 3 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 3 || ok=1
     assert_absent "$name" "$offset" "Action requires operator approval" || ok=1
     if grep -Fq "[ACTION REQUEST" "$out"; then
         say "$FAIL" "$name - routine browser ActionSpec unexpectedly requested approval"
@@ -1241,6 +1255,7 @@ test_action_json_browser_destructive_click_auto_denied() {
     assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 3 || ok=1
     assert_absent "$name" "$offset" "Operator approved DESTRUCTIVE action" || ok=1
     if grep -Fq "clicked: #delete-account" "$out"; then
         say "$FAIL" "$name - denied click still reached the browser worker"
@@ -1286,6 +1301,7 @@ test_action_json_browser_destructive_click_auto_approved() {
     assert_count_at_least "$name" "$offset" "ActionApproval received" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Operator approved DESTRUCTIVE action" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Approved action completed" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 3 || ok=1
     assert_absent "$name" "$offset" "Action rejected by operator" || ok=1
     if ! grep -Fq "clicked: #delete-account" "$out"; then
         say "$FAIL" "$name - approved click worker output was not surfaced"

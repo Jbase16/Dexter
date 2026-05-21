@@ -153,6 +153,17 @@ struct PendingAction {
     submitted_at: chrono::DateTime<Utc>,
 }
 
+/// Operator-visible metadata for a pending action.
+///
+/// Kept separate from `ActionOutcome` so receipts can be emitted without
+/// exposing `PendingAction` or re-parsing model output in the orchestrator.
+#[derive(Debug, Clone)]
+pub struct ActionReceiptMetadata {
+    pub description: String,
+    pub action_type: &'static str,
+    pub category: &'static str,
+}
+
 // ── ActionEngine ──────────────────────────────────────────────────────────────
 
 pub struct ActionEngine {
@@ -220,15 +231,16 @@ impl ActionEngine {
         }
     }
 
-    /// Human-readable description for a pending approval, if the action is still queued.
-    ///
-    /// `PendingAction` stays private to keep the approval queue owned by
-    /// `ActionEngine`; callers only need the operator-facing label for receipts
-    /// and status messages.
-    pub fn pending_description(&self, action_id: &str) -> Option<String> {
-        self.pending_actions
-            .get(action_id)
-            .map(|pending| Self::describe(&pending.spec))
+    /// Metadata needed to render a live action receipt after approval/denial.
+    pub fn pending_receipt_metadata(&self, action_id: &str) -> Option<ActionReceiptMetadata> {
+        self.pending_actions.get(action_id).map(|pending| {
+            let category = PolicyEngine::classify(&pending.spec);
+            ActionReceiptMetadata {
+                description: Self::describe(&pending.spec),
+                action_type: Self::type_str(&pending.spec),
+                category: Self::category_str(category),
+            }
+        })
     }
 
     // Phase 38c: `start_browser` removed — the browser worker is now spawned
@@ -683,6 +695,8 @@ impl ActionEngine {
 #[derive(Debug)]
 pub struct ActionResult {
     pub action_id: String,
+    pub action_type: String,
+    pub category: String,
     /// Human-readable description of the attempted action.
     ///
     /// Background action results arrive after the model has already emitted the
@@ -965,7 +979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_description_returns_label_for_queued_action() {
+    async fn pending_receipt_metadata_returns_label_for_queued_action() {
         let tmp = tempdir().unwrap();
         let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
         let spec = ActionSpec::Shell {
@@ -981,11 +995,13 @@ mod tests {
             other => panic!("expected PendingApproval, got: {other:?}"),
         };
 
-        assert_eq!(
-            engine.pending_description(&action_id).as_deref(),
-            Some("Run: echo pending-description")
-        );
-        assert!(engine.pending_description("missing-action").is_none());
+        let metadata = engine
+            .pending_receipt_metadata(&action_id)
+            .expect("pending action should have receipt metadata");
+        assert_eq!(metadata.description, "Run: echo pending-description");
+        assert_eq!(metadata.action_type, "shell");
+        assert_eq!(metadata.category, "destructive");
+        assert!(engine.pending_receipt_metadata("missing-action").is_none());
     }
 
     #[tokio::test]

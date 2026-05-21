@@ -57,9 +57,9 @@ use crate::{
         router::{Category, ConversationContext, ModelRouter},
     },
     ipc::proto::{
-        client_event, server_event, ActionApproval, ActionCategory, ActionRequest, ClientEvent,
-        EntityState, EntityStateChange, ServerEvent, SystemEvent, SystemEventType, TextResponse,
-        UiAction,
+        client_event, server_event, ActionApproval, ActionCategory, ActionReceipt, ActionRequest,
+        ClientEvent, EntityState, EntityStateChange, ServerEvent, SystemEvent, SystemEventType,
+        TextResponse, UiAction,
     },
     memory::{detect_memory_command, extract_facts, slug_id, MemoryCommand},
     personality::PersonalityLayer,
@@ -2431,11 +2431,15 @@ impl CoreOrchestrator {
             } else {
                 let action_id = uuid::Uuid::new_v4().to_string();
                 let action_description = ActionEngine::describe(&spec);
+                let action_type = ActionEngine::type_str(&spec).to_string();
+                let action_category = ActionEngine::category_str(category).to_string();
                 let executor = self.action_engine.executor_handle();
                 let action_tx = self.action_tx.clone();
                 let aid = action_id.clone();
                 let tid = trace_id.clone();
                 let desc = action_description.clone();
+                let action_type_for_result = action_type.clone();
+                let action_category_for_result = action_category.clone();
 
                 // Phase 36: flag iMessage-send AppleScripts so handle_action_result
                 // skips the continuation after a successful completion.
@@ -2477,6 +2481,8 @@ impl CoreOrchestrator {
                     let _ = action_tx
                         .send(ActionResult {
                             action_id: aid,
+                            action_type: action_type_for_result,
+                            category: action_category_for_result,
                             description: Some(desc),
                             outcome,
                             trace_id: tid,
@@ -4221,6 +4227,10 @@ impl CoreOrchestrator {
 
     fn inject_action_status_context(&mut self, label: &str, feedback: &str, trace_id: &str) {
         let content = action_context_status_text(label, feedback);
+        self.inject_action_context_content(label, content, trace_id);
+    }
+
+    fn inject_action_context_content(&mut self, label: &str, content: String, trace_id: &str) {
         self.context.push_tool_result(&content);
         info!(
             session    = %self.session_id,
@@ -4243,6 +4253,8 @@ impl CoreOrchestrator {
     ) -> Result<(), OrchestratorError> {
         let description = ActionEngine::describe(&spec);
         let category = PolicyEngine::classify(&spec);
+        let action_type = ActionEngine::type_str(&spec).to_string();
+        let action_category = ActionEngine::category_str(category).to_string();
         info!(
             session     = %self.session_id,
             trace_id    = %trace_id,
@@ -4294,6 +4306,16 @@ impl CoreOrchestrator {
                     self.inject_action_status_context(label, &feedback, &trace_id);
                 }
                 self.send_text(&feedback, true, &trace_id).await?;
+                self.send_action_receipt_for_outcome(
+                    &outcome,
+                    &action_type,
+                    &action_category,
+                    Some(&description),
+                    feedback_text,
+                    None,
+                    &trace_id,
+                )
+                .await?;
                 self.send_state(EntityState::Idle, &trace_id).await?;
             }
         }
@@ -4364,7 +4386,20 @@ impl CoreOrchestrator {
             "ActionApproval received"
         );
 
-        let action_description = self.action_engine.pending_description(&approval.action_id);
+        let pending_receipt = self
+            .action_engine
+            .pending_receipt_metadata(&approval.action_id);
+        let action_description = pending_receipt
+            .as_ref()
+            .map(|metadata| metadata.description.clone());
+        let action_type = pending_receipt
+            .as_ref()
+            .map(|metadata| metadata.action_type)
+            .unwrap_or("unknown");
+        let action_category = pending_receipt
+            .as_ref()
+            .map(|metadata| metadata.category)
+            .unwrap_or("destructive");
         let operator_approved = approval.approved;
 
         let outcome = self
@@ -4382,7 +4417,12 @@ impl CoreOrchestrator {
 
         // Speak a brief result to the operator and, when TTS is available, let
         // AUDIO_PLAYBACK_COMPLETE drive the IDLE transition (same as regular TTS).
-        let spoke = match outcome {
+        let feedback_detail = match &outcome {
+            ActionOutcome::Completed { output, .. } => output.as_str(),
+            ActionOutcome::Rejected { error, .. } => error.as_str(),
+            ActionOutcome::PendingApproval { .. } => "",
+        };
+        let spoke = match &outcome {
             ActionOutcome::Completed {
                 action_id, output, ..
             } => {
@@ -4424,6 +4464,19 @@ impl CoreOrchestrator {
                 false
             }
         };
+
+        if pending_receipt.is_some() && !matches!(outcome, ActionOutcome::PendingApproval { .. }) {
+            self.send_action_receipt_for_outcome(
+                &outcome,
+                action_type,
+                action_category,
+                action_description.as_deref(),
+                feedback_detail,
+                Some(operator_approved),
+                &trace_id,
+            )
+            .await?;
+        }
 
         // When TTS spoke the feedback, AUDIO_PLAYBACK_COMPLETE will drive IDLE.
         // When TTS was unavailable (spoke=false), send IDLE directly.
@@ -4517,6 +4570,10 @@ impl CoreOrchestrator {
         };
 
         interaction.stage = InteractionStage::FeedbackPending;
+        let agentic_depth = interaction.agentic_depth;
+        let original_content = interaction.original_content.clone();
+        let is_terminal_workflow = interaction.is_terminal_workflow;
+        interaction.stage = InteractionStage::Complete;
 
         // Inject the action outcome into conversation context so the model knows
         // what happened on the next turn. Without this, every subsequent turn
@@ -4539,16 +4596,16 @@ impl CoreOrchestrator {
         // The `[Action result]` / `[Action FAILED]` prefix is what disambiguates
         // tool output from real operator input inside the prompt.
         let tool_label = match &result.outcome {
-            ActionOutcome::Completed { .. } => "[Action result",
-            ActionOutcome::Rejected { .. } => "[Action FAILED",
-            _ => "[Action result",
+            ActionOutcome::Completed { .. } => "Action result",
+            ActionOutcome::Rejected { .. } => "Action FAILED",
+            _ => "Action result",
         };
         let label_text = if let Some(ref cmd) = rewritten_to {
-            format!("{tool_label} (normalized to macOS BSD: `{cmd}`): {feedback_text}]")
+            format!("[{tool_label} (normalized to macOS BSD: `{cmd}`): {feedback_text}]")
         } else {
-            format!("{tool_label}: {feedback_text}]")
+            format!("[{tool_label}: {feedback_text}]")
         };
-        self.context.push_tool_result(&label_text);
+        self.inject_action_context_content(tool_label, label_text, &result.trace_id);
 
         // Phase 32: Agentic continuation — after injecting the action result, spawn a
         // follow-up generation so the model can issue the next action or respond with
@@ -4560,11 +4617,6 @@ impl CoreOrchestrator {
         // No speak_action_feedback is called for intermediate steps — the model's own
         // response text (before the next action block, if any) is what the operator
         // hears. This avoids a robotic "Done." between every step in a multi-step task.
-
-        let agentic_depth = interaction.agentic_depth;
-        let original_content = interaction.original_content.clone();
-        let is_terminal_workflow = interaction.is_terminal_workflow;
-        interaction.stage = InteractionStage::Complete;
 
         info!(
             session       = %self.session_id,
@@ -4590,6 +4642,16 @@ impl CoreOrchestrator {
                 );
                 let msg = "Sent.";
                 let spoke = self.speak_action_feedback(msg, &result.trace_id).await?;
+                self.send_action_receipt_for_outcome(
+                    &result.outcome,
+                    &result.action_type,
+                    &result.category,
+                    result.description.as_deref(),
+                    &feedback_text,
+                    None,
+                    &result.trace_id,
+                )
+                .await?;
                 if !spoke {
                     self.send_state(EntityState::Idle, &result.trace_id).await?;
                 }
@@ -4604,6 +4666,16 @@ impl CoreOrchestrator {
         );
         self.send_text(&operator_status, false, &result.trace_id)
             .await?;
+        self.send_action_receipt_for_outcome(
+            &result.outcome,
+            &result.action_type,
+            &result.category,
+            result.description.as_deref(),
+            &feedback_text,
+            None,
+            &result.trace_id,
+        )
+        .await?;
         info!(
             session     = %self.session_id,
             action_id   = %result.action_id,
@@ -5678,6 +5750,62 @@ impl CoreOrchestrator {
             .send(Ok(event))
             .await
             .map_err(|_| OrchestratorError::ChannelClosed)
+    }
+
+    /// Emit a structured post-action receipt for the HUD.
+    ///
+    /// TextResponse already carries the operator-facing status. This event carries
+    /// Rust-side execution metadata so Swift can render an audit-style receipt
+    /// without treating it as model-generated conversation text.
+    async fn send_action_receipt_for_outcome(
+        &self,
+        outcome: &ActionOutcome,
+        action_type: &str,
+        category: &str,
+        description: Option<&str>,
+        detail: &str,
+        operator_approved: Option<bool>,
+        trace_id: &str,
+    ) -> Result<(), OrchestratorError> {
+        let Some(action_id) = action_outcome_id(outcome) else {
+            return Ok(());
+        };
+        let outcome_label = action_receipt_outcome_label(outcome, operator_approved);
+        let summary = action_receipt_summary(outcome, operator_approved, detail);
+        let audit_log_path = self
+            .action_engine
+            .audit_log_path()
+            .await
+            .display()
+            .to_string();
+        let receipt = ActionReceipt {
+            action_id: action_id.to_string(),
+            action_type: action_type.to_string(),
+            category: category.to_string(),
+            description: action_status_subject(description),
+            outcome: outcome_label.to_string(),
+            summary,
+            audit_log_path,
+        };
+
+        let event = ServerEvent {
+            trace_id: trace_id.to_string(),
+            event: Some(server_event::Event::ActionReceipt(receipt)),
+        };
+        self.tx
+            .send(Ok(event))
+            .await
+            .map_err(|_| OrchestratorError::ChannelClosed)?;
+        info!(
+            session     = %self.session_id,
+            trace_id    = %trace_id,
+            action_id   = %action_id,
+            action_type = %action_type,
+            category    = %category,
+            outcome     = %outcome_label,
+            "Action receipt emitted"
+        );
+        Ok(())
     }
 
     /// Speak a short action-result message: send text to the Swift UI and synthesize via TTS.
@@ -7203,6 +7331,60 @@ fn action_context_status_text(label: &str, feedback: &str) -> String {
         "[{label}: {}]",
         compact_operator_text(feedback, ACTION_STATUS_OUTPUT_MAX_CHARS)
     )
+}
+
+fn action_outcome_id(outcome: &ActionOutcome) -> Option<&str> {
+    match outcome {
+        ActionOutcome::Completed { action_id, .. } => Some(action_id.as_str()),
+        ActionOutcome::Rejected { action_id, .. } => Some(action_id.as_str()),
+        ActionOutcome::PendingApproval { .. } => None,
+    }
+}
+
+fn action_receipt_outcome_label(
+    outcome: &ActionOutcome,
+    operator_approved: Option<bool>,
+) -> &'static str {
+    match outcome {
+        ActionOutcome::Completed { .. } => "executed",
+        ActionOutcome::Rejected { .. } if operator_approved == Some(false) => "denied",
+        ActionOutcome::Rejected { .. } => "failed",
+        ActionOutcome::PendingApproval { .. } => "pending",
+    }
+}
+
+fn action_receipt_summary(
+    outcome: &ActionOutcome,
+    operator_approved: Option<bool>,
+    detail: &str,
+) -> String {
+    match outcome {
+        ActionOutcome::Completed { .. } => {
+            let detail = compact_operator_text(detail, ACTION_STATUS_OUTPUT_MAX_CHARS);
+            if detail.is_empty() || detail == "Done." {
+                "Succeeded.".to_string()
+            } else {
+                format!("Succeeded: {detail}")
+            }
+        }
+        ActionOutcome::Rejected { error, .. } if operator_approved == Some(false) => {
+            let detail = compact_operator_text(error, ACTION_STATUS_OUTPUT_MAX_CHARS);
+            if detail.is_empty() || detail == "operator rejected the action" {
+                "Denied before execution.".to_string()
+            } else {
+                format!("Denied before execution: {detail}")
+            }
+        }
+        ActionOutcome::Rejected { error, .. } => {
+            let detail = compact_operator_text(error, ACTION_STATUS_OUTPUT_MAX_CHARS);
+            if detail.is_empty() {
+                "Failed.".to_string()
+            } else {
+                format!("Failed: {detail}")
+            }
+        }
+        ActionOutcome::PendingApproval { .. } => "Pending approval.".to_string(),
+    }
 }
 
 fn action_status_subject(description: Option<&str>) -> String {
@@ -10238,6 +10420,29 @@ end tell"#;
         );
     }
 
+    #[test]
+    fn action_receipt_summary_distinguishes_denied_from_failed() {
+        let denied = ActionOutcome::Rejected {
+            action_id: "a".to_string(),
+            error: "operator rejected the action".to_string(),
+        };
+        assert_eq!(action_receipt_outcome_label(&denied, Some(false)), "denied");
+        assert_eq!(
+            action_receipt_summary(&denied, Some(false), "operator rejected the action"),
+            "Denied before execution."
+        );
+
+        let failed = ActionOutcome::Rejected {
+            action_id: "b".to_string(),
+            error: "permission denied".to_string(),
+        };
+        assert_eq!(action_receipt_outcome_label(&failed, Some(true)), "failed");
+        assert_eq!(
+            action_receipt_summary(&failed, Some(true), "permission denied"),
+            "Failed: permission denied"
+        );
+    }
+
     // ── Phase 9: Retrieval pipeline integration tests ─────────────────────────
 
     #[tokio::test]
@@ -11526,6 +11731,8 @@ end tell"#;
         // Deliver a result for an unknown action_id — no interaction registered.
         let result = ActionResult {
             action_id: "unknown-id".to_string(),
+            action_type: "shell".to_string(),
+            category: "cautious".to_string(),
             description: None,
             outcome: ActionOutcome::Completed {
                 action_id: "unknown-id".to_string(),
@@ -11570,6 +11777,8 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            action_type: "shell".to_string(),
+            category: "cautious".to_string(),
             description: Some("Run: echo test output".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
@@ -11594,23 +11803,36 @@ end tell"#;
         );
 
         let mut saw_status = false;
+        let mut saw_receipt = false;
         while let Ok(evt) = rx.try_recv() {
-            if let Ok(ServerEvent {
-                event: Some(crate::ipc::proto::server_event::Event::TextResponse(t)),
-                ..
-            }) = evt
-            {
-                if t.content
-                    .contains("Action completed: Run: echo test output.")
-                    && t.content.contains("test output")
-                {
-                    saw_status = true;
+            if let Ok(ServerEvent { event, .. }) = evt {
+                match event {
+                    Some(crate::ipc::proto::server_event::Event::TextResponse(t)) => {
+                        if t.content
+                            .contains("Action completed: Run: echo test output.")
+                            && t.content.contains("test output")
+                        {
+                            saw_status = true;
+                        }
+                    }
+                    Some(crate::ipc::proto::server_event::Event::ActionReceipt(receipt)) => {
+                        saw_receipt = receipt.action_id == action_id
+                            && receipt.action_type == "shell"
+                            && receipt.category == "cautious"
+                            && receipt.outcome == "executed"
+                            && receipt.summary.contains("Succeeded: test output");
+                    }
+                    _ => {}
                 }
             }
         }
         assert!(
             saw_status,
             "Completed background action must emit deterministic operator status"
+        );
+        assert!(
+            saw_receipt,
+            "Completed background action must emit structured ActionReceipt"
         );
     }
 
@@ -11656,6 +11878,8 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            action_type: "shell".to_string(),
+            category: "cautious".to_string(),
             description: Some("Run: echo ok".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
@@ -11826,6 +12050,8 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            action_type: "browser".to_string(),
+            category: "cautious".to_string(),
             description: Some("Browser extract: page".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
@@ -11904,6 +12130,8 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            action_type: "shell".to_string(),
+            category: "cautious".to_string(),
             description: Some("Run: test command".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
@@ -11965,6 +12193,8 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            action_type: "applescript".to_string(),
+            category: "destructive".to_string(),
             description: Some("AppleScript: send message".to_string()),
             outcome: ActionOutcome::Completed {
                 action_id: action_id.clone(),
@@ -12043,6 +12273,8 @@ end tell"#;
 
         let result = ActionResult {
             action_id: action_id.clone(),
+            action_type: "applescript".to_string(),
+            category: "destructive".to_string(),
             description: Some("AppleScript: send message".to_string()),
             outcome: ActionOutcome::Rejected {
                 action_id: action_id.clone(),
@@ -12183,6 +12415,8 @@ end tell"#;
             let _ = action_tx
                 .send(ActionResult {
                     action_id: aid,
+                    action_type: "shell".to_string(),
+                    category: "cautious".to_string(),
                     description: Some("Run: echo test".to_string()),
                     outcome,
                     trace_id: tid,

@@ -58,6 +58,17 @@ message HealthResponse {
   string stt_worker = 17;      // ready | degraded | pending
   string tts_worker = 18;      // ready | degraded | pending
   string browser_worker = 19;  // ready | degraded | pending
+
+  repeated DiskHealth disk = 20;
+}
+
+message DiskHealth {
+  string name = 1;             // state | workspace | temp
+  string path = 2;
+  string status = 3;           // ready | warn | critical | unavailable
+  uint64 available_bytes = 4;
+  uint64 total_bytes = 5;
+  string detail = 6;
 }
 
 // ── Restart component ────────────────────────────────────────────────────────
@@ -107,6 +118,7 @@ message ServerEvent {
     ActionRequest     action_request = 5;
     ConfigSync        config_sync    = 6;  // Phase 18: session config pushed on session open
     VadHint           vad_hint       = 7;  // Phase 24: adaptive silence threshold for next utterance
+    ActionReceipt     action_receipt = 8;  // Live post-action audit receipt for HUD visibility
   }
 }
 
@@ -204,6 +216,18 @@ message ActionRequest {
   string         description = 2;  // Human-readable description for the confirmation UI
   ActionCategory category    = 3;
   string         payload     = 4;  // JSON-encoded action parameters (type-specific)
+}
+
+// Compact, post-action receipt emitted after Rust knows the actual outcome.
+// This is not model text: it is Rust-side execution/audit metadata for the HUD.
+message ActionReceipt {
+  string action_id      = 1;  // Correlates with ActionRequest and audit.jsonl
+  string action_type    = 2;  // shell | file_read | file_write | applescript | browser | message_send
+  string category       = 3;  // safe | cautious | destructive
+  string description    = 4;  // Operator-readable target/summary
+  string outcome        = 5;  // executed | denied | failed | pending
+  string summary        = 6;  // Bounded result summary, never full unbounded output
+  string audit_log_path = 7;  // Local append-only audit source
 }
 
 enum ActionCategory {

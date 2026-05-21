@@ -105,6 +105,56 @@ private final class SmokeActionApprovalGate: @unchecked Sendable {
     }
 }
 
+enum DexterWorkerRestartTarget: String, CaseIterable, Sendable {
+    case stt
+    case tts
+    case browser
+
+    var component: Dexter_V1_RestartComponent {
+        switch self {
+        case .stt: return .stt
+        case .tts: return .tts
+        case .browser: return .browser
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .stt: return "STT worker"
+        case .tts: return "TTS worker"
+        case .browser: return "browser worker"
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .stt: return "Restart STT"
+        case .tts: return "Restart TTS"
+        case .browser: return "Restart Browser"
+        }
+    }
+
+    var smokeName: String { rawValue }
+
+    static func parse(_ rawValue: String) -> DexterWorkerRestartTarget? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "stt", "speech", "transcription", "whisper":
+            return .stt
+        case "tts", "voice", "speech_out", "speech-output", "kokoro":
+            return .tts
+        case "browser", "browser_worker", "playwright":
+            return .browser
+        default:
+            return nil
+        }
+    }
+}
+
+struct DexterHealthHUDReport: Sendable {
+    let markdown: String
+    let restartTargets: [DexterWorkerRestartTarget]
+}
+
 private func actionCategoryLabel(_ category: Dexter_V1_ActionCategory) -> String {
     switch category {
     case .safe: return "safe"
@@ -129,6 +179,21 @@ actor DexterClient {
 
     private static let socketPath = "/tmp/dexter.sock"
     private static let retryDelay = Duration.milliseconds(500)
+    private static let proactiveHealthInitialDelaySecs = boundedEnvSeconds(
+        "DEXTER_PROACTIVE_HEALTH_INITIAL_DELAY_SECS",
+        defaultValue: 8,
+        maxValue: 300
+    )
+    private static let proactiveHealthRetryDelaySecs = boundedEnvSeconds(
+        "DEXTER_PROACTIVE_HEALTH_RETRY_DELAY_SECS",
+        defaultValue: 8,
+        maxValue: 300
+    )
+    private static let proactiveHealthCooldownSecs = boundedEnvSeconds(
+        "DEXTER_PROACTIVE_HEALTH_COOLDOWN_SECS",
+        defaultValue: 600,
+        maxValue: 86_400
+    )
 
     // AudioPlayer persists across session reconnects — the engine is started once
     // and stays running for the process lifetime. Declared as a `let` constant so
@@ -159,6 +224,23 @@ actor DexterClient {
     private let ttsGate = TTSGate()
     private let smokeBargeGate = SmokeBargeGate()
     private let smokeActionApprovalGate = SmokeActionApprovalGate()
+
+    private var proactiveHealthProbeTask: Task<Void, Never>?
+    private var lastSurfacedHealthComponents = Set<String>()
+    private var lastHealthSurfaceAt: Date?
+
+    private static func boundedEnvSeconds(
+        _ key: String,
+        defaultValue: Int64,
+        maxValue: Int64
+    ) -> Int64 {
+        guard let raw = ProcessInfo.processInfo.environment[key],
+              let parsed = Int64(raw),
+              parsed >= 0 else {
+            return defaultValue
+        }
+        return min(parsed, maxValue)
+    }
 
     // MARK: - Connection lifecycle
 
@@ -232,6 +314,7 @@ actor DexterClient {
             // Start AVAudioEngine for TTS playback. Idempotent — engine.isRunning
             // guard in start() makes repeated calls on reconnect a no-op.
             audioPlayer.start()
+            scheduleProactiveHealthProbe(window: window)
 
             // Phase 18: wire playback-complete callback so Rust knows when TTS audio
             // finishes playing (not just synthesising). Set before the gRPC stream opens
@@ -271,6 +354,8 @@ actor DexterClient {
                 continuation.finish()
                 self.eventContinuation = nil
                 self.currentSessionID  = nil
+                self.proactiveHealthProbeTask?.cancel()
+                self.proactiveHealthProbeTask = nil
             }
 
             // ── EventBridge lifecycle ─────────────────────────────────────────
@@ -558,6 +643,16 @@ actor DexterClient {
                         }
                         await self?.send(approval)
 
+                    case .actionReceipt(let receipt):
+                        print("[DexterClient] onResponse ← actionReceipt: id=\(receipt.actionID), outcome=\(receipt.outcome), type=\(receipt.actionType)")
+                        if smokeActionApprovalGate.enabled {
+                            print("[HUDSmoke] actionReceipt id=\(receipt.actionID) outcome=\(receipt.outcome) type=\(receipt.actionType)")
+                        }
+                        let markdown = Self.actionReceiptMarkdown(receipt)
+                        await MainActor.run {
+                            window.hud.showActionReceipt(markdown)
+                        }
+
                     case .audioResponse(let audio):
                         // When TTS is muted, drop PCM chunks — text path still works.
                         // A is_final chunk with no preceding data means we must still
@@ -606,6 +701,142 @@ actor DexterClient {
     }
 
     // MARK: - Public send API (used from Phase 6 onward)
+
+    /// Fetch a cheap daemon health snapshot and render it as HUD-ready Markdown.
+    ///
+    /// Uses a short-lived unary RPC instead of the long-running session stream so
+    /// checking health cannot interfere with audio, TTS, action approvals, or typed input.
+    func fetchHealthMarkdown() async -> String {
+        await fetchHealthReport().markdown
+    }
+
+    func fetchHealthReport() async -> DexterHealthHUDReport {
+        do {
+            let health = try await requestHealthSnapshot()
+            print("[DexterClient] Health RPC OK status=\(health.status) degraded=\(health.degradedComponents.joined(separator: ","))")
+            return Self.healthHUDReport(for: health)
+        } catch {
+            return DexterHealthHUDReport(
+                markdown: Self.unavailableHealthMarkdown(reason: "\(error)"),
+                restartTargets: []
+            )
+        }
+    }
+
+    private func requestHealthSnapshot() async throws -> Dexter_V1_HealthResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.health(
+                Dexter_V1_HealthRequest.with { $0.traceID = UUID().uuidString }
+            )
+        }
+    }
+
+    func restartWorkerAndFetchHealthReport(_ target: DexterWorkerRestartTarget) async -> DexterHealthHUDReport {
+        do {
+            let response = try await requestWorkerRestart(target)
+            print("[DexterClient] Restart RPC OK target=\(target.smokeName) success=\(response.success) message=\(response.message)")
+            return Self.restartHUDReport(for: target, response: response)
+        } catch {
+            return DexterHealthHUDReport(
+                markdown: Self.unavailableHealthMarkdown(
+                    reason: "\(target.displayName) restart failed before a post-restart health snapshot was available.\n\n\(error)"
+                ),
+                restartTargets: []
+            )
+        }
+    }
+
+    private func requestWorkerRestart(_ target: DexterWorkerRestartTarget) async throws -> Dexter_V1_RestartComponentResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.restartComponent(
+                Dexter_V1_RestartComponentRequest.with {
+                    $0.traceID = UUID().uuidString
+                    $0.component = target.component
+                }
+            )
+        }
+    }
+
+    private func scheduleProactiveHealthProbe(window: FloatingWindow) {
+        proactiveHealthProbeTask?.cancel()
+        proactiveHealthProbeTask = Task { [weak self, window] in
+            try? await Task.sleep(for: .seconds(Self.proactiveHealthInitialDelaySecs))
+            guard !Task.isCancelled else { return }
+            await self?.runProactiveHealthProbe(window: window)
+        }
+    }
+
+    private func runProactiveHealthProbe(window: FloatingWindow) async {
+        do {
+            var health = try await requestHealthSnapshot()
+
+            if Self.shouldRetryProactiveHealth(health) {
+                print("[DexterClient] Proactive health probe retrying transient degraded=\(health.degradedComponents.joined(separator: ","))")
+                try? await Task.sleep(for: .seconds(Self.proactiveHealthRetryDelaySecs))
+                guard !Task.isCancelled else { return }
+                health = try await requestHealthSnapshot()
+            }
+
+            await handleProactiveHealth(health, window: window)
+        } catch {
+            print("[DexterClient] Proactive health probe skipped error=\(error)")
+        }
+    }
+
+    private func handleProactiveHealth(_ health: Dexter_V1_HealthResponse, window: FloatingWindow) async {
+        let components = Self.healthSurfaceComponents(for: health)
+        guard !components.isEmpty else {
+            lastSurfacedHealthComponents = []
+            lastHealthSurfaceAt = nil
+            print("[DexterClient] Proactive health probe silent status=ready")
+            return
+        }
+
+        guard shouldSurfaceProactiveHealth(components: components) else {
+            print("[DexterClient] Proactive health probe throttled degraded=\(components.joined(separator: ","))")
+            return
+        }
+
+        let report = Self.healthHUDReport(
+            for: health,
+            notice: "Startup health check found components that need attention."
+        )
+        print("[DexterClient] Proactive health probe surfacing degraded=\(components.joined(separator: ","))")
+        await MainActor.run {
+            window.hud.showHealthReport(report)
+        }
+    }
+
+    private func shouldSurfaceProactiveHealth(components: [String]) -> Bool {
+        let componentSet = Set(components)
+        let now = Date()
+
+        if componentSet != lastSurfacedHealthComponents {
+            lastSurfacedHealthComponents = componentSet
+            lastHealthSurfaceAt = now
+            return true
+        }
+
+        if let lastHealthSurfaceAt,
+           now.timeIntervalSince(lastHealthSurfaceAt) < TimeInterval(Self.proactiveHealthCooldownSecs) {
+            return false
+        }
+
+        lastHealthSurfaceAt = now
+        return true
+    }
 
     /// Inject an operator event into the active session stream.
     /// Silently dropped if no session is currently established.
@@ -671,5 +902,228 @@ actor DexterClient {
         }
         send(event)
         print("[DexterClient] \(label) enqueued to stream")
+    }
+}
+
+extension DexterClient {
+    static func unavailableHealthMarkdown(reason: String) -> String {
+        """
+        ### Dexter Health
+
+        Status: unavailable
+
+        Could not reach the Rust core at \(socketPath).
+
+        \(reason)
+        """
+    }
+
+    private static func healthHUDReport(
+        for health: Dexter_V1_HealthResponse,
+        notice: String? = nil
+    ) -> DexterHealthHUDReport {
+        DexterHealthHUDReport(
+            markdown: healthMarkdown(for: health, notice: notice),
+            restartTargets: restartTargets(for: health)
+        )
+    }
+
+    private static func restartHUDReport(
+        for target: DexterWorkerRestartTarget,
+        response: Dexter_V1_RestartComponentResponse
+    ) -> DexterHealthHUDReport {
+        let outcome = response.success ? "restarted" : "restart failed"
+        let message = response.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let notice = message.isEmpty
+            ? "\(target.displayName) \(outcome)."
+            : "\(target.displayName) \(outcome): \(message)"
+
+        guard response.hasHealth else {
+            return DexterHealthHUDReport(
+                markdown: """
+                ### Dexter Health
+
+                Status: unknown
+
+                \(notice)
+
+                No post-restart health snapshot was returned by the daemon.
+                """,
+                restartTargets: response.success ? [] : [target]
+            )
+        }
+
+        return healthHUDReport(for: response.health, notice: notice)
+    }
+
+    private static func actionReceiptMarkdown(_ receipt: Dexter_V1_ActionReceipt) -> String {
+        let outcome = receiptLine(receipt.outcome, fallback: "unknown")
+        let actionType = receiptLine(receipt.actionType, fallback: "unknown")
+        let category = receiptLine(receipt.category, fallback: "unknown")
+        let description = receiptLine(receipt.description_p, fallback: "requested action")
+        let summary = receiptLine(receipt.summary, fallback: "No result summary returned.")
+        let auditPath = receiptLine(receipt.auditLogPath, fallback: "audit path unavailable")
+
+        return """
+        ### Action Receipt
+
+        Outcome: \(outcome)
+        Action: \(actionType) (\(category))
+        Target: \(description)
+        Result: \(summary)
+        Audit: `\(auditPath)`
+        """
+    }
+
+    private static func receiptLine(_ value: String, fallback: String) -> String {
+        let oneLine = value
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return oneLine.isEmpty ? fallback : oneLine
+    }
+
+    private static func healthMarkdown(for health: Dexter_V1_HealthResponse, notice: String?) -> String {
+        let status = cleanStatus(health.status)
+        var lines: [String] = [
+            "### Dexter Health",
+            "",
+            "Status: \(status)"
+        ]
+
+        if let notice, !notice.isEmpty {
+            lines.append("Notice: \(notice)")
+        }
+
+        if !health.degradedComponents.isEmpty {
+            lines.append("Attention: \(health.degradedComponents.joined(separator: ", "))")
+        }
+
+        lines.append("")
+        lines.append("Models")
+        lines.append("- Fast: \(modelName(health.fastModel)) - \(warmLabel(health.fastModelWarm))")
+        lines.append("- Primary: \(modelName(health.primaryModel)) - \(warmLabel(health.primaryModelWarm))")
+        lines.append("- Embed: \(modelName(health.embedModel)) - \(warmLabel(health.embedModelWarm))")
+
+        lines.append("")
+        lines.append("Workers")
+        lines.append("- STT: \(cleanStatus(health.sttWorker))")
+        lines.append("- TTS: \(cleanStatus(health.ttsWorker))")
+        lines.append("- Browser: \(cleanStatus(health.browserWorker))")
+
+        lines.append("")
+        lines.append("Disk")
+        if health.disk.isEmpty {
+            lines.append("- No disk snapshot returned by daemon.")
+        } else {
+            for disk in health.disk {
+                lines.append(diskLine(disk))
+            }
+        }
+
+        lines.append("")
+        lines.append("Paths")
+        lines.append("- Config: \(fallback(health.configPath))")
+        lines.append("- State: \(fallback(health.stateDir))")
+        lines.append("- Personality: \(fallback(health.personalityPath))")
+        lines.append("- Ollama: \(fallback(health.ollamaURL))")
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func restartTargets(for health: Dexter_V1_HealthResponse) -> [DexterWorkerRestartTarget] {
+        var targets: [DexterWorkerRestartTarget] = []
+        if isRestartableWorkerStatus(health.sttWorker) {
+            targets.append(.stt)
+        }
+        if isRestartableWorkerStatus(health.ttsWorker) {
+            targets.append(.tts)
+        }
+        if isRestartableWorkerStatus(health.browserWorker) {
+            targets.append(.browser)
+        }
+        return targets
+    }
+
+    private static func shouldRetryProactiveHealth(_ health: Dexter_V1_HealthResponse) -> Bool {
+        guard !healthSurfaceComponents(for: health).isEmpty else { return false }
+        if cleanStatus(health.sttWorker).lowercased() == "pending" {
+            return true
+        }
+        return health.degradedComponents.contains { component in
+            switch component {
+            case "fast_model", "primary_model", "embed_model":
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func healthSurfaceComponents(for health: Dexter_V1_HealthResponse) -> [String] {
+        if health.degradedComponents.isEmpty {
+            return []
+        }
+        return health.degradedComponents
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted()
+    }
+
+    private static func isRestartableWorkerStatus(_ value: String) -> Bool {
+        switch cleanStatus(value).lowercased() {
+        case "degraded", "failed", "unavailable":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func cleanStatus(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "unknown" : trimmed
+    }
+
+    private static func modelName(_ value: String) -> String {
+        fallback(value)
+    }
+
+    private static func warmLabel(_ isWarm: Bool) -> String {
+        isWarm ? "warm" : "not warm"
+    }
+
+    private static func fallback(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "unknown" : trimmed
+    }
+
+    private static func diskLine(_ disk: Dexter_V1_DiskHealth) -> String {
+        let name = fallback(disk.name)
+        let status = cleanStatus(disk.status)
+        let path = fallback(disk.path)
+        let capacity: String
+        if disk.availableBytes == 0 && disk.totalBytes == 0 {
+            capacity = "space unknown"
+        } else {
+            capacity = "\(formatBytes(disk.availableBytes)) free of \(formatBytes(disk.totalBytes))"
+        }
+        let detail = disk.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = detail.isEmpty ? "" : " - \(detail)"
+        return "- \(name): \(status) - \(capacity) at \(path)\(suffix)"
+    }
+
+    private static func formatBytes(_ bytes: UInt64) -> String {
+        let gib = Double(bytes) / 1_073_741_824.0
+        if gib >= 100 {
+            return String(format: "%.0f GiB", gib)
+        }
+        if gib >= 10 {
+            return String(format: "%.1f GiB", gib)
+        }
+        if gib >= 1 {
+            return String(format: "%.2f GiB", gib)
+        }
+        let mib = Double(bytes) / 1_048_576.0
+        return String(format: "%.0f MiB", mib)
     }
 }

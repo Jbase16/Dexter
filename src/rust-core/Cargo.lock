@@ -246,6 +246,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "hyper-util",
+ "libc",
  "prost",
  "regex",
  "reqwest",

@@ -25,6 +25,7 @@ use crate::{
         BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, SHELL_SOCKET_PATH, VOICE_PYTHON_EXE,
         VOICE_STT_WORKER_PATH, VOICE_WORKER_HEALTH_INTERVAL_SECS,
     },
+    diagnostics::{self, DiskHealthSnapshot},
     orchestrator::{CoreOrchestrator, GenerationResult, SharedDaemonState},
     voice::{worker_client::WorkerClient, WorkerType},
 };
@@ -36,9 +37,9 @@ pub mod proto {
 
 use proto::{
     dexter_service_server::{DexterService, DexterServiceServer},
-    AudioChunk, ClientEvent, EntityState, EntityStateChange, HealthRequest, HealthResponse,
-    PingRequest, PingResponse, RestartComponent, RestartComponentRequest, RestartComponentResponse,
-    ServerEvent, TranscriptChunk,
+    AudioChunk, ClientEvent, DiskHealth, EntityState, EntityStateChange, HealthRequest,
+    HealthResponse, PingRequest, PingResponse, RestartComponent, RestartComponentRequest,
+    RestartComponentResponse, ServerEvent, TranscriptChunk,
 };
 
 fn is_benign_session_stream_close(status: &Status) -> bool {
@@ -85,6 +86,7 @@ struct StartupHealthSnapshot {
     stt_worker: ComponentStartupStatus,
     tts_worker: ComponentStartupStatus,
     browser_worker: ComponentStartupStatus,
+    disk: Vec<DiskHealthSnapshot>,
 }
 
 impl StartupHealthSnapshot {
@@ -103,6 +105,7 @@ impl StartupHealthSnapshot {
             stt_worker,
             tts_worker: component_status(shared.voice.is_tts_available()),
             browser_worker: component_status(shared.browser.is_available()),
+            disk: diagnostics::collect_operator_disk_health(&cfg.core.state_dir),
         }
     }
 
@@ -114,26 +117,27 @@ impl StartupHealthSnapshot {
         }
     }
 
-    fn degraded_components(&self) -> Vec<&'static str> {
+    fn degraded_components(&self) -> Vec<String> {
         let mut components = Vec::new();
         if !self.fast_model_warm {
-            components.push("fast_model");
+            components.push("fast_model".to_string());
         }
         if !self.primary_model_warm {
-            components.push("primary_model");
+            components.push("primary_model".to_string());
         }
         if !self.embed_model_warm {
-            components.push("embed_model");
+            components.push("embed_model".to_string());
         }
         if !self.stt_worker.is_ready() {
-            components.push("stt_worker");
+            components.push("stt_worker".to_string());
         }
         if !self.tts_worker.is_ready() {
-            components.push("tts_worker");
+            components.push("tts_worker".to_string());
         }
         if !self.browser_worker.is_ready() {
-            components.push("browser_worker");
+            components.push("browser_worker".to_string());
         }
+        components.extend(diagnostics::disk_degraded_components(&self.disk));
         components
     }
 
@@ -146,13 +150,6 @@ impl StartupHealthSnapshot {
         }
     }
 
-    fn degraded_components_owned(&self) -> Vec<String> {
-        self.degraded_components()
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-    }
-
     fn into_health_response(
         self,
         trace_id: String,
@@ -160,7 +157,7 @@ impl StartupHealthSnapshot {
         config_path: String,
     ) -> HealthResponse {
         let status = self.overall_status().to_string();
-        let degraded_components = self.degraded_components_owned();
+        let degraded_components = self.degraded_components();
         HealthResponse {
             trace_id,
             core_version: CORE_VERSION.to_string(),
@@ -181,7 +178,19 @@ impl StartupHealthSnapshot {
             stt_worker: self.stt_worker.as_str().to_string(),
             tts_worker: self.tts_worker.as_str().to_string(),
             browser_worker: self.browser_worker.as_str().to_string(),
+            disk: self.disk.into_iter().map(disk_health_proto).collect(),
         }
+    }
+}
+
+fn disk_health_proto(snapshot: DiskHealthSnapshot) -> DiskHealth {
+    DiskHealth {
+        name: snapshot.name,
+        path: snapshot.path,
+        status: snapshot.status.as_str().to_string(),
+        available_bytes: snapshot.available_bytes,
+        total_bytes: snapshot.total_bytes,
+        detail: snapshot.detail,
     }
 }
 
@@ -222,6 +231,7 @@ async fn log_startup_health_summary(
     let snapshot = StartupHealthSnapshot::from_runtime(&cfg, &shared, stt_worker);
     let status = snapshot.overall_status();
     let degraded_components = snapshot.degraded_components_label();
+    let disk_degraded_components = diagnostics::disk_degraded_label(&snapshot.disk);
     let config_path = resolve_config_path()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|e| format!("unresolved: {e}"));
@@ -246,6 +256,7 @@ async fn log_startup_health_summary(
             stt_worker = snapshot.stt_worker.as_str(),
             tts_worker = snapshot.tts_worker.as_str(),
             browser_worker = snapshot.browser_worker.as_str(),
+            disk_degraded_components = %disk_degraded_components,
             "Dexter startup health summary"
         );
     } else {
@@ -268,6 +279,7 @@ async fn log_startup_health_summary(
             stt_worker = snapshot.stt_worker.as_str(),
             tts_worker = snapshot.tts_worker.as_str(),
             browser_worker = snapshot.browser_worker.as_str(),
+            disk_degraded_components = %disk_degraded_components,
             "Dexter startup health summary — degraded components present"
         );
     }
@@ -1193,6 +1205,8 @@ fn event_kind(event: &proto::client_event::Event) -> &'static str {
 
 #[cfg(test)]
 mod startup_health_tests {
+    use crate::diagnostics::{DiskHealthSnapshot, DiskStatus};
+
     use super::{
         component_status, stt_startup_status, ComponentStartupStatus, DexterConfig,
         StartupHealthSnapshot,
@@ -1242,12 +1256,13 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Degraded,
             browser_worker: ComponentStartupStatus::Ready,
+            disk: Vec::new(),
         };
 
         assert_eq!(snapshot.overall_status(), "degraded");
         assert_eq!(
             snapshot.degraded_components(),
-            vec!["primary_model", "tts_worker"]
+            vec!["primary_model".to_string(), "tts_worker".to_string()]
         );
         assert_eq!(
             snapshot.degraded_components_label(),
@@ -1267,11 +1282,42 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Ready,
+            disk: Vec::new(),
         };
 
         assert_eq!(snapshot.overall_status(), "ready");
         assert!(snapshot.degraded_components().is_empty());
         assert_eq!(snapshot.degraded_components_label(), "none");
+    }
+
+    #[test]
+    fn startup_health_snapshot_includes_disk_pressure_as_degraded() {
+        let snapshot = StartupHealthSnapshot {
+            fast_model: "fast".to_string(),
+            primary_model: "primary".to_string(),
+            embed_model: "embed".to_string(),
+            fast_model_warm: true,
+            primary_model_warm: true,
+            embed_model_warm: true,
+            stt_worker: ComponentStartupStatus::Ready,
+            tts_worker: ComponentStartupStatus::Ready,
+            browser_worker: ComponentStartupStatus::Ready,
+            disk: vec![DiskHealthSnapshot {
+                name: "workspace".to_string(),
+                path: "/Users/jason/Developer/Dex".to_string(),
+                status: DiskStatus::Warn,
+                available_bytes: 1024 * 1024 * 1024,
+                total_bytes: 100 * 1024 * 1024 * 1024,
+                detail: "below warning threshold".to_string(),
+            }],
+        };
+
+        assert_eq!(snapshot.overall_status(), "degraded");
+        assert_eq!(
+            snapshot.degraded_components(),
+            vec!["disk:workspace".to_string()]
+        );
+        assert_eq!(snapshot.degraded_components_label(), "disk:workspace");
     }
 
     #[test]
@@ -1286,6 +1332,7 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Degraded,
+            disk: Vec::new(),
         };
         let cfg = DexterConfig::default();
 

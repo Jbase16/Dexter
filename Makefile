@@ -22,7 +22,7 @@ SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli doctor actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-recovery live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli doctor actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-recovery live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-health live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -203,12 +203,23 @@ live-smoke-hud: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-smoke.sh --start-core
 
+## live-smoke-hud-health: run Swift HUD health + worker restart regression
+##
+## Builds release-mode dexter-core, starts it with logs at
+## /tmp/dexter-hud-health-core-smoke.log, launches the real Swift app with a
+## test-only health hook, fetches HUD health, restarts the browser worker via
+## RestartComponent, and asserts post-restart health returns to the HUD.
+live-smoke-hud-health: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-hud-health-smoke.sh --start-core
+
 ## live-smoke-hud-approval: run Swift HUD destructive-action approval regression
 ##
 ## Builds release-mode dexter-core, starts it with logs at
 ## /tmp/dexter-hud-approval-core-smoke.log, launches the real Swift app with
 ## DEXTER_HUD_SMOKE_ACTION_APPROVAL=deny, and asserts the HUD receives and
-## denies a destructive ActionRequest without executing it.
+## denies a destructive ActionRequest visibly, remembers the denial in context,
+## and does not execute it.
 live-smoke-hud-approval: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-approval-smoke.sh --start-core
@@ -244,6 +255,7 @@ live-smoke-all:
 	$(MAKE) live-smoke-action-matrix
 	$(MAKE) live-smoke-action-receipts
 	$(MAKE) live-smoke-hud
+	$(MAKE) live-smoke-hud-health
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel
 	$(MAKE) live-smoke-barge-in

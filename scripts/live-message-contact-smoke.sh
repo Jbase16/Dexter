@@ -270,6 +270,7 @@ run_known_contact_smoke() {
         fi
     else
         assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+        assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
         assert_absent "$name" "$offset" "Operator approved DESTRUCTIVE action — executing" || ok=1
         assert_absent "$name" "$offset" "Approved action completed" || ok=1
 
@@ -277,8 +278,8 @@ run_known_contact_smoke() {
             say "$FAIL" "$name - CLI did not auto-deny the ActionRequest"
             ok=1
         fi
-        if ! grep -Fq "Action cancelled: operator rejected the action" "$out"; then
-            say "$FAIL" "$name - operator-visible rejection message was missing"
+        if ! grep -Fq "Action denied before execution:" "$out"; then
+            say "$FAIL" "$name - operator-visible denial message was missing"
             ok=1
         fi
         if grep -Fxq "Sent." "$out"; then

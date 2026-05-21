@@ -260,6 +260,7 @@ make restart-stt       # restart STT worker, then print post-restart health
 make restart-tts       # restart TTS worker, then print post-restart health
 make restart-browser   # restart browser worker, then print post-restart health
 make live-smoke-action-receipts
+make live-smoke-hud-approval
 ```
 
 Equivalent direct CLI commands:
@@ -280,13 +281,17 @@ Regression command:
 ```bash
 make live-smoke-recovery
 make live-smoke-action-receipts
+make live-smoke-hud-approval
 ```
 
 The recovery smoke starts a release core without Swift UI, waits for `doctor`
 to report clean health, restarts browser/TTS/STT one by one, verifies `doctor`
 after each restart, and shuts the daemon down. The action-receipts smoke drives
 safe, denied, and approved synthetic actions, then verifies `--actions recent`
-and `--actions last` against the audit log.
+and `--actions last` against the audit log. The HUD approval smoke launches the
+real Swift app, auto-denies a destructive ActionRequest, verifies the denial is
+visible to the operator, verifies the denial is injected into conversation
+context, and verifies the destructive command did not execute.
 
 ## File pointers (orientation)
 

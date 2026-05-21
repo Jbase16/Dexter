@@ -6,7 +6,8 @@
 # policy to deny the ActionRequest. Assertions prove:
 #   - Swift received the ActionRequest through the HUD session.
 #   - Swift sent an ActionApproval denial.
-#   - Rust rejected the action.
+#   - Rust rejected the action and emitted the denial visibly.
+#   - Rust injected the denied action into conversation context.
 #   - The destructive command did not run.
 #
 # Usage:
@@ -214,12 +215,19 @@ run_assertions() {
     assert_log_contains "$name" "$SWIFT_LOG" "$TARGET_DIR" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] actionApproval" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "approved=false" || ok=1
-    assert_log_contains "$name" "$SWIFT_LOG" "Action cancelled:" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[DexterClient] onResponse ← actionReceipt:" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] actionReceipt" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "outcome=denied" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showActionReceipt" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "Action denied before execution:" || ok=1
 
     assert_log_contains "$name" "$CORE_LOG" "Action requires operator approval" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "DESTRUCTIVE action awaiting operator approval" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "ActionApproval received" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action rejected by operator" || ok=1
+    assert_log_contains "$name" "$CORE_LOG" "Action receipt emitted" || ok=1
+    assert_log_contains "$name" "$CORE_LOG" "Action status injected into conversation context" || ok=1
+    assert_log_contains "$name" "$CORE_LOG" "Action denied" || ok=1
     assert_log_absent "$name" "$CORE_LOG" "Action dispatched to background task" || ok=1
 
     if [[ ! -f "$MARKER" ]]; then

@@ -3,6 +3,7 @@ mod browser;
 mod config;
 mod constants;
 mod context_observer;
+mod diagnostics;
 mod humor;
 mod inference;
 mod ipc;
@@ -43,6 +44,12 @@ async fn main() -> Result<()> {
     // Wrap in Arc immediately — CoreService in ipc::server holds an Arc<DexterConfig>
     // so sessions can be constructed cheaply without cloning the full struct.
     let cfg = Arc::new(config::load()?);
+
+    // Phase 40: disk pressure is now an explicit startup diagnostic. It never
+    // blocks daemon startup, but it surfaces the exact failure class that can
+    // make session persistence, worker caches, or local builds fail later.
+    let startup_disk = diagnostics::collect_operator_disk_health(&cfg.core.state_dir);
+    diagnostics::log_disk_health(&startup_disk);
 
     info!(
         version     = constants::CORE_VERSION,

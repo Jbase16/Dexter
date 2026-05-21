@@ -68,19 +68,64 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                 Task { await c?.setTtsMuted(muted) }
             }
 
+            // On-demand daemon health: cheap unary Health RPC, rendered locally in the HUD.
+            // This does not touch the session stream, model router, TTS, or action pipeline.
+            window.hud.onHealthRequest = { [weak c, weak window] in
+                window?.hud.showHealthLoading()
+                Task { [weak c, weak window] in
+                    let report = await c?.fetchHealthReport()
+                        ?? DexterHealthHUDReport(
+                            markdown: DexterClient.unavailableHealthMarkdown(reason: "Dexter client is not ready."),
+                            restartTargets: []
+                        )
+                    await MainActor.run {
+                        window?.hud.showHealthReport(report)
+                    }
+                }
+            }
+
+            // Operator-triggered worker recovery from the HUD health surface.
+            // This is a daemon recovery RPC, not a model action and not an inferred side effect.
+            window.hud.onHealthRestartRequest = { [weak c, weak window] target in
+                window?.hud.showHealthRestarting(target)
+                Task { [weak c, weak window] in
+                    let report = await c?.restartWorkerAndFetchHealthReport(target)
+                        ?? DexterHealthHUDReport(
+                            markdown: DexterClient.unavailableHealthMarkdown(reason: "Dexter client is not ready."),
+                            restartTargets: [target]
+                        )
+                    await MainActor.run {
+                        window?.hud.showHealthReport(report)
+                    }
+                }
+            }
+
             if HUDSmokeConfig.enabled {
                 HUDSmokeConfig.log(
-                    "enabled text='\(HUDSmokeConfig.text)' submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
+                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
                 )
                 Task {
                     try? await Task.sleep(for: .seconds(HUDSmokeConfig.submitDelaySecs))
                     await MainActor.run {
-                        HUDSmokeConfig.log("autoSubmit")
-                        if HUDSmokeConfig.fromVoice {
-                            window.hud.showOperatorInput(HUDSmokeConfig.text)
-                            Task { await c.sendVoiceSmokeInput(HUDSmokeConfig.text) }
+                        if HUDSmokeConfig.idleOnly {
+                            HUDSmokeConfig.log("idleOnly")
+                        } else if HUDSmokeConfig.healthRequest {
+                            window.hud.performHealthRequestForSmoke()
                         } else {
-                            window.hud.onTextSubmit?(HUDSmokeConfig.text)
+                            HUDSmokeConfig.log("autoSubmit")
+                            if HUDSmokeConfig.fromVoice {
+                                window.hud.showOperatorInput(HUDSmokeConfig.text)
+                                Task { await c.sendVoiceSmokeInput(HUDSmokeConfig.text) }
+                            } else {
+                                window.hud.onTextSubmit?(HUDSmokeConfig.text)
+                            }
+                        }
+                    }
+
+                    if let restartComponent = HUDSmokeConfig.restartComponent {
+                        try? await Task.sleep(for: .seconds(HUDSmokeConfig.restartDelaySecs))
+                        await MainActor.run {
+                            window.hud.performHealthRestartForSmoke(restartComponent)
                         }
                     }
 
@@ -141,8 +186,30 @@ private enum HUDSmokeConfig {
         ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_TEXT"] ?? "what's 2 plus 2"
     }()
 
+    static let healthRequest: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_HEALTH"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let idleOnly: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_IDLE_ONLY"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let restartComponent: DexterWorkerRestartTarget? = {
+        guard let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_RESTART_COMPONENT"],
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return DexterWorkerRestartTarget.parse(raw)
+    }()
+
     static let submitDelaySecs: Int64 = {
         parseSecs("DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS", defaultValue: 3)
+    }()
+
+    static let restartDelaySecs: Int64 = {
+        parseSecs("DEXTER_HUD_SMOKE_RESTART_DELAY_SECS", defaultValue: 3)
     }()
 
     static let exitAfterSecs: Int64 = {

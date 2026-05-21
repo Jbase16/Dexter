@@ -53,6 +53,10 @@ enum C {
     /// Thin divider between the history panel and the current exchange area.
     static let historyDividerH:  CGFloat = 1
 
+    /// Health recovery action row — visible only when the health snapshot exposes
+    /// a degraded worker that can be restarted through the daemon recovery RPC.
+    static let healthActionRowHeight: CGFloat = 28
+
     /// TTS mute button — sits to the right of the input field in the input bar.
     static let muteButtonSize: CGFloat = 26
     static let muteButtonGap:  CGFloat = 6
@@ -102,16 +106,34 @@ final class HUDWindow: NSPanel {
     /// `true` = TTS muted (text-only responses); `false` = TTS active.
     var onMuteToggle: ((Bool) -> Void)?
 
+    /// Set by App.swift. Called when the operator asks for daemon health.
+    var onHealthRequest: (() -> Void)?
+
+    /// Set by App.swift. Called when the operator asks to restart a degraded worker.
+    var onHealthRestartRequest: ((DexterWorkerRestartTarget) -> Void)?
+
     // MARK: - Subviews
 
     private let textArea:   HUDTextView
     private let inputField: HUDInputField
 
+    private let textAreaNormalFrame: NSRect
+    private let textAreaWithHealthActionsFrame: NSRect
+
     // History panel — built in buildContent(), added to effect view.
     private let historyView: HUDHistoryView
 
+    // Health recovery controls — visible only for degraded restartable workers.
+    private let healthActionsView: NSStackView
+    private let restartSTTButton: NSButton
+    private let restartTTSButton: NSButton
+    private let restartBrowserButton: NSButton
+
     // Toggle button — shows/hides the history panel.
     private let toggleButton: NSButton
+
+    // Health button — requests a compact daemon health snapshot.
+    private let healthButton: NSButton
 
     // Mute button — toggles TTS on/off.
     private let muteButton: NSButton
@@ -122,6 +144,10 @@ final class HUDWindow: NSPanel {
 
     // Whether the history panel is currently expanded.
     private var historyVisible: Bool = false
+
+    // True while the text area is showing a utility surface such as daemon health.
+    // The next real Dexter response clears it before streaming begins.
+    private var showingUtilityDocument: Bool = false
 
     // Thin divider between history panel and current exchange area.
     // Stored directly so toggleHistory() can show/hide it without a tag lookup.
@@ -152,6 +178,18 @@ final class HUDWindow: NSPanel {
         let inputRect = NSRect(x: 0, y: 0, width: C.width, height: inputBarHeight)
         let textRect  = NSRect(x: 0, y: inputBarHeight,
                                width: C.width, height: C.height - inputBarHeight)
+        let healthActionsRect = NSRect(
+            x: C.inputPadding,
+            y: inputBarHeight + C.inputPadding / 2,
+            width: C.width - C.inputPadding * 2,
+            height: C.healthActionRowHeight
+        )
+        let healthTextRect = NSRect(
+            x: 0,
+            y: inputBarHeight + C.healthActionRowHeight + C.inputPadding,
+            width: C.width,
+            height: C.height - inputBarHeight - C.healthActionRowHeight - C.inputPadding
+        )
 
         // History view positioned above the base window height (invisible until expanded).
         let historyRect = NSRect(x: 0, y: C.height, width: C.width, height: C.historyHeight)
@@ -160,12 +198,21 @@ final class HUDWindow: NSPanel {
         let btnX = C.width - C.toggleButtonSize - C.inputPadding
         let btnY = C.height - C.toggleButtonSize - C.inputPadding
         let toggleRect = NSRect(x: btnX, y: btnY, width: C.toggleButtonSize, height: C.toggleButtonSize)
+        let healthRect = NSRect(
+            x: btnX - C.toggleButtonSize - C.muteButtonGap,
+            y: btnY,
+            width: C.toggleButtonSize,
+            height: C.toggleButtonSize
+        )
 
         // Mute button: right-aligned in the input bar, vertically centred.
         let muteX = C.width - C.inputPadding - C.muteButtonSize
         let muteY = C.inputPadding + (C.inputHeight - C.muteButtonSize) / 2
         let muteRect = NSRect(x: muteX, y: muteY,
                               width: C.muteButtonSize, height: C.muteButtonSize)
+
+        textAreaNormalFrame = textRect
+        textAreaWithHealthActionsFrame = healthTextRect
 
         textArea   = HUDTextView(frame: textRect)
         inputField = HUDInputField(frame: NSRect(
@@ -175,7 +222,12 @@ final class HUDWindow: NSPanel {
             width:  C.width - C.inputPadding * 2 - C.muteButtonSize - C.muteButtonGap,
             height: C.inputHeight
         ))
+        healthActionsView = NSStackView(frame: healthActionsRect)
+        restartSTTButton = NSButton(frame: .zero)
+        restartTTSButton = NSButton(frame: .zero)
+        restartBrowserButton = NSButton(frame: .zero)
         historyView  = HUDHistoryView(frame: historyRect)
+        healthButton = NSButton(frame: healthRect)
         toggleButton = NSButton(frame: toggleRect)
         muteButton   = NSButton(frame: muteRect)
 
@@ -217,6 +269,20 @@ final class HUDWindow: NSPanel {
 
         effect.addSubview(textArea)
         effect.addSubview(inputField)
+
+        healthActionsView.orientation = .horizontal
+        healthActionsView.alignment = .centerY
+        healthActionsView.distribution = .fillEqually
+        healthActionsView.spacing = C.muteButtonGap
+        healthActionsView.autoresizingMask = [.width, .maxYMargin]
+        healthActionsView.isHidden = true
+        configureHealthActionButton(restartSTTButton, target: .stt)
+        configureHealthActionButton(restartTTSButton, target: .tts)
+        configureHealthActionButton(restartBrowserButton, target: .browser)
+        healthActionsView.addArrangedSubview(restartSTTButton)
+        healthActionsView.addArrangedSubview(restartTTSButton)
+        healthActionsView.addArrangedSubview(restartBrowserButton)
+        effect.addSubview(healthActionsView)
 
         // Thin separator between text area and input field.
         let sep = NSBox(frame: NSRect(
@@ -266,6 +332,21 @@ final class HUDWindow: NSPanel {
         toggleButton.action           = #selector(toggleHistory)
         effect.addSubview(toggleButton)
 
+        // Health button — quiet status/diagnostics surface, left of history.
+        if let healthImage = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Show health") {
+            healthButton.image        = healthImage
+            healthButton.imageScaling = .scaleProportionallyDown
+        } else {
+            healthButton.title = "H"
+        }
+        healthButton.bezelStyle       = .inline
+        healthButton.isBordered       = false
+        healthButton.alphaValue       = 0.45
+        healthButton.autoresizingMask = [.minXMargin, .minYMargin]
+        healthButton.target           = self
+        healthButton.action           = #selector(requestHealth)
+        effect.addSubview(healthButton)
+
         // Mute button — stays at bottom-right of input bar as window grows upward.
         muteButton.bezelStyle       = .inline
         muteButton.isBordered       = false
@@ -275,6 +356,115 @@ final class HUDWindow: NSPanel {
         muteButton.action           = #selector(toggleMute)
         updateMuteIcon()
         effect.addSubview(muteButton)
+    }
+
+    // MARK: - Health
+
+    private func configureHealthActionButton(_ button: NSButton, target: DexterWorkerRestartTarget) {
+        button.title = target.buttonTitle
+        button.font = .systemFont(ofSize: 11, weight: .medium)
+        button.bezelStyle = .rounded
+        button.isBordered = true
+        button.controlSize = .small
+        button.toolTip = "Restart \(target.displayName)"
+
+        switch target {
+        case .stt:
+            button.target = self
+            button.action = #selector(restartSTTWorker)
+        case .tts:
+            button.target = self
+            button.action = #selector(restartTTSWorker)
+        case .browser:
+            button.target = self
+            button.action = #selector(restartBrowserWorker)
+        }
+    }
+
+    @objc private func requestHealth() {
+        cancelDismiss()
+        onHealthRequest?()
+    }
+
+    func showHealthLoading() {
+        showUtilityMarkdown("""
+        ### Dexter Health
+
+        Checking daemon health...
+        """, restartTargets: [])
+    }
+
+    func showHealthReport(_ markdown: String) {
+        showUtilityMarkdown(markdown, restartTargets: [])
+    }
+
+    func showHealthReport(_ report: DexterHealthHUDReport) {
+        showUtilityMarkdown(report.markdown, restartTargets: report.restartTargets)
+    }
+
+    func showActionReceipt(_ markdown: String) {
+        HUDSmokeLog.log("showActionReceipt chars=\(markdown.count)")
+        showUtilityMarkdown(markdown, restartTargets: [])
+    }
+
+    func showHealthRestarting(_ target: DexterWorkerRestartTarget) {
+        showUtilityMarkdown("""
+        ### Dexter Health
+
+        Restarting \(target.displayName)...
+        """, restartTargets: [])
+    }
+
+    func performHealthRequestForSmoke() {
+        HUDSmokeLog.log("healthRequest")
+        requestHealth()
+    }
+
+    func performHealthRestartForSmoke(_ target: DexterWorkerRestartTarget) {
+        HUDSmokeLog.log("restartRequest target=\(target.smokeName)")
+        requestHealthRestart(target)
+    }
+
+    @objc private func restartSTTWorker() {
+        requestHealthRestart(.stt)
+    }
+
+    @objc private func restartTTSWorker() {
+        requestHealthRestart(.tts)
+    }
+
+    @objc private func restartBrowserWorker() {
+        requestHealthRestart(.browser)
+    }
+
+    private func requestHealthRestart(_ target: DexterWorkerRestartTarget) {
+        cancelDismiss()
+        onHealthRestartRequest?(target)
+    }
+
+    private func showUtilityMarkdown(_ markdown: String, restartTargets: [DexterWorkerRestartTarget]) {
+        HUDSmokeLog.log("showUtilityMarkdown chars=\(markdown.count)")
+        cancelDismiss()
+        pendingTurnOperatorText = ""
+        showingUtilityDocument = true
+        configureHealthActions(restartTargets)
+        textArea.clear()
+        textArea.markResponseStart()
+        textArea.appendToken(markdown)
+        textArea.finalizeWithMarkdown()
+        show()
+        scheduleDismiss()
+    }
+
+    private func configureHealthActions(_ targets: [DexterWorkerRestartTarget]) {
+        let targetSet = Set(targets)
+        restartSTTButton.isHidden = !targetSet.contains(.stt)
+        restartTTSButton.isHidden = !targetSet.contains(.tts)
+        restartBrowserButton.isHidden = !targetSet.contains(.browser)
+
+        let hasActions = !targets.isEmpty
+        healthActionsView.isHidden = !hasActions
+        textArea.frame = hasActions ? textAreaWithHealthActionsFrame : textAreaNormalFrame
     }
 
     // MARK: - TTS mute toggle
@@ -370,6 +560,8 @@ final class HUDWindow: NSPanel {
     /// Clears any previous response so each turn starts fresh.
     func showOperatorInput(_ text: String) {
         HUDSmokeLog.log("showOperatorInput chars=\(text.count)")
+        showingUtilityDocument = false
+        configureHealthActions([])
         pendingTurnOperatorText = text   // capture before clearing textArea
         textArea.clear()
         textArea.showOperatorTurn(text)
@@ -381,6 +573,12 @@ final class HUDWindow: NSPanel {
     func beginResponseStreaming() {
         HUDSmokeLog.log("beginResponseStreaming")
         cancelDismiss()
+        if showingUtilityDocument {
+            configureHealthActions([])
+            textArea.clear()
+            pendingTurnOperatorText = ""
+            showingUtilityDocument = false
+        }
         // Record the insertion point so finalizeWithMarkdown() knows where the
         // operator-turn prefix ends and the response region begins.
         textArea.markResponseStart()

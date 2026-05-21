@@ -442,11 +442,40 @@ struct Dexter_V1_HealthResponse: @unchecked Sendable {
     set {_uniqueStorage()._browserWorker = newValue}
   }
 
+  var disk: [Dexter_V1_DiskHealth] {
+    get {_storage._disk}
+    set {_uniqueStorage()._disk = newValue}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+struct Dexter_V1_DiskHealth: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// state | workspace | temp
+  var name: String = String()
+
+  var path: String = String()
+
+  /// ready | warn | critical | unavailable
+  var status: String = String()
+
+  var availableBytes: UInt64 = 0
+
+  var totalBytes: UInt64 = 0
+
+  var detail: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
 }
 
 struct Dexter_V1_RestartComponentRequest: Sendable {
@@ -620,6 +649,15 @@ struct Dexter_V1_ServerEvent: Sendable {
     set {event = .vadHint(newValue)}
   }
 
+  /// Live post-action audit receipt for HUD visibility
+  var actionReceipt: Dexter_V1_ActionReceipt {
+    get {
+      if case .actionReceipt(let v)? = event {return v}
+      return Dexter_V1_ActionReceipt()
+    }
+    set {event = .actionReceipt(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   enum OneOf_Event: Equatable, Sendable {
@@ -631,6 +669,8 @@ struct Dexter_V1_ServerEvent: Sendable {
     case configSync(Dexter_V1_ConfigSync)
     /// Phase 24: adaptive silence threshold for next utterance
     case vadHint(Dexter_V1_VadHint)
+    /// Live post-action audit receipt for HUD visibility
+    case actionReceipt(Dexter_V1_ActionReceipt)
 
   }
 
@@ -763,6 +803,39 @@ struct Dexter_V1_ActionRequest: Sendable {
 
   /// JSON-encoded action parameters (type-specific)
   var payload: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// Compact, post-action receipt emitted after Rust knows the actual outcome.
+/// This is not model text: it is Rust-side execution/audit metadata for the HUD.
+struct Dexter_V1_ActionReceipt: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Correlates with ActionRequest and audit.jsonl
+  var actionID: String = String()
+
+  /// shell | file_read | file_write | applescript | browser | message_send
+  var actionType: String = String()
+
+  /// safe | cautious | destructive
+  var category: String = String()
+
+  /// Operator-readable target/summary
+  var description_p: String = String()
+
+  /// executed | denied | failed | pending
+  var outcome: String = String()
+
+  /// Bounded result summary, never full unbounded output
+  var summary: String = String()
+
+  /// Local append-only audit source
+  var auditLogPath: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1025,7 +1098,7 @@ extension Dexter_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".HealthResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0")
 
   fileprivate class _StorageClass {
     var _traceID: String = String()
@@ -1047,6 +1120,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
     var _sttWorker: String = String()
     var _ttsWorker: String = String()
     var _browserWorker: String = String()
+    var _disk: [Dexter_V1_DiskHealth] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1076,6 +1150,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       _sttWorker = source._sttWorker
       _ttsWorker = source._ttsWorker
       _browserWorker = source._browserWorker
+      _disk = source._disk
     }
   }
 
@@ -1113,6 +1188,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         case 17: try { try decoder.decodeSingularStringField(value: &_storage._sttWorker) }()
         case 18: try { try decoder.decodeSingularStringField(value: &_storage._ttsWorker) }()
         case 19: try { try decoder.decodeSingularStringField(value: &_storage._browserWorker) }()
+        case 20: try { try decoder.decodeRepeatedMessageField(value: &_storage._disk) }()
         default: break
         }
       }
@@ -1178,6 +1254,9 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       if !_storage._browserWorker.isEmpty {
         try visitor.visitSingularStringField(value: _storage._browserWorker, fieldNumber: 19)
       }
+      if !_storage._disk.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._disk, fieldNumber: 20)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1206,10 +1285,66 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if _storage._sttWorker != rhs_storage._sttWorker {return false}
         if _storage._ttsWorker != rhs_storage._ttsWorker {return false}
         if _storage._browserWorker != rhs_storage._browserWorker {return false}
+        if _storage._disk != rhs_storage._disk {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_DiskHealth: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".DiskHealth"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}path\0\u{1}status\0\u{3}available_bytes\0\u{3}total_bytes\0\u{1}detail\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.availableBytes) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.totalBytes) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.detail) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 2)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 3)
+    }
+    if self.availableBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.availableBytes, fieldNumber: 4)
+    }
+    if self.totalBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.totalBytes, fieldNumber: 5)
+    }
+    if !self.detail.isEmpty {
+      try visitor.visitSingularStringField(value: self.detail, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_DiskHealth, rhs: Dexter_V1_DiskHealth) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.path != rhs.path {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.availableBytes != rhs.availableBytes {return false}
+    if lhs.totalBytes != rhs.totalBytes {return false}
+    if lhs.detail != rhs.detail {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1434,7 +1569,7 @@ extension Dexter_V1_ClientEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Dexter_V1_ServerEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ServerEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}text_response\0\u{3}entity_state\0\u{3}audio_response\0\u{3}action_request\0\u{3}config_sync\0\u{3}vad_hint\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}text_response\0\u{3}entity_state\0\u{3}audio_response\0\u{3}action_request\0\u{3}config_sync\0\u{3}vad_hint\0\u{3}action_receipt\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1521,6 +1656,19 @@ extension Dexter_V1_ServerEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
           self.event = .vadHint(v)
         }
       }()
+      case 8: try {
+        var v: Dexter_V1_ActionReceipt?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .actionReceipt(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .actionReceipt(v)
+        }
+      }()
       default: break
       }
     }
@@ -1558,6 +1706,10 @@ extension Dexter_V1_ServerEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
     case .vadHint?: try {
       guard case .vadHint(let v)? = self.event else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    }()
+    case .actionReceipt?: try {
+      guard case .actionReceipt(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
     }()
     case nil: break
     }
@@ -1852,6 +2004,66 @@ extension Dexter_V1_ActionRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.description_p != rhs.description_p {return false}
     if lhs.category != rhs.category {return false}
     if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_ActionReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ActionReceipt"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{3}action_type\0\u{1}category\0\u{1}description\0\u{1}outcome\0\u{1}summary\0\u{3}audit_log_path\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.actionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.actionType) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.category) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.description_p) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.outcome) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.summary) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.auditLogPath) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.actionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.actionID, fieldNumber: 1)
+    }
+    if !self.actionType.isEmpty {
+      try visitor.visitSingularStringField(value: self.actionType, fieldNumber: 2)
+    }
+    if !self.category.isEmpty {
+      try visitor.visitSingularStringField(value: self.category, fieldNumber: 3)
+    }
+    if !self.description_p.isEmpty {
+      try visitor.visitSingularStringField(value: self.description_p, fieldNumber: 4)
+    }
+    if !self.outcome.isEmpty {
+      try visitor.visitSingularStringField(value: self.outcome, fieldNumber: 5)
+    }
+    if !self.summary.isEmpty {
+      try visitor.visitSingularStringField(value: self.summary, fieldNumber: 6)
+    }
+    if !self.auditLogPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.auditLogPath, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_ActionReceipt, rhs: Dexter_V1_ActionReceipt) -> Bool {
+    if lhs.actionID != rhs.actionID {return false}
+    if lhs.actionType != rhs.actionType {return false}
+    if lhs.category != rhs.category {return false}
+    if lhs.description_p != rhs.description_p {return false}
+    if lhs.outcome != rhs.outcome {return false}
+    if lhs.summary != rhs.summary {return false}
+    if lhs.auditLogPath != rhs.auditLogPath {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

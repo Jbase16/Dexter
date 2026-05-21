@@ -75,11 +75,15 @@ mod proto {
     tonic::include_proto!("dexter.v1");
 }
 
+#[allow(dead_code)]
+#[path = "../diagnostics.rs"]
+mod diagnostics;
+
 use proto::{
     client_event, dexter_service_client::DexterServiceClient, server_event, ActionApproval,
-    ActionCategory, ClientEvent, EntityState, HealthRequest, HealthResponse, PingRequest,
-    RestartComponent, RestartComponentRequest, SystemEvent, SystemEventType, TextInput, UiAction,
-    UiActionType,
+    ActionCategory, ClientEvent, DiskHealth, EntityState, HealthRequest, HealthResponse,
+    PingRequest, RestartComponent, RestartComponentRequest, SystemEvent, SystemEventType,
+    TextInput, UiAction, UiActionType,
 };
 
 const DEFAULT_SOCKET: &str = "/tmp/dexter.sock";
@@ -588,7 +592,11 @@ async fn run_doctor(cfg: &CliConfig) -> Result<i32> {
         DoctorStatus::Warn,
     ));
     checks.push(check_daemon_ping(&cfg.socket_path).await);
-    checks.extend(check_daemon_health(&cfg.socket_path).await);
+    let daemon_health_checks = check_daemon_health(&cfg.socket_path).await;
+    if !has_disk_checks(&daemon_health_checks) {
+        checks.extend(check_local_disk());
+    }
+    checks.extend(daemon_health_checks);
     checks.push(check_ollama(ollama_base_url.as_deref()).await);
 
     print_doctor_report(&checks);
@@ -1137,6 +1145,32 @@ fn check_path_exists(name: &str, path: &Path, missing_status: DoctorStatus) -> D
     }
 }
 
+fn has_disk_checks(checks: &[DoctorCheck]) -> bool {
+    checks.iter().any(|check| check.name.starts_with("disk "))
+}
+
+fn check_local_disk() -> Vec<DoctorCheck> {
+    let state_dir = load_action_state_dir().unwrap_or_else(|_| default_action_state_dir());
+    diagnostics::collect_operator_disk_health(&state_dir)
+        .into_iter()
+        .map(disk_snapshot_check)
+        .collect()
+}
+
+fn disk_snapshot_check(snapshot: diagnostics::DiskHealthSnapshot) -> DoctorCheck {
+    DoctorCheck {
+        status: doctor_status_for_disk_status(snapshot.status.as_str()),
+        name: format!("disk {}", snapshot.name),
+        detail: format_disk_detail(
+            &snapshot.path,
+            snapshot.status.as_str(),
+            snapshot.available_bytes,
+            snapshot.total_bytes,
+            &snapshot.detail,
+        ),
+    }
+}
+
 async fn check_daemon_ping(socket_path: &str) -> DoctorCheck {
     let connect_result = tokio::time::timeout(DOCTOR_CONNECT_TIMEOUT, connect(socket_path)).await;
     let mut client = match connect_result {
@@ -1244,6 +1278,7 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
         "browser worker",
         &health.browser_worker,
     ));
+    checks.extend(health.disk.into_iter().map(disk_health_check));
     checks.push(DoctorCheck::ok(
         "daemon config",
         format!(
@@ -1254,6 +1289,20 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
         ),
     ));
     checks
+}
+
+fn disk_health_check(disk: DiskHealth) -> DoctorCheck {
+    DoctorCheck {
+        status: doctor_status_for_disk_status(&disk.status),
+        name: format!("disk {}", empty_as_unknown(&disk.name)),
+        detail: format_disk_detail(
+            &disk.path,
+            &disk.status,
+            disk.available_bytes,
+            disk.total_bytes,
+            &disk.detail,
+        ),
+    }
 }
 
 fn doctor_status_for_daemon_health(status: &str) -> DoctorStatus {
@@ -1270,6 +1319,15 @@ fn doctor_status_for_component_status(status: &str) -> DoctorStatus {
         "ready" => DoctorStatus::Ok,
         "pending" => DoctorStatus::Warn,
         "degraded" => DoctorStatus::Fail,
+        _ => DoctorStatus::Warn,
+    }
+}
+
+fn doctor_status_for_disk_status(status: &str) -> DoctorStatus {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "ready" => DoctorStatus::Ok,
+        "warn" => DoctorStatus::Warn,
+        "critical" | "unavailable" => DoctorStatus::Fail,
         _ => DoctorStatus::Warn,
     }
 }
@@ -1301,6 +1359,40 @@ fn empty_as_unknown(value: &str) -> &str {
         "unknown"
     } else {
         trimmed
+    }
+}
+
+fn format_disk_detail(
+    path: &str,
+    status: &str,
+    available_bytes: u64,
+    total_bytes: u64,
+    detail: &str,
+) -> String {
+    let available = diagnostics::format_bytes_gib(available_bytes);
+    let total = if total_bytes == 0 {
+        "unknown total".to_string()
+    } else {
+        format!("{} total", diagnostics::format_bytes_gib(total_bytes))
+    };
+    let detail = detail.trim();
+    if detail.is_empty() {
+        format!(
+            "{}: {} available / {} ({})",
+            empty_as_unknown(path),
+            available,
+            total,
+            empty_as_unknown(status)
+        )
+    } else {
+        format!(
+            "{}: {} available / {} ({}) - {}",
+            empty_as_unknown(path),
+            available,
+            total,
+            empty_as_unknown(status),
+            detail
+        )
     }
 }
 
@@ -1937,6 +2029,39 @@ mod tests {
     }
 
     #[test]
+    fn doctor_status_for_disk_status_maps_pressure_levels() {
+        assert_eq!(doctor_status_for_disk_status("ready"), DoctorStatus::Ok);
+        assert_eq!(doctor_status_for_disk_status("warn"), DoctorStatus::Warn);
+        assert_eq!(
+            doctor_status_for_disk_status("critical"),
+            DoctorStatus::Fail
+        );
+        assert_eq!(
+            doctor_status_for_disk_status("unavailable"),
+            DoctorStatus::Fail
+        );
+    }
+
+    #[test]
+    fn disk_health_check_formats_operator_readable_detail() {
+        let check = disk_health_check(DiskHealth {
+            name: "state".to_string(),
+            path: "/Users/jason/.dexter/state".to_string(),
+            status: "warn".to_string(),
+            available_bytes: 1536 * 1024 * 1024,
+            total_bytes: 100 * 1024 * 1024 * 1024,
+            detail: "below warning threshold".to_string(),
+        });
+
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert_eq!(check.name, "disk state");
+        assert!(check.detail.contains("/Users/jason/.dexter/state"));
+        assert!(check.detail.contains("1.5 GiB available"));
+        assert!(check.detail.contains("100.0 GiB total"));
+        assert!(check.detail.contains("below warning threshold"));
+    }
+
+    #[test]
     fn daemon_health_checks_expand_ready_snapshot() {
         let checks = daemon_health_checks(HealthResponse {
             trace_id: "trace".to_string(),
@@ -1958,6 +2083,14 @@ mod tests {
             stt_worker: "ready".to_string(),
             tts_worker: "ready".to_string(),
             browser_worker: "ready".to_string(),
+            disk: vec![DiskHealth {
+                name: "state".to_string(),
+                path: "/Users/jason/.dexter/state".to_string(),
+                status: "ready".to_string(),
+                available_bytes: 10 * 1024 * 1024 * 1024,
+                total_bytes: 100 * 1024 * 1024 * 1024,
+                detail: "ok".to_string(),
+            }],
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Ok);
@@ -1967,6 +2100,9 @@ mod tests {
         assert!(checks
             .iter()
             .any(|check| check.name == "primary model" && check.detail == "gemma4:26b warm"));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "disk state" && check.status == DoctorStatus::Ok));
     }
 
     #[test]
@@ -1991,6 +2127,7 @@ mod tests {
             stt_worker: "ready".to_string(),
             tts_worker: "degraded".to_string(),
             browser_worker: "ready".to_string(),
+            disk: Vec::new(),
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Fail);
@@ -2200,6 +2337,22 @@ async fn run_turn(
                         stdout_lock,
                         "[ACTION REPLY → action_id={} approved={approved}]",
                         req.action_id,
+                    )?;
+                }
+            }
+
+            Some(server_event::Event::ActionReceipt(receipt)) => {
+                activity_seen = true;
+                if !cfg.quiet {
+                    writeln!(
+                        stdout_lock,
+                        "[ACTION RECEIPT id={} outcome={} type={}]\n  description: {}\n  summary: {}\n  audit: {}",
+                        receipt.action_id,
+                        receipt.outcome,
+                        receipt.action_type,
+                        receipt.description,
+                        receipt.summary,
+                        receipt.audit_log_path,
                     )?;
                 }
             }
