@@ -12,12 +12,14 @@ set -u
 set -o pipefail
 
 SOCKET="/tmp/dexter.sock"
+SHELL_SOCKET="/tmp/dexter-shell.sock"
 LOG="/tmp/dexter-action-receipts-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 CORE_PID=""
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 
 PASS="PASS"
 FAIL="FAIL"
@@ -47,14 +49,6 @@ import sys
 print(json.dumps(sys.argv[1]))
 PY
 }
-
-cleanup() {
-    if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
-        wait "$CORE_PID" >/dev/null 2>&1 || true
-    fi
-}
-trap cleanup EXIT INT TERM
 
 socket_accepts() {
     python3 - "$SOCKET" <<'PY' >/dev/null 2>&1
@@ -90,6 +84,36 @@ require_bins() {
     fi
 }
 
+stop_core_if_owned() {
+    if [[ -z "$CORE_PID" ]]; then
+        return 0
+    fi
+
+    local pid="$CORE_PID"
+    CORE_PID=""
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    stop_core_if_owned >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+assert_sockets_clean() {
+    local label="$1"
+    if socket_accepts; then
+        say "$FAIL" "$label - daemon still accepts connections after cleanup"
+        return 1
+    fi
+    if [[ -e "$SOCKET" || -e "$SHELL_SOCKET" ]]; then
+        say "$FAIL" "$label - stale socket files remain"
+        ls -l "$SOCKET" "$SHELL_SOCKET" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
 start_core_if_requested() {
     if [[ "$START_CORE" -ne 1 ]]; then
         if ! socket_accepts; then
@@ -105,6 +129,7 @@ start_core_if_requested() {
         exit 2
     fi
 
+    rm -f "$SOCKET" "$SHELL_SOCKET"
     : > "$LOG"
     say "$INFO" "starting release core; log: $LOG"
     RUST_LOG=info "$CORE_BIN" >> "$LOG" 2>&1 &
@@ -125,7 +150,7 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -139,7 +164,7 @@ start_core_if_requested() {
         waited=$((waited + 1))
     done
 
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$LOG" || true
     exit 2
 }
@@ -240,25 +265,29 @@ main() {
         "$CLI_BIN" --actions last > "$last_out" 2>&1 || ok=1
 
         assert_contains "$recent_out" "target: echo $safe_token" "recent receipts include safe target" || ok=1
-        assert_contains "$recent_out" "category: safe | approval: not required" "recent receipts include safe approval" || ok=1
+        assert_contains "$recent_out" "review: no approval required | approval: not required" "recent receipts include safe approval" || ok=1
         assert_contains "$recent_out" "result: Succeeded: $safe_token" "recent receipts include safe output" || ok=1
 
         assert_contains "$recent_out" "target: echo $denied_token" "recent receipts include denied target" || ok=1
         assert_contains "$recent_out" "DENIED  shell" "recent receipts include denied status" || ok=1
-        assert_contains "$recent_out" "category: destructive | approval: denied" "recent receipts include denied approval" || ok=1
+        assert_contains "$recent_out" "review: approval required | approval: denied" "recent receipts include denied approval" || ok=1
         assert_contains "$recent_out" "result: Denied before execution." "recent receipts include denied result" || ok=1
 
         assert_contains "$recent_out" "target: echo $approved_token" "recent receipts include approved target" || ok=1
-        assert_contains "$recent_out" "category: destructive | approval: approved" "recent receipts include approved approval" || ok=1
+        assert_contains "$recent_out" "review: approval required | approval: approved" "recent receipts include approved approval" || ok=1
         assert_contains "$recent_out" "result: Succeeded: $approved_token" "recent receipts include approved output" || ok=1
 
         assert_contains "$last_out" "target: echo $approved_token" "last receipt is newest approved action" || ok=1
-        assert_contains "$last_out" "category: destructive | approval: approved" "last receipt includes approval" || ok=1
+        assert_contains "$last_out" "review: approval required | approval: approved" "last receipt includes approval" || ok=1
     fi
 
     rm -f "$safe_out" "$denied_out" "$approved_out" "$recent_out" "$last_out"
 
     if [[ "$ok" -eq 0 ]]; then
+        if [[ "$START_CORE" -eq 1 ]]; then
+            stop_core_if_owned
+            assert_sockets_clean "live action receipts smoke" || exit 1
+        fi
         say "$PASS" "live action receipts smoke passed"
         exit 0
     fi

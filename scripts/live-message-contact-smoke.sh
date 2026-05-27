@@ -18,12 +18,14 @@
 set -u
 
 SOCKET="/tmp/dexter.sock"
+SHELL_SOCKET="/tmp/dexter-shell.sock"
 LOG="/tmp/dexter-message-contact-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 CORE_PID=""
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 APPROVAL_MODE="${DEXTER_SMOKE_APPROVAL_MODE:-deny}"
 
 PASS="PASS"
@@ -97,14 +99,6 @@ assert_absent() {
     return 0
 }
 
-cleanup() {
-    if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
-        wait "$CORE_PID" >/dev/null 2>&1 || true
-    fi
-}
-trap cleanup EXIT INT TERM
-
 require_contact_name() {
     if [[ -z "${DEXTER_SMOKE_CONTACT_NAME:-}" ]]; then
         say "$FAIL" "DEXTER_SMOKE_CONTACT_NAME is required"
@@ -144,6 +138,36 @@ require_bins() {
     fi
 }
 
+stop_core_if_owned() {
+    if [[ -z "$CORE_PID" ]]; then
+        return 0
+    fi
+
+    local pid="$CORE_PID"
+    CORE_PID=""
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    stop_core_if_owned >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+assert_sockets_clean() {
+    local label="$1"
+    if socket_accepts; then
+        say "$FAIL" "$label - daemon still accepts connections after cleanup"
+        return 1
+    fi
+    if [[ -e "$SOCKET" || -e "$SHELL_SOCKET" ]]; then
+        say "$FAIL" "$label - stale socket files remain"
+        ls -l "$SOCKET" "$SHELL_SOCKET" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
 start_core_if_requested() {
     if [[ "$START_CORE" -ne 1 ]]; then
         if [[ ! -f "$LOG" ]]; then
@@ -164,6 +188,7 @@ start_core_if_requested() {
         exit 2
     fi
 
+    rm -f "$SOCKET" "$SHELL_SOCKET"
     : > "$LOG"
     say "$INFO" "starting release core; log: $LOG"
     RUST_LOG=info "$CORE_BIN" >> "$LOG" 2>&1 &
@@ -184,15 +209,20 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$LOG"; then
             say "$INFO" "core warmup complete"
             return
         fi
+        if [[ -n "$CORE_PID" ]] && ! kill -0 "$CORE_PID" >/dev/null 2>&1; then
+            say "$FAIL" "core exited during startup"
+            tail -80 "$LOG" || true
+            exit 2
+        fi
         sleep 1
         waited=$((waited + 1))
     done
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$LOG" || true
     exit 2
 }
@@ -242,7 +272,7 @@ run_known_contact_smoke() {
         say "$FAIL" "$name - CLI did not receive an ActionRequest"
         ok=1
     fi
-    if ! grep -Fq "category=Destructive" "$out"; then
+    if ! grep -Fq "review=approval required" "$out"; then
         say "$FAIL" "$name - ActionRequest was not destructive/approval-gated"
         ok=1
     fi
@@ -313,6 +343,10 @@ main() {
     start_core_if_requested
     say "$INFO" "using log: $LOG"
     run_known_contact_smoke
+    if [[ "$START_CORE" -eq 1 ]]; then
+        stop_core_if_owned
+        assert_sockets_clean "live message contact smoke" || exit 1
+    fi
 }
 
 main "$@"

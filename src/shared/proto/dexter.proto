@@ -9,6 +9,14 @@ service DexterService {
   // no side effects beyond logging the request.
   rpc Health(HealthRequest) returns (HealthResponse);
 
+  // Recent action audit receipts. No session stream, no model generation, and
+  // no side effects beyond reading Dexter's local append-only action audit.
+  rpc ActionHistory(ActionHistoryRequest) returns (ActionHistoryResponse);
+
+  // Local evidence report for "why did/didn't Dexter act?". No model generation
+  // and no side effects beyond reading action/session state.
+  rpc ActionDiagnostic(ActionDiagnosticRequest) returns (ActionDiagnosticResponse);
+
   // Operator-triggered recovery for daemon-lifetime lightweight workers.
   // No model action path, no session stream, and no model generation.
   rpc RestartComponent(RestartComponentRequest) returns (RestartComponentResponse);
@@ -69,6 +77,48 @@ message DiskHealth {
   uint64 available_bytes = 4;
   uint64 total_bytes = 5;
   string detail = 6;
+}
+
+// ── Action history ───────────────────────────────────────────────────────────
+
+message ActionHistoryRequest {
+  string trace_id = 1;
+  uint32 limit    = 2;  // Defaults to 20; daemon caps oversized requests.
+}
+
+message ActionHistoryResponse {
+  string trace_id        = 1;
+  string audit_log_path  = 2;
+  repeated ActionReceipt receipts = 3;  // Newest first
+}
+
+message ActionDiagnosticRequest {
+  string trace_id = 1;
+  uint32 limit = 2;  // Defaults to 3; daemon caps oversized requests.
+
+  // Optional in-flight turn text supplied by the HUD before the current session
+  // has persisted to latest.json. Used only for no-receipt refusal clues.
+  string current_user_text = 3;
+  string current_assistant_text = 4;
+
+  // If true, response.has_diagnostic is false unless a failure/refusal clue was
+  // found. Useful for automatic HUD probes after ordinary final responses.
+  bool only_if_clue = 5;
+
+  // If true, ignore audit receipts and diagnose only the supplied/persisted text.
+  // Useful when probing final text so a past failed action does not explain a
+  // newer normal response.
+  bool ignore_action_receipts = 6;
+}
+
+message ActionDiagnosticResponse {
+  string trace_id = 1;
+  string markdown = 2;
+  string cause = 3;
+  string audit_log_path = 4;
+  bool has_session_clue = 5;
+  bool has_diagnostic = 6;
+  repeated ActionReceipt receipts = 7;  // Newest first
 }
 
 // ── Restart component ────────────────────────────────────────────────────────
@@ -212,10 +262,12 @@ enum EntityState {
 // Swift presents a confirmation dialog; operator response is sent as ActionApproval.
 // SAFE actions skip this flow entirely — they are executed and logged without confirmation.
 message ActionRequest {
-  string         action_id   = 1;  // UUID — correlates with ActionApproval
-  string         description = 2;  // Human-readable description for the confirmation UI
-  ActionCategory category    = 3;
-  string         payload     = 4;  // JSON-encoded action parameters (type-specific)
+  string         action_id          = 1;  // UUID — correlates with ActionApproval
+  string         description        = 2;  // Human-readable description for the confirmation UI
+  ActionCategory category           = 3;
+  string         payload            = 4;  // JSON-encoded action parameters (type-specific)
+  uint64         expires_at_unix_ms = 5;  // Absolute approval deadline, Unix epoch milliseconds
+  uint32         timeout_secs       = 6;  // Operator-facing countdown duration
 }
 
 // Compact, post-action receipt emitted after Rust knows the actual outcome.
@@ -225,7 +277,7 @@ message ActionReceipt {
   string action_type    = 2;  // shell | file_read | file_write | applescript | browser | message_send
   string category       = 3;  // safe | cautious | destructive
   string description    = 4;  // Operator-readable target/summary
-  string outcome        = 5;  // executed | denied | failed | pending
+  string outcome        = 5;  // executed | denied | expired | failed | pending
   string summary        = 6;  // Bounded result summary, never full unbounded output
   string audit_log_path = 7;  // Local append-only audit source
 }

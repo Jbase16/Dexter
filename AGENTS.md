@@ -190,7 +190,8 @@ cd src/swift && swift build
 bash scripts/live-smoke.sh
 ```
 
-Current baseline: **479 Rust tests passing** as of Phase 38c. A change that
+Current baseline: **614 Rust tests passing, 7 ignored** as of the Phase 39
+action-consolidation pass. A change that
 drops the count without a documented reason is a regression. New behavior
 should land with a targeted test in the same commit.
 
@@ -248,24 +249,38 @@ they work even when the daemon is stopped and do not generate model output.
 `dexter-cli --doctor` is the first-line live diagnostic for daemon health. It
 does not open a session stream or generate model output; it pings the daemon,
 calls the `Health` RPC, checks worker/model readiness, and verifies Ollama.
+`dexter-cli --status` is the operator summary view: it runs the same doctor
+checks, prints recovery suggestions when available, and includes the latest
+local action receipts so the operator can see what just happened.
 
 Operator commands:
 ```bash
 cd /Users/jason/Developer/Dex
 make run-core          # Rust daemon only, no Swift UI
 make doctor            # build dexter-cli and print daemon health
+make status            # print daemon health plus recent local action receipts
+make why               # explain why the latest action did or did not run
 make actions-last      # print the latest local action receipt
 make actions-recent    # print the latest 20 local action receipts
 make restart-stt       # restart STT worker, then print post-restart health
 make restart-tts       # restart TTS worker, then print post-restart health
 make restart-browser   # restart browser worker, then print post-restart health
+make live-smoke-action-matrix
 make live-smoke-action-receipts
+make live-smoke-approval-lifecycle
+make live-smoke-external-failures
+make live-smoke-operator-status
+make live-smoke-action-diagnostic
+make live-smoke-hud-health
+make live-smoke-hud-action-diagnostic
 make live-smoke-hud-approval
 ```
 
 Equivalent direct CLI commands:
 ```bash
 ./src/rust-core/target/release/dexter-cli --doctor
+./src/rust-core/target/release/dexter-cli --status
+./src/rust-core/target/release/dexter-cli --why
 ./src/rust-core/target/release/dexter-cli --actions last
 ./src/rust-core/target/release/dexter-cli --actions recent --limit 20
 ./src/rust-core/target/release/dexter-cli --restart-component stt
@@ -280,18 +295,45 @@ failure, it should print the matching restart command as a suggested fix.
 Regression command:
 ```bash
 make live-smoke-recovery
+make live-smoke-action-matrix
 make live-smoke-action-receipts
+make live-smoke-approval-lifecycle
+make live-smoke-external-failures
+make live-smoke-operator-status
+make live-smoke-action-diagnostic
+make live-smoke-hud-health
+make live-smoke-hud-action-diagnostic
 make live-smoke-hud-approval
 ```
 
 The recovery smoke starts a release core without Swift UI, waits for `doctor`
 to report clean health, restarts browser/TTS/STT one by one, verifies `doctor`
-after each restart, and shuts the daemon down. The action-receipts smoke drives
-safe, denied, and approved synthetic actions, then verifies `--actions recent`
-and `--actions last` against the audit log. The HUD approval smoke launches the
-real Swift app, auto-denies a destructive ActionRequest, verifies the denial is
-visible to the operator, verifies the denial is injected into conversation
-context, and verifies the destructive command did not execute.
+after each restart, and shuts the daemon down. The action matrix drives exact
+synthetic `ActionSpec` JSON across shell, file, browser, and AppleScript lanes.
+The action-receipts smoke drives safe, denied, and approved synthetic actions,
+then verifies `--actions recent` and `--actions last` against the audit log. The
+approval-lifecycle smoke verifies typed yes/no/cancel responses and stale
+approval expiry. The external-failures smoke verifies `message_send` fails
+closed outside orchestrator Contacts resolution, AppleScript errors/timeouts are
+operator-visible, and failed `screencapture` demotes Vision to PRIMARY. The
+operator-status smoke verifies `--status` coherently combines health, final
+result, and recent action context. The action-diagnostic smoke verifies `--why`
+can explain a blocked action from local audit/session evidence without asking
+the model. The HUD health smoke verifies the in-app status surface fetches
+Health plus ActionHistory, exposes worker restart recovery, and receives
+post-restart health. The HUD action-diagnostic smoke verifies the in-app Why
+surface calls the daemon `ActionDiagnostic` RPC and can explain a blocked
+action from daemon-owned health, audit, and session evidence. The HUD approval
+smoke launches the real Swift app and also verifies denied or failed action
+receipts automatically surface that same daemon-backed diagnostic without the
+operator clicking Why. It auto-denies a destructive ActionRequest, verifies the
+denial is visible to the operator, verifies the denial is injected into
+conversation context, and verifies the destructive command did not execute.
+
+Action live smokes default to a 300s daemon warmup window because cold Ollama
+page-in can exceed 120s under macOS memory pressure. Override with
+`DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS` only when intentionally testing startup
+timeout behavior.
 
 ## File pointers (orientation)
 

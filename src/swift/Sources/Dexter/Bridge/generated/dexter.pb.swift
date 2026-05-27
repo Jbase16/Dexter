@@ -478,6 +478,93 @@ struct Dexter_V1_DiskHealth: Sendable {
   init() {}
 }
 
+struct Dexter_V1_ActionHistoryRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  /// Defaults to 20; daemon caps oversized requests.
+  var limit: UInt32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_ActionHistoryResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var auditLogPath: String = String()
+
+  /// Newest first
+  var receipts: [Dexter_V1_ActionReceipt] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_ActionDiagnosticRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  /// Defaults to 3; daemon caps oversized requests.
+  var limit: UInt32 = 0
+
+  /// Optional in-flight turn text supplied by the HUD before the current session
+  /// has persisted to latest.json. Used only for no-receipt refusal clues.
+  var currentUserText: String = String()
+
+  var currentAssistantText: String = String()
+
+  /// If true, response.has_diagnostic is false unless a failure/refusal clue was
+  /// found. Useful for automatic HUD probes after ordinary final responses.
+  var onlyIfClue: Bool = false
+
+  /// If true, ignore audit receipts and diagnose only the supplied/persisted text.
+  /// Useful when probing final text so a past failed action does not explain a
+  /// newer normal response.
+  var ignoreActionReceipts: Bool = false
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_ActionDiagnosticResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var markdown: String = String()
+
+  var cause: String = String()
+
+  var auditLogPath: String = String()
+
+  var hasSessionClue_p: Bool = false
+
+  var hasDiagnostic_p: Bool = false
+
+  /// Newest first
+  var receipts: [Dexter_V1_ActionReceipt] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
 struct Dexter_V1_RestartComponentRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -804,6 +891,12 @@ struct Dexter_V1_ActionRequest: Sendable {
   /// JSON-encoded action parameters (type-specific)
   var payload: String = String()
 
+  /// Absolute approval deadline, Unix epoch milliseconds
+  var expiresAtUnixMs: UInt64 = 0
+
+  /// Operator-facing countdown duration
+  var timeoutSecs: UInt32 = 0
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -828,7 +921,7 @@ struct Dexter_V1_ActionReceipt: Sendable {
   /// Operator-readable target/summary
   var description_p: String = String()
 
-  /// executed | denied | failed | pending
+  /// executed | denied | expired | failed | pending
   var outcome: String = String()
 
   /// Bounded result summary, never full unbounded output
@@ -1345,6 +1438,196 @@ extension Dexter_V1_DiskHealth: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
     if lhs.availableBytes != rhs.availableBytes {return false}
     if lhs.totalBytes != rhs.totalBytes {return false}
     if lhs.detail != rhs.detail {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_ActionHistoryRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ActionHistoryRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}limit\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.limit) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if self.limit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.limit, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_ActionHistoryRequest, rhs: Dexter_V1_ActionHistoryRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.limit != rhs.limit {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_ActionHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ActionHistoryResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}audit_log_path\0\u{1}receipts\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.auditLogPath) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.receipts) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if !self.auditLogPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.auditLogPath, fieldNumber: 2)
+    }
+    if !self.receipts.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.receipts, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_ActionHistoryResponse, rhs: Dexter_V1_ActionHistoryResponse) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.auditLogPath != rhs.auditLogPath {return false}
+    if lhs.receipts != rhs.receipts {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_ActionDiagnosticRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ActionDiagnosticRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}limit\0\u{3}current_user_text\0\u{3}current_assistant_text\0\u{3}only_if_clue\0\u{3}ignore_action_receipts\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.limit) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.currentUserText) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.currentAssistantText) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.onlyIfClue) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.ignoreActionReceipts) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if self.limit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.limit, fieldNumber: 2)
+    }
+    if !self.currentUserText.isEmpty {
+      try visitor.visitSingularStringField(value: self.currentUserText, fieldNumber: 3)
+    }
+    if !self.currentAssistantText.isEmpty {
+      try visitor.visitSingularStringField(value: self.currentAssistantText, fieldNumber: 4)
+    }
+    if self.onlyIfClue != false {
+      try visitor.visitSingularBoolField(value: self.onlyIfClue, fieldNumber: 5)
+    }
+    if self.ignoreActionReceipts != false {
+      try visitor.visitSingularBoolField(value: self.ignoreActionReceipts, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_ActionDiagnosticRequest, rhs: Dexter_V1_ActionDiagnosticRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.limit != rhs.limit {return false}
+    if lhs.currentUserText != rhs.currentUserText {return false}
+    if lhs.currentAssistantText != rhs.currentAssistantText {return false}
+    if lhs.onlyIfClue != rhs.onlyIfClue {return false}
+    if lhs.ignoreActionReceipts != rhs.ignoreActionReceipts {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_ActionDiagnosticResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ActionDiagnosticResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}markdown\0\u{1}cause\0\u{3}audit_log_path\0\u{3}has_session_clue\0\u{3}has_diagnostic\0\u{1}receipts\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.markdown) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.cause) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.auditLogPath) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.hasSessionClue_p) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.hasDiagnostic_p) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.receipts) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if !self.markdown.isEmpty {
+      try visitor.visitSingularStringField(value: self.markdown, fieldNumber: 2)
+    }
+    if !self.cause.isEmpty {
+      try visitor.visitSingularStringField(value: self.cause, fieldNumber: 3)
+    }
+    if !self.auditLogPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.auditLogPath, fieldNumber: 4)
+    }
+    if self.hasSessionClue_p != false {
+      try visitor.visitSingularBoolField(value: self.hasSessionClue_p, fieldNumber: 5)
+    }
+    if self.hasDiagnostic_p != false {
+      try visitor.visitSingularBoolField(value: self.hasDiagnostic_p, fieldNumber: 6)
+    }
+    if !self.receipts.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.receipts, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_ActionDiagnosticResponse, rhs: Dexter_V1_ActionDiagnosticResponse) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.markdown != rhs.markdown {return false}
+    if lhs.cause != rhs.cause {return false}
+    if lhs.auditLogPath != rhs.auditLogPath {return false}
+    if lhs.hasSessionClue_p != rhs.hasSessionClue_p {return false}
+    if lhs.hasDiagnostic_p != rhs.hasDiagnostic_p {return false}
+    if lhs.receipts != rhs.receipts {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1966,7 +2249,7 @@ extension Dexter_V1_EntityStateChange: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Dexter_V1_ActionRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ActionRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{1}description\0\u{1}category\0\u{1}payload\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{1}description\0\u{1}category\0\u{1}payload\0\u{3}expires_at_unix_ms\0\u{3}timeout_secs\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1978,6 +2261,8 @@ extension Dexter_V1_ActionRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
       case 2: try { try decoder.decodeSingularStringField(value: &self.description_p) }()
       case 3: try { try decoder.decodeSingularEnumField(value: &self.category) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.payload) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.expiresAtUnixMs) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.timeoutSecs) }()
       default: break
       }
     }
@@ -1996,6 +2281,12 @@ extension Dexter_V1_ActionRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
     if !self.payload.isEmpty {
       try visitor.visitSingularStringField(value: self.payload, fieldNumber: 4)
     }
+    if self.expiresAtUnixMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.expiresAtUnixMs, fieldNumber: 5)
+    }
+    if self.timeoutSecs != 0 {
+      try visitor.visitSingularUInt32Field(value: self.timeoutSecs, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2004,6 +2295,8 @@ extension Dexter_V1_ActionRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.description_p != rhs.description_p {return false}
     if lhs.category != rhs.category {return false}
     if lhs.payload != rhs.payload {return false}
+    if lhs.expiresAtUnixMs != rhs.expiresAtUnixMs {return false}
+    if lhs.timeoutSecs != rhs.timeoutSecs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

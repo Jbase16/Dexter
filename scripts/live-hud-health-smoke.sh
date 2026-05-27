@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # scripts/live-hud-health-smoke.sh - automated Swift HUD health/recovery smoke.
 #
-# Starts the real Rust core and real Swift HUD app, asks the HUD health surface
-# for a daemon Health snapshot, then restarts the browser worker through the
-# HUD recovery closure. This verifies the operator-visible path without a manual
-# click and without routing through the model/action pipeline.
+# Starts the real Rust core and real Swift HUD app, asks the HUD status surface
+# for daemon Health plus recent ActionHistory snapshots, then restarts the
+# browser worker through the HUD recovery closure. This verifies the
+# operator-visible path without a manual click and without routing through the
+# model/action pipeline.
 
 set -u
 
@@ -19,6 +20,7 @@ SWIFT_DIR="$ROOT_DIR/src/swift"
 CORE_PID=""
 SWIFT_PID=""
 RESTART_COMPONENT="${DEXTER_HUD_HEALTH_SMOKE_RESTART_COMPONENT:-browser}"
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 
 PASS="PASS"
 FAIL="FAIL"
@@ -50,12 +52,20 @@ cleanup() {
         kill "$SWIFT_PID" >/dev/null 2>&1 || true
         wait "$SWIFT_PID" >/dev/null 2>&1 || true
     fi
-    if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
-        wait "$CORE_PID" >/dev/null 2>&1 || true
-    fi
+    stop_core_if_owned >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
+
+stop_core_if_owned() {
+    if [[ -z "$CORE_PID" ]]; then
+        return 0
+    fi
+
+    local pid="$CORE_PID"
+    CORE_PID=""
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+}
 
 require_bins() {
     if [[ ! -x "$CORE_BIN" ]]; then
@@ -100,7 +110,7 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$CORE_LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -109,7 +119,7 @@ start_core_if_requested() {
         waited=$((waited + 1))
     done
 
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$CORE_LOG" || true
     exit 2
 }
@@ -215,10 +225,12 @@ run_assertions() {
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] enabled" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] healthRequest" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Health RPC OK" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[DexterClient] ActionHistory RPC OK" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showUtilityMarkdown" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] restartRequest target=$RESTART_COMPONENT" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Restart RPC OK target=$RESTART_COMPONENT success=true" || ok=1
     assert_contains "$name" "$CORE_LOG" "Health snapshot requested" || ok=1
+    assert_contains "$name" "$CORE_LOG" "Action history requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Component restart requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Component restart complete" || ok=1
 
@@ -235,12 +247,34 @@ run_assertions() {
     return 1
 }
 
+assert_owned_core_stops_cleanly() {
+    if [[ "$START_CORE" -ne 1 ]]; then
+        return 0
+    fi
+
+    stop_core_if_owned
+
+    if socket_accepts; then
+        say "$FAIL" "daemon still accepts connections after smoke cleanup"
+        return 1
+    fi
+
+    if [[ -e "$SOCKET" || -e "/tmp/dexter-shell.sock" ]]; then
+        say "$FAIL" "daemon left stale socket files after SIGTERM cleanup"
+        ls -l "$SOCKET" /tmp/dexter-shell.sock 2>/dev/null || true
+        return 1
+    fi
+
+    return 0
+}
+
 main() {
     require_bins
     start_core_if_requested
     run_swift_silent_ready_smoke || exit 1
     start_swift_smoke
-    run_assertions
+    run_assertions || exit 1
+    assert_owned_core_stops_cleanly || exit 1
 }
 
 main "$@"

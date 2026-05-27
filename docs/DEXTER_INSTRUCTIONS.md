@@ -56,6 +56,41 @@ The retrieval pipeline for unknown factual content must be architecturally real 
 
 ---
 
+## Action Approval Language
+
+Dexter is allowed to run real actions, including consequential local automation,
+when the operator approves them. Approval is a consent checkpoint, not a
+censorship layer and not a refusal.
+
+Internal policy categories remain auditable in Rust, protobuf, logs, tests, and
+smoke harnesses:
+
+- `safe`
+- `cautious`
+- `destructive`
+
+Operator-facing UI, CLI receipts, approval prompts, and HUD action history must
+translate those categories into review language:
+
+- `safe` → `no approval required`
+- `cautious` → `reviewed by policy`
+- `destructive` → `approval required`
+- missing or unknown category → `approval required`
+
+Do not show `destructive`, `blocked`, `forbidden`, or `unsafe` as the
+operator-facing label for an action that merely needs approval. Use wording
+like:
+
+- `Review before I run this`
+- `Review: approval required`
+- `Approve`
+- `Don't Run`
+
+A denied action means the operator chose not to run it. It must not be framed
+as Dexter refusing to help.
+
+---
+
 ## Code Standards — Always Enforced
 
 - **No placeholders.** No TODOs without full implementations attached. No stubs that aren't complete. If a function exists, it works.

@@ -599,6 +599,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn execute_applescript_timeout_reports_failure() {
+        let result = execute_applescript(r#"delay 5"#, 1).await;
+        assert!(
+            !result.success,
+            "timed-out AppleScript must not be reported as success: {:?}",
+            result
+        );
+        assert_eq!(result.error, "timed out after 1s");
+        assert_eq!(result.exit_code, None);
+    }
+
     // ── Phase 38 / Codex finding [5]: working_dir failure-fast ────────────────
 
     #[tokio::test]

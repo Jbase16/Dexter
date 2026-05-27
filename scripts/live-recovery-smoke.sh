@@ -41,12 +41,20 @@ say() {
 }
 
 cleanup() {
-    if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
-        wait "$CORE_PID" >/dev/null 2>&1 || true
-    fi
+    stop_core_if_owned >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
+
+stop_core_if_owned() {
+    if [[ -z "$CORE_PID" ]]; then
+        return 0
+    fi
+
+    local pid="$CORE_PID"
+    CORE_PID=""
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+}
 
 socket_accepts() {
     python3 - "$SOCKET" <<'PY' >/dev/null 2>&1
@@ -168,6 +176,27 @@ restart_component_ok() {
     return 0
 }
 
+assert_owned_core_stops_cleanly() {
+    if [[ "$START_CORE" -ne 1 ]]; then
+        return 0
+    fi
+
+    stop_core_if_owned
+
+    if socket_accepts; then
+        say "$FAIL" "daemon still accepts connections after smoke cleanup"
+        return 1
+    fi
+
+    if [[ -e "$SOCKET" || -e "/tmp/dexter-shell.sock" ]]; then
+        say "$FAIL" "daemon left stale socket files after SIGTERM cleanup"
+        ls -l "$SOCKET" /tmp/dexter-shell.sock 2>/dev/null || true
+        return 1
+    fi
+
+    return 0
+}
+
 main() {
     require_bins
     start_core_if_requested
@@ -182,6 +211,7 @@ main() {
     restart_component_ok stt || exit 1
     run_doctor_ok "after stt restart" || exit 1
 
+    assert_owned_core_stops_cleanly || exit 1
     say "$PASS" "live recovery smoke passed"
 }
 

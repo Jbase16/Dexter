@@ -22,7 +22,7 @@ SOCKET_TIMEOUT_SECS := 90
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli doctor actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-recovery live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-health live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli doctor status why actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-recovery live-smoke-degraded-mode live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -114,6 +114,14 @@ cli:
 doctor: cli
 	$(RUST_CORE_DIR)/target/release/dexter-cli --doctor
 
+## status: build dexter-cli and print health plus recent action receipts
+status: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --status
+
+## why: build dexter-cli and explain why the latest action did or did not run
+why: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --why
+
 ## actions-last: build dexter-cli and print the latest local action receipt
 actions-last: cli
 	$(RUST_CORE_DIR)/target/release/dexter-cli --actions last
@@ -143,6 +151,41 @@ live-smoke-recovery: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-recovery-smoke.sh --start-core
 
+## live-smoke-degraded-mode: run controlled dependency-failure diagnostics smoke
+##
+## Starts isolated release cores with malformed config, unreachable Ollama, and
+## missing worker paths. Verifies failures are explicit in doctor output and that
+## every daemon exits without leaving stale sockets behind.
+live-smoke-degraded-mode: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-degraded-mode-smoke.sh
+
+## live-smoke-external-failures: run deterministic external-integration failure smoke
+##
+## Starts a fresh release core with short test-only failure knobs, then verifies
+## message_send cannot bypass Contacts resolution, AppleScript errors/timeouts
+## are surfaced, and a failed screencapture demotes Vision to PRIMARY.
+live-smoke-external-failures: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-external-failures-smoke.sh
+
+## live-smoke-operator-status: run unified operator-status smoke
+##
+## Starts a fresh release core, writes a safe synthetic action receipt, and
+## verifies `dexter-cli --status` prints coherent health, suggestions/result,
+## and recent action context.
+live-smoke-operator-status: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-operator-status-smoke.sh --start-core
+
+## live-smoke-action-diagnostic: run latest-action explanation smoke
+##
+## Starts a fresh release core, drives a blocked synthetic action, then verifies
+## `dexter-cli --why` explains the failure from local audit/session evidence.
+live-smoke-action-diagnostic: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-action-diagnostic-smoke.sh --start-core
+
 ## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
@@ -168,6 +211,15 @@ live-smoke-action-matrix: ensure-core-not-running
 live-smoke-action-receipts: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-action-receipts-smoke.sh --start-core
+
+## live-smoke-approval-lifecycle: run typed + expired approval lifecycle regression
+##
+## Starts a release core with a short approval timeout, then verifies typed
+## yes/no/cancel approval responses, delayed stale approvals, live receipts,
+## audit history formatting, and the Rust-side timeout refusal.
+live-smoke-approval-lifecycle: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-approval-lifecycle-smoke.sh --start-core
 
 ## live-smoke-message-contact: opt-in Contacts-backed iMessage approval smoke
 ##
@@ -203,17 +255,36 @@ live-smoke-hud: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-smoke.sh --start-core
 
-## live-smoke-hud-health: run Swift HUD health + worker restart regression
+## live-smoke-hud-health: run Swift HUD status + worker restart regression
 ##
 ## Builds release-mode dexter-core, starts it with logs at
 ## /tmp/dexter-hud-health-core-smoke.log, launches the real Swift app with a
-## test-only health hook, fetches HUD health, restarts the browser worker via
-## RestartComponent, and asserts post-restart health returns to the HUD.
+## test-only status hook, fetches HUD health plus recent actions, restarts the
+## browser worker via RestartComponent, and asserts post-restart health returns
+## to the HUD.
 live-smoke-hud-health: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-health-smoke.sh --start-core
 
-## live-smoke-hud-approval: run Swift HUD destructive-action approval regression
+## live-smoke-hud-action-history: run Swift HUD recent-actions regression
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core, creates a
+## real action audit entry through the CLI, then asks the Swift HUD to fetch
+## Recent Actions through the ActionHistory RPC.
+live-smoke-hud-action-history: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-hud-action-history-smoke.sh --start-core
+
+## live-smoke-hud-action-diagnostic: run Swift HUD latest-action explanation regression
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core, creates a
+## blocked raw message_send receipt through the CLI, then asks the Swift HUD to
+## explain it using Health + ActionHistory + latest session evidence.
+live-smoke-hud-action-diagnostic: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-hud-action-diagnostic-smoke.sh --start-core
+
+## live-smoke-hud-approval: run Swift HUD approval-required action regression
 ##
 ## Builds release-mode dexter-core, starts it with logs at
 ## /tmp/dexter-hud-approval-core-smoke.log, launches the real Swift app with
@@ -251,11 +322,18 @@ live-smoke-barge-in: ensure-core-not-running
 ## target instead of being hidden by shared process state.
 live-smoke-all:
 	$(MAKE) live-smoke-recovery
+	$(MAKE) live-smoke-degraded-mode
+	$(MAKE) live-smoke-external-failures
+	$(MAKE) live-smoke-operator-status
+	$(MAKE) live-smoke-action-diagnostic
 	$(MAKE) live-smoke-cli
 	$(MAKE) live-smoke-action-matrix
 	$(MAKE) live-smoke-action-receipts
+	$(MAKE) live-smoke-approval-lifecycle
 	$(MAKE) live-smoke-hud
 	$(MAKE) live-smoke-hud-health
+	$(MAKE) live-smoke-hud-action-history
+	$(MAKE) live-smoke-hud-action-diagnostic
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel
 	$(MAKE) live-smoke-barge-in

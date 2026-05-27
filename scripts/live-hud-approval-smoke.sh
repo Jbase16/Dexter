@@ -114,8 +114,9 @@ start_core_if_requested() {
         exit 2
     fi
 
+    local warmup_timeout="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$warmup_timeout" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$CORE_LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -124,7 +125,7 @@ start_core_if_requested() {
         waited=$((waited + 1))
     done
 
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${warmup_timeout}s"
     tail -80 "$CORE_LOG" || true
     exit 2
 }
@@ -207,6 +208,20 @@ run_assertions() {
         return 1
     }
 
+    wait_for_pattern "$SWIFT_LOG" "[DexterClient] onResponse ← actionReceipt:" 30 || {
+        say "$FAIL" "$name - Swift did not receive an action receipt"
+        tail -140 "$SWIFT_LOG" || true
+        tail -120 "$CORE_LOG" || true
+        return 1
+    }
+
+    wait_for_pattern "$SWIFT_LOG" "The action reached the approval gate and was denied before execution." 30 || {
+        say "$FAIL" "$name - Swift did not auto-render action diagnostic"
+        tail -180 "$SWIFT_LOG" || true
+        tail -140 "$CORE_LOG" || true
+        return 1
+    }
+
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] enabled" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[App] onTextSubmit fired: '$SMOKE_TEXT'" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[DexterClient] onResponse ← actionRequest:" || ok=1
@@ -219,6 +234,9 @@ run_assertions() {
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] actionReceipt" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "outcome=denied" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showActionReceipt" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "Auto action diagnostic scheduled" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[DexterClient] ActionDiagnostic report generated" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showActionDiagnostic" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "Action denied before execution:" || ok=1
 
     assert_log_contains "$name" "$CORE_LOG" "Action requires operator approval" || ok=1
@@ -226,6 +244,7 @@ run_assertions() {
     assert_log_contains "$name" "$CORE_LOG" "ActionApproval received" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action rejected by operator" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action receipt emitted" || ok=1
+    assert_log_contains "$name" "$CORE_LOG" "Action diagnostic requested" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action status injected into conversation context" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action denied" || ok=1
     assert_log_absent "$name" "$CORE_LOG" "Action dispatched to background task" || ok=1

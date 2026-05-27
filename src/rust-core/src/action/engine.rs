@@ -31,8 +31,8 @@ use uuid::Uuid;
 use crate::{
     browser::BrowserCoordinator,
     constants::{
-        ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_DEFAULT_TIMEOUT_SECS, ACTION_DOWNLOAD_TIMEOUT_SECS,
-        BROWSER_WORKER_RESULT_TIMEOUT_SECS,
+        ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_APPROVAL_TIMEOUT_SECS, ACTION_DEFAULT_TIMEOUT_SECS,
+        ACTION_DOWNLOAD_TIMEOUT_SECS, BROWSER_WORKER_RESULT_TIMEOUT_SECS,
     },
     ipc::proto::ActionCategory,
 };
@@ -137,6 +137,8 @@ pub enum ActionOutcome {
         action_id: String,
         description: String,
         category: ActionCategory,
+        expires_at_unix_ms: u64,
+        timeout_secs: u32,
     },
     /// Operator rejected, execution failed, or session ended. Logged; no execution.
     /// `error` carries the failure reason so the model can reason about what went wrong.
@@ -149,8 +151,8 @@ struct PendingAction {
     spec: ActionSpec,
     #[allow(dead_code)] // trace_id reserved for Phase 9+ context injection
     trace_id: String,
-    #[allow(dead_code)] // submitted_at reserved for Phase 9+ timeout enforcement
     submitted_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
 }
 
 /// Operator-visible metadata for a pending action.
@@ -194,6 +196,34 @@ fn shell_timeout(args: &[String]) -> u64 {
         ACTION_DOWNLOAD_TIMEOUT_SECS
     } else {
         ACTION_DEFAULT_TIMEOUT_SECS
+    }
+}
+
+fn approval_timeout_secs() -> u64 {
+    let Ok(raw) = std::env::var("DEXTER_ACTION_APPROVAL_TIMEOUT_SECS") else {
+        return ACTION_APPROVAL_TIMEOUT_SECS;
+    };
+    let Ok(value) = raw.trim().parse::<u64>() else {
+        return ACTION_APPROVAL_TIMEOUT_SECS;
+    };
+    if value == 0 {
+        ACTION_APPROVAL_TIMEOUT_SECS
+    } else {
+        value.min(ACTION_APPROVAL_TIMEOUT_SECS)
+    }
+}
+
+fn applescript_timeout_secs() -> u64 {
+    let Ok(raw) = std::env::var("DEXTER_ACTION_APPLESCRIPT_TIMEOUT_SECS") else {
+        return ACTION_APPLESCRIPT_TIMEOUT_SECS;
+    };
+    let Ok(value) = raw.trim().parse::<u64>() else {
+        return ACTION_APPLESCRIPT_TIMEOUT_SECS;
+    };
+    if value == 0 {
+        ACTION_APPLESCRIPT_TIMEOUT_SECS
+    } else {
+        value.min(ACTION_APPLESCRIPT_TIMEOUT_SECS)
     }
 }
 
@@ -282,10 +312,15 @@ impl ActionEngine {
 
         if category == ActionCategory::Destructive {
             let description = Self::describe(&spec);
+            let submitted_at = Utc::now();
+            let timeout_secs = approval_timeout_secs();
+            let expires_at = submitted_at + chrono::Duration::seconds(timeout_secs as i64);
+            let expires_at_unix_ms = expires_at.timestamp_millis().max(0) as u64;
             info!(
                 action_id = %action_id,
                 category  = "destructive",
                 %description,
+                expires_at = %expires_at.to_rfc3339(),
                 "Action requires operator approval — pending"
             );
             self.pending_actions.insert(
@@ -293,13 +328,16 @@ impl ActionEngine {
                 PendingAction {
                     spec,
                     trace_id: trace_id.to_string(),
-                    submitted_at: Utc::now(),
+                    submitted_at,
+                    expires_at,
                 },
             );
             return ActionOutcome::PendingApproval {
                 action_id,
                 description,
                 category,
+                expires_at_unix_ms,
+                timeout_secs: timeout_secs as u32,
             };
         }
 
@@ -332,6 +370,39 @@ impl ActionEngine {
                 };
             }
         };
+
+        let now = Utc::now();
+        if now > pending.expires_at {
+            warn!(
+                action_id = %action_id,
+                submitted_at = %pending.submitted_at.to_rfc3339(),
+                expires_at = %pending.expires_at.to_rfc3339(),
+                note = %operator_note,
+                "ActionApproval arrived after approval deadline — refusing execution"
+            );
+            let category = PolicyEngine::classify(&pending.spec);
+            let entry = AuditEntry {
+                timestamp: now.to_rfc3339(),
+                action_id,
+                r#type: Self::type_str(&pending.spec),
+                category: Self::category_str(category),
+                spec_json: Self::spec_to_audit_json(&pending.spec),
+                outcome: "rejected",
+                exit_code: None,
+                output_preview: None,
+                error: Some("approval expired before operator response".to_string()),
+                duration_ms: None,
+                operator_approved: Some(false),
+            };
+            let guard = self.audit.lock().await;
+            if let Err(e) = guard.append(&entry) {
+                error!(action_id = %action_id, error = %e, "Audit log append failed");
+            }
+            return ActionOutcome::Rejected {
+                action_id: action_id.to_string(),
+                error: "approval expired before operator response".to_string(),
+            };
+        }
 
         if !approved {
             info!(
@@ -401,36 +472,21 @@ impl ActionEngine {
         }
     }
 
-    /// Round 3 / T0.4: approve every pending action in response to a typed
-    /// affirmative ("yes", "ok", "do it", ...) during ALERT.
-    ///
-    /// In practice `pending_actions` holds at most one entry — PolicyEngine
-    /// serialises DESTRUCTIVE actions behind approval, so a new one cannot be
-    /// spawned while an older one is still pending. The `_all` suffix documents
-    /// the invariant ("drain whatever is there") rather than implying a batch
-    /// queue.
-    ///
-    /// Returns the list of `ActionOutcome`s so the orchestrator can inspect
-    /// individual outcomes if it ever needs to (currently it just relies on
-    /// the shared audit log for post-hoc inspection).
-    pub async fn approve_all_pending(&mut self) -> Vec<ActionOutcome> {
+    /// Resolve every pending action while preserving receipt metadata captured
+    /// before `resolve()` drains the pending map.
+    pub async fn resolve_all_pending_with_receipts(
+        &mut self,
+        approved: bool,
+        operator_note: &str,
+    ) -> Vec<(ActionOutcome, ActionReceiptMetadata)> {
         let ids: Vec<String> = self.pending_actions.keys().cloned().collect();
         let mut outcomes = Vec::with_capacity(ids.len());
         for id in ids {
-            outcomes.push(self.resolve(&id, true, "typed-approval").await);
-        }
-        outcomes
-    }
-
-    /// Round 3 / T0.4: reject every pending action in response to a typed
-    /// negative ("no", "cancel", ...) during ALERT. Symmetric with
-    /// `approve_all_pending`; see that function's doc for the single-element
-    /// invariant.
-    pub async fn reject_all_pending(&mut self) -> Vec<ActionOutcome> {
-        let ids: Vec<String> = self.pending_actions.keys().cloned().collect();
-        let mut outcomes = Vec::with_capacity(ids.len());
-        for id in ids {
-            outcomes.push(self.resolve(&id, false, "typed-denial").await);
+            let Some(metadata) = self.pending_receipt_metadata(&id) else {
+                continue;
+            };
+            let outcome = self.resolve(&id, approved, operator_note).await;
+            outcomes.push((outcome, metadata));
         }
         outcomes
     }
@@ -461,7 +517,7 @@ impl ActionEngine {
                 ..
             } => executor::execute_file_write(path, content, *create_dirs).await,
             ActionSpec::AppleScript { script, .. } => {
-                executor::execute_applescript(script, ACTION_APPLESCRIPT_TIMEOUT_SECS).await
+                executor::execute_applescript(script, applescript_timeout_secs()).await
             }
             ActionSpec::MessageSend { .. } => executor::ExecutionResult {
                 success: false,
@@ -757,7 +813,7 @@ impl ExecutorHandle {
                 ..
             } => executor::execute_file_write(path, content, *create_dirs).await,
             ActionSpec::AppleScript { script, .. } => {
-                executor::execute_applescript(script, ACTION_APPLESCRIPT_TIMEOUT_SECS).await
+                executor::execute_applescript(script, applescript_timeout_secs()).await
             }
             ActionSpec::MessageSend { .. } => executor::ExecutionResult {
                 success: false,
@@ -918,6 +974,46 @@ mod tests {
         assert_eq!(audit["recipient"], "Mom");
         assert_eq!(audit["body"], "<12 bytes omitted>");
         assert_eq!(audit["rationale"], "structured send");
+    }
+
+    #[test]
+    fn approval_timeout_env_override_only_shortens_default() {
+        const KEY: &str = "DEXTER_ACTION_APPROVAL_TIMEOUT_SECS";
+        let old = std::env::var(KEY).ok();
+
+        std::env::set_var(KEY, "2");
+        assert_eq!(approval_timeout_secs(), 2);
+
+        std::env::set_var(KEY, (ACTION_APPROVAL_TIMEOUT_SECS + 60).to_string());
+        assert_eq!(approval_timeout_secs(), ACTION_APPROVAL_TIMEOUT_SECS);
+
+        std::env::set_var(KEY, "0");
+        assert_eq!(approval_timeout_secs(), ACTION_APPROVAL_TIMEOUT_SECS);
+
+        match old {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
+    }
+
+    #[test]
+    fn applescript_timeout_env_override_only_shortens_default() {
+        const KEY: &str = "DEXTER_ACTION_APPLESCRIPT_TIMEOUT_SECS";
+        let old = std::env::var(KEY).ok();
+
+        std::env::set_var(KEY, "2");
+        assert_eq!(applescript_timeout_secs(), 2);
+
+        std::env::set_var(KEY, (ACTION_APPLESCRIPT_TIMEOUT_SECS + 60).to_string());
+        assert_eq!(applescript_timeout_secs(), ACTION_APPLESCRIPT_TIMEOUT_SECS);
+
+        std::env::set_var(KEY, "0");
+        assert_eq!(applescript_timeout_secs(), ACTION_APPLESCRIPT_TIMEOUT_SECS);
+
+        match old {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
     }
 
     #[tokio::test]
@@ -1108,6 +1204,54 @@ mod tests {
             "got: {resolved:?}"
         );
         assert_eq!(engine.pending_actions.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_expired_action_refuses_late_approval() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+
+        let spec = ActionSpec::Shell {
+            args: vec![
+                "echo".to_string(),
+                "late-approval-should-not-run".to_string(),
+            ],
+            working_dir: None,
+            rationale: None,
+            category_override: Some("destructive".to_string()),
+        };
+
+        let outcome = engine.submit(spec, "trace-expired-approval").await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval { action_id, .. } => action_id,
+            other => panic!("expected PendingApproval, got: {other:?}"),
+        };
+        let pending = engine
+            .pending_actions
+            .get_mut(&action_id)
+            .expect("pending action should exist");
+        pending.expires_at = Utc::now() - chrono::Duration::seconds(1);
+
+        let resolved = engine
+            .resolve(&action_id, true, "late approval by test")
+            .await;
+        match resolved {
+            ActionOutcome::Rejected { error, .. } => {
+                assert!(
+                    error.contains("approval expired"),
+                    "late approval should be rejected as expired: {error}"
+                );
+            }
+            other => panic!("expired approval must not execute: {other:?}"),
+        }
+        assert_eq!(engine.pending_actions.len(), 0);
+
+        let audit_path = engine.audit.lock().await.path().to_path_buf();
+        let audit = std::fs::read_to_string(audit_path).expect("audit log should exist");
+        assert!(audit.contains("\"outcome\":\"rejected\""));
+        assert!(audit.contains("approval expired before operator response"));
+        assert!(audit.contains("\"operator_approved\":false"));
+        assert!(!audit.contains("late-approval-should-not-run\\n"));
     }
 
     #[tokio::test]

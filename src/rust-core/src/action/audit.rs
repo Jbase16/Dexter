@@ -18,7 +18,7 @@ use std::{
 };
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{AUDIT_LOG_FILENAME, AUDIT_OUTPUT_PREVIEW_CHARS};
 
@@ -138,6 +138,204 @@ impl AuditEntry<'_> {
     }
 }
 
+// ── Action history receipts ──────────────────────────────────────────────────
+
+/// Operator-facing receipt reconstructed from one audit-log line.
+///
+/// This is intentionally smaller than `AuditEntry`: the HUD needs a safe,
+/// human-readable summary, not raw action parameters or full command output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionAuditReceipt {
+    pub action_id: String,
+    pub action_type: String,
+    pub category: String,
+    pub description: String,
+    pub outcome: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditEntryRecord {
+    action_id: String,
+    #[serde(rename = "type")]
+    action_type: String,
+    category: String,
+    spec_json: serde_json::Value,
+    outcome: String,
+    output_preview: Option<String>,
+    error: Option<String>,
+}
+
+/// Read the newest action receipts from `{state_dir}/audit.jsonl`.
+///
+/// Returns newest-first receipts. Missing audit files are treated as an empty
+/// history because a fresh Dexter install may not have taken any actions yet.
+pub fn recent_action_receipts(
+    state_dir: &Path,
+    limit: usize,
+) -> Result<(PathBuf, Vec<ActionAuditReceipt>), Box<dyn std::error::Error + Send + Sync>> {
+    let path = state_dir.join(AUDIT_LOG_FILENAME);
+    if limit == 0 || !path.exists() {
+        return Ok((path, Vec::new()));
+    }
+
+    let content = std::fs::read_to_string(&path)?;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut receipts = Vec::with_capacity(limit.min(lines.len()));
+    for (idx, line) in lines.iter().enumerate().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: AuditEntryRecord = serde_json::from_str(line).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("audit log line {} is not valid JSON: {e}", idx + 1),
+            )
+        })?;
+        receipts.push(record.to_receipt());
+        if receipts.len() >= limit {
+            break;
+        }
+    }
+
+    Ok((path, receipts))
+}
+
+impl AuditEntryRecord {
+    fn to_receipt(&self) -> ActionAuditReceipt {
+        ActionAuditReceipt {
+            action_id: self.action_id.clone(),
+            action_type: self.action_type.clone(),
+            category: self.category.clone(),
+            description: describe_audit_spec(&self.action_type, &self.spec_json),
+            outcome: audit_receipt_outcome(&self.outcome, self.error.as_deref()),
+            summary: audit_receipt_summary(
+                &self.outcome,
+                self.output_preview.as_deref(),
+                self.error.as_deref(),
+            ),
+        }
+    }
+}
+
+fn audit_receipt_outcome(outcome: &str, error: Option<&str>) -> String {
+    match outcome {
+        "success" => "executed",
+        "rejected" if error.is_some_and(is_approval_expired_error) => "expired",
+        "rejected" => "denied",
+        "failure" | "timeout" => "failed",
+        _ => "failed",
+    }
+    .to_string()
+}
+
+fn audit_receipt_summary(
+    outcome: &str,
+    output_preview: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    match outcome {
+        "success" => match clean_line(output_preview) {
+            Some(output) if output != "Done." => format!("Succeeded: {output}"),
+            _ => "Succeeded.".to_string(),
+        },
+        "rejected" if error.is_some_and(is_approval_expired_error) => {
+            "Approval expired before execution.".to_string()
+        }
+        "rejected" => match clean_line(error) {
+            Some(error) if error == "session ended before operator responded" => {
+                "Session closed before execution.".to_string()
+            }
+            Some(error) if error != "operator rejected the action" => {
+                format!("Denied before execution: {error}")
+            }
+            _ => "Denied before execution.".to_string(),
+        },
+        "timeout" => match clean_line(error) {
+            Some(error) => format!("Timed out: {error}"),
+            None => "Timed out.".to_string(),
+        },
+        "failure" => match clean_line(error).or_else(|| clean_line(output_preview)) {
+            Some(detail) => format!("Failed: {detail}"),
+            None => "Failed.".to_string(),
+        },
+        _ => match clean_line(error).or_else(|| clean_line(output_preview)) {
+            Some(detail) => format!("Failed: {detail}"),
+            None => "Failed.".to_string(),
+        },
+    }
+}
+
+fn is_approval_expired_error(error: &str) -> bool {
+    error.contains("approval expired before operator response")
+}
+
+fn describe_audit_spec(action_type: &str, spec: &serde_json::Value) -> String {
+    match action_type {
+        "shell" => describe_shell_audit_spec(spec),
+        "file_read" => json_string(spec, "path")
+            .map(|path| format!("Read file: {path}"))
+            .unwrap_or_else(|| "Read file".to_string()),
+        "file_write" => json_string(spec, "path")
+            .map(|path| format!("Write file: {path}"))
+            .unwrap_or_else(|| "Write file".to_string()),
+        "applescript" => json_string(spec, "rationale")
+            .map(|rationale| format!("AppleScript: {rationale}"))
+            .unwrap_or_else(|| "Run AppleScript".to_string()),
+        "message_send" => json_string(spec, "recipient")
+            .map(|recipient| format!("Send iMessage to: {recipient}"))
+            .unwrap_or_else(|| "Send iMessage".to_string()),
+        "browser" => describe_browser_audit_spec(spec),
+        other => format!("Action: {other}"),
+    }
+}
+
+fn describe_shell_audit_spec(spec: &serde_json::Value) -> String {
+    let Some(args) = spec.get("args").and_then(|value| value.as_array()) else {
+        return "Run shell command".to_string();
+    };
+    let parts: Vec<&str> = args.iter().filter_map(|value| value.as_str()).collect();
+    if parts.is_empty() {
+        "Run shell command".to_string()
+    } else {
+        format!("Run: {}", parts.join(" "))
+    }
+}
+
+fn describe_browser_audit_spec(spec: &serde_json::Value) -> String {
+    let action = json_string(spec, "action").unwrap_or("browser action");
+    match (
+        action,
+        json_string(spec, "url"),
+        json_string(spec, "selector"),
+    ) {
+        ("navigate", Some(url), _) => format!("Browser navigate: {url}"),
+        (_, _, Some(selector)) => format!("Browser {action}: {selector}"),
+        _ => format!("Browser: {action}"),
+    }
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn clean_line(value: Option<&str>) -> Option<String> {
+    value
+        .map(|value| {
+            value
+                .replace('\r', " ")
+                .replace('\n', " ")
+                .trim()
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+}
+
 /// Builder to avoid repeating boilerplate in engine.rs when constructing entries.
 ///
 /// Phase 9+: used by retrieval pipeline and session replay tooling.
@@ -226,5 +424,45 @@ mod tests {
     fn audit_log_preview_short_string_unchanged() {
         let short = "hello";
         assert_eq!(AuditLog::preview(short), short);
+    }
+
+    #[test]
+    fn recent_action_receipts_returns_newest_first_and_normalizes_outcomes() {
+        let tmp = tempdir().unwrap();
+        let log = AuditLog::new(tmp.path());
+
+        log.append(&make_entry("id-1")).unwrap();
+        let expired = AuditEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            action_id: "id-2",
+            r#type: "shell",
+            category: "destructive",
+            spec_json: serde_json::json!({"args": ["rm", "-rf", "/tmp/example"]}),
+            outcome: "rejected",
+            exit_code: None,
+            output_preview: None,
+            error: Some("approval expired before operator response".to_string()),
+            duration_ms: None,
+            operator_approved: Some(false),
+        };
+        log.append(&expired).unwrap();
+
+        let (path, receipts) = recent_action_receipts(tmp.path(), 10).unwrap();
+        assert_eq!(path, log.path());
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].action_id, "id-2");
+        assert_eq!(receipts[0].description, "Run: rm -rf /tmp/example");
+        assert_eq!(receipts[0].outcome, "expired");
+        assert_eq!(receipts[0].summary, "Approval expired before execution.");
+        assert_eq!(receipts[1].action_id, "id-1");
+        assert_eq!(receipts[1].outcome, "executed");
+    }
+
+    #[test]
+    fn recent_action_receipts_missing_log_is_empty() {
+        let tmp = tempdir().unwrap();
+        let (path, receipts) = recent_action_receipts(tmp.path(), 20).unwrap();
+        assert_eq!(path, tmp.path().join(AUDIT_LOG_FILENAME));
+        assert!(receipts.is_empty());
     }
 }

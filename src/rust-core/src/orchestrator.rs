@@ -39,7 +39,10 @@ use tonic::Status;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    action::{ActionEngine, ActionOutcome, ActionResult, ActionSpec, ExecutorHandle, PolicyEngine},
+    action::{
+        engine::ActionReceiptMetadata, ActionEngine, ActionOutcome, ActionResult, ActionSpec,
+        ExecutorHandle, PolicyEngine,
+    },
     config::{DexterConfig, ModelConfig},
     constants::{
         ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_BLOCK_CLOSE, ACTION_BLOCK_OPEN, AGENTIC_MAX_DEPTH,
@@ -451,6 +454,8 @@ const INTERACTION_TTL_SECS: u64 = 300;
 ///   - `browser` — single browser worker (Playwright chromium), one for the daemon
 ///   - `fast_model_warm` / `primary_model_warm` / `embed_model_warm` — Ollama
 ///     warmup state. Set once at daemon startup, observed by all sessions.
+///   - `startup_warmup_complete` — distinguishes "still warming" from "warmup
+///     attempted and failed" for health reporting.
 ///   - `startup_greeting_sent` — gates "Ready." TTS to fire only on the first
 ///     session that connects, not every reconnect.
 ///   - `pending_primary_rewarm_global` — moved here so HEAVY swap rewarm logic
@@ -464,6 +469,7 @@ pub struct SharedDaemonState {
     pub fast_model_warm: Arc<AtomicBool>,
     pub primary_model_warm: Arc<AtomicBool>,
     pub embed_model_warm: Arc<AtomicBool>,
+    pub startup_warmup_complete: Arc<AtomicBool>,
     pub startup_greeting_sent: Arc<AtomicBool>,
 }
 
@@ -482,6 +488,7 @@ impl SharedDaemonState {
             fast_model_warm: Arc::new(AtomicBool::new(false)),
             primary_model_warm: Arc::new(AtomicBool::new(false)),
             embed_model_warm: Arc::new(AtomicBool::new(false)),
+            startup_warmup_complete: Arc::new(AtomicBool::new(false)),
             startup_greeting_sent: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -531,6 +538,7 @@ impl SharedDaemonState {
                     error = %e,
                     "InferenceEngine setup failed at daemon startup — model warmups skipped"
                 );
+                self.startup_warmup_complete.store(true, Ordering::SeqCst);
                 return;
             }
         };
@@ -564,6 +572,7 @@ impl SharedDaemonState {
             );
         }
 
+        self.startup_warmup_complete.store(true, Ordering::SeqCst);
         info!("Daemon startup warmup complete — sessions can connect with no warmup tax");
     }
 }
@@ -2377,6 +2386,8 @@ impl CoreOrchestrator {
                         action_id,
                         description,
                         category,
+                        expires_at_unix_ms,
+                        timeout_secs,
                     } => {
                         info!(
                             session     = %self.session_id,
@@ -2402,11 +2413,8 @@ impl CoreOrchestrator {
                         // compactly. No TTS: voice prompts during approval would
                         // be a UX decision (interrupt/override, re-ask on timeout,
                         // etc.) that deserves its own design pass.
-                        let warning = format!(
-                            "⚠️ Needs approval before I run this ({cat}):\n\n```\n{desc}\n```\n\nSay yes or no.",
-                            cat  = category_label(&category),
-                            desc = description,
-                        );
+                        let warning =
+                            action_approval_warning_text(&category, &description, timeout_secs);
                         self.send_text(&warning, false, &trace_id).await?;
 
                         let req = ActionRequest {
@@ -2414,6 +2422,8 @@ impl CoreOrchestrator {
                             description,
                             category: category.into(),
                             payload: String::new(),
+                            expires_at_unix_ms,
+                            timeout_secs,
                         };
                         self.send_action_request(req, &trace_id).await?;
                         self.send_state(EntityState::Alert, &trace_id).await?;
@@ -2947,8 +2957,20 @@ impl CoreOrchestrator {
                         trace_id = %trace_id,
                         "Cancellation word arrived during ALERT — rejecting pending action"
                     );
-                    self.action_engine.reject_all_pending().await;
+                    let resolved_actions = self
+                        .action_engine
+                        .resolve_all_pending_with_receipts(false, "typed-cancel")
+                        .await;
                     self.action_awaiting_approval = false;
+                    let mut spoke = false;
+                    for (outcome, metadata) in resolved_actions {
+                        spoke |= self
+                            .finalize_resolved_action(outcome, Some(metadata), false, &trace_id)
+                            .await?;
+                    }
+                    if spoke {
+                        return Ok(());
+                    }
                 }
                 self.send_state(EntityState::Idle, &trace_id).await?;
                 return Ok(());
@@ -3009,13 +3031,25 @@ impl CoreOrchestrator {
                 // Resolve all pending actions with the operator's response. In practice
                 // there is at most one at a time (PolicyEngine serializes DESTRUCTIVE
                 // actions behind approval), but the "_all" name documents the invariant.
-                if is_yes {
-                    self.action_engine.approve_all_pending().await;
+                let note = if is_yes {
+                    "typed-approval"
                 } else {
-                    self.action_engine.reject_all_pending().await;
-                }
+                    "typed-denial"
+                };
+                let resolved_actions = self
+                    .action_engine
+                    .resolve_all_pending_with_receipts(is_yes, note)
+                    .await;
                 self.action_awaiting_approval = false;
-                self.send_state(EntityState::Idle, &trace_id).await?;
+                let mut spoke = false;
+                for (outcome, metadata) in resolved_actions {
+                    spoke |= self
+                        .finalize_resolved_action(outcome, Some(metadata), is_yes, &trace_id)
+                        .await?;
+                }
+                if !spoke {
+                    self.send_state(EntityState::Idle, &trace_id).await?;
+                }
                 return Ok(());
             }
 
@@ -4269,6 +4303,8 @@ impl CoreOrchestrator {
                 action_id,
                 description,
                 category,
+                expires_at_unix_ms,
+                timeout_secs,
             } => {
                 info!(
                     session     = %self.session_id,
@@ -4277,11 +4313,7 @@ impl CoreOrchestrator {
                     %description,
                     "DESTRUCTIVE synthetic action awaiting operator approval"
                 );
-                let warning = format!(
-                    "⚠️ Needs approval before I run this ({cat}):\n\n```\n{desc}\n```\n\nSay yes or no.",
-                    cat = category_label(&category),
-                    desc = description,
-                );
+                let warning = action_approval_warning_text(&category, &description, timeout_secs);
                 self.send_text(&warning, false, &trace_id).await?;
 
                 let req = ActionRequest {
@@ -4289,6 +4321,8 @@ impl CoreOrchestrator {
                     description,
                     category: category.into(),
                     payload: String::new(),
+                    expires_at_unix_ms,
+                    timeout_secs,
                 };
                 self.send_action_request(req, &trace_id).await?;
                 self.send_state(EntityState::Alert, &trace_id).await?;
@@ -4389,17 +4423,6 @@ impl CoreOrchestrator {
         let pending_receipt = self
             .action_engine
             .pending_receipt_metadata(&approval.action_id);
-        let action_description = pending_receipt
-            .as_ref()
-            .map(|metadata| metadata.description.clone());
-        let action_type = pending_receipt
-            .as_ref()
-            .map(|metadata| metadata.action_type)
-            .unwrap_or("unknown");
-        let action_category = pending_receipt
-            .as_ref()
-            .map(|metadata| metadata.category)
-            .unwrap_or("destructive");
         let operator_approved = approval.approved;
 
         let outcome = self
@@ -4414,6 +4437,37 @@ impl CoreOrchestrator {
         // Phase 19: clear the action guard before any awaits so that if something
         // goes wrong the ALERT state can still be cleared by future events.
         self.action_awaiting_approval = false;
+
+        let spoke = self
+            .finalize_resolved_action(outcome, pending_receipt, operator_approved, &trace_id)
+            .await?;
+
+        // When TTS spoke the feedback, AUDIO_PLAYBACK_COMPLETE will drive IDLE.
+        // When TTS was unavailable (spoke=false), send IDLE directly.
+        if !spoke {
+            self.send_state(EntityState::Idle, &trace_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn finalize_resolved_action(
+        &mut self,
+        outcome: ActionOutcome,
+        pending_receipt: Option<ActionReceiptMetadata>,
+        operator_approved: bool,
+        trace_id: &str,
+    ) -> Result<bool, OrchestratorError> {
+        let action_description = pending_receipt
+            .as_ref()
+            .map(|metadata| metadata.description.clone());
+        let action_type = pending_receipt
+            .as_ref()
+            .map(|metadata| metadata.action_type)
+            .unwrap_or("unknown");
+        let action_category = pending_receipt
+            .as_ref()
+            .map(|metadata| metadata.category)
+            .unwrap_or("destructive");
 
         // Speak a brief result to the operator and, when TTS is available, let
         // AUDIO_PLAYBACK_COMPLETE drive the IDLE transition (same as regular TTS).
@@ -4436,9 +4490,9 @@ impl CoreOrchestrator {
                 let feedback =
                     action_completion_status_text(action_description.as_deref(), &output);
                 if action_description.is_some() {
-                    self.inject_action_status_context("Action result", &feedback, &trace_id);
+                    self.inject_action_status_context("Action result", &feedback, trace_id);
                 }
-                self.speak_action_feedback(&feedback, &trace_id).await?
+                self.speak_action_feedback(&feedback, trace_id).await?
             }
             ActionOutcome::Rejected { action_id, error } => {
                 info!(
@@ -4447,16 +4501,22 @@ impl CoreOrchestrator {
                     error     = %error,
                     "Action rejected"
                 );
-                let feedback = if operator_approved {
+                let feedback = if is_action_approval_expired(error) {
+                    action_expired_status_text(action_description.as_deref())
+                } else if operator_approved {
                     action_failure_status_text(action_description.as_deref(), &error)
                 } else {
                     action_denied_status_text(action_description.as_deref(), &error)
                 };
                 if action_description.is_some() {
-                    let label = action_context_label_for_rejection(operator_approved);
-                    self.inject_action_status_context(label, &feedback, &trace_id);
+                    let label = if is_action_approval_expired(error) {
+                        "Action expired"
+                    } else {
+                        action_context_label_for_rejection(operator_approved)
+                    };
+                    self.inject_action_status_context(label, &feedback, trace_id);
                 }
-                self.speak_action_feedback(&feedback, &trace_id).await?
+                self.speak_action_feedback(&feedback, trace_id).await?
             }
             ActionOutcome::PendingApproval { .. } => {
                 // resolve() should never return PendingApproval — this is a logic error.
@@ -4473,17 +4533,12 @@ impl CoreOrchestrator {
                 action_description.as_deref(),
                 feedback_detail,
                 Some(operator_approved),
-                &trace_id,
+                trace_id,
             )
             .await?;
         }
 
-        // When TTS spoke the feedback, AUDIO_PLAYBACK_COMPLETE will drive IDLE.
-        // When TTS was unavailable (spoke=false), send IDLE directly.
-        if !spoke {
-            self.send_state(EntityState::Idle, &trace_id).await?;
-        }
-        Ok(())
+        Ok(spoke)
     }
 
     // ── Phase 24: background action result handling ───────────────────────────
@@ -5149,6 +5204,14 @@ impl CoreOrchestrator {
         BRIDGING_PHRASES[idx % BRIDGING_PHRASES.len()]
     }
 
+    fn screencapture_bin() -> String {
+        std::env::var("DEXTER_SCREENCAPTURE_BIN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "screencapture".to_string())
+    }
+
     /// Capture the main display and return the PNG as a base64-encoded string.
     ///
     /// Uses the macOS `screencapture` CLI:
@@ -5181,9 +5244,10 @@ impl CoreOrchestrator {
         // Spawn screencapture with a SCREEN_CAPTURE_TIMEOUT_SECS wall-clock limit.
         // On Apple Silicon the capture typically completes in <1s; the timeout is
         // a safety net for edge cases (display sleep, Quartz compositor stall, CI).
+        let capture_bin = Self::screencapture_bin();
         let spawn_result = tokio::time::timeout(
             std::time::Duration::from_secs(SCREEN_CAPTURE_TIMEOUT_SECS),
-            tokio::process::Command::new("screencapture")
+            tokio::process::Command::new(&capture_bin)
                 .args(["-x", "-m", "-t", "png", &path])
                 .status(),
         )
@@ -5211,12 +5275,13 @@ impl CoreOrchestrator {
                 }
             }
             Ok(Ok(_non_zero)) => {
-                warn!(session = %self.session_id, path = %path, "Vision: screencapture exited non-zero");
+                warn!(session = %self.session_id, bin = %capture_bin, path = %path, "Vision: screencapture exited non-zero");
                 None
             }
             Ok(Err(e)) => {
                 warn!(
                     session = %self.session_id,
+                    bin     = %capture_bin,
                     error   = %e,
                     "Vision: screencapture process spawn failed"
                 );
@@ -5225,6 +5290,7 @@ impl CoreOrchestrator {
             Err(_timeout) => {
                 warn!(
                     session      = %self.session_id,
+                    bin          = %capture_bin,
                     timeout_secs = SCREEN_CAPTURE_TIMEOUT_SECS,
                     "Vision: screencapture timed out"
                 );
@@ -7244,20 +7310,27 @@ fn is_command_query(content: &str) -> bool {
     query_patterns.iter().any(|p| lc.contains(p))
 }
 
-/// Phase 37 / B10: short human-readable label for a category, used in the
-/// HUD approval warning. Not `Display` because the enum is proto-generated
-/// and we don't want to lock the wording into the wire type.
-fn category_label(cat: &ActionCategory) -> &'static str {
+fn action_review_label(cat: &ActionCategory) -> &'static str {
     match cat {
-        ActionCategory::Safe => "safe",
-        ActionCategory::Cautious => "cautious",
-        ActionCategory::Destructive => "destructive",
-        // Unspecified is the proto zero-value. PolicyEngine::classify() never
-        // emits it; only wire-side defaults would produce it. Fall through to
-        // the most conservative label so an unexpected value is never silently
-        // shown as "safe" in a warning.
-        ActionCategory::Unspecified => "destructive",
+        ActionCategory::Safe => "no approval required",
+        ActionCategory::Cautious => "reviewed by policy",
+        ActionCategory::Destructive => "approval required",
+        // Unspecified is unexpected at this point, so keep the operator-facing
+        // instruction conservative without making the action sound forbidden.
+        ActionCategory::Unspecified => "approval required",
     }
+}
+
+fn action_approval_warning_text(
+    category: &ActionCategory,
+    description: &str,
+    timeout_secs: u32,
+) -> String {
+    format!(
+        "⚠️ Review before I run this ({review}):\n\n```\n{desc}\n```\n\nReply yes to approve, no to skip, or cancel within {timeout_secs} seconds.",
+        review = action_review_label(category),
+        desc = description,
+    )
 }
 
 // Operator-facing action result previews should be useful but not become the
@@ -7305,12 +7378,20 @@ fn action_denied_status_text(description: Option<&str>, error: &str) -> String {
     format!("Action denied before execution: {subject}.\n\n{detail}")
 }
 
+fn action_expired_status_text(description: Option<&str>) -> String {
+    let subject = action_status_subject(description);
+    format!("Action approval expired before execution: {subject}.")
+}
+
 fn action_context_label(
     outcome: &ActionOutcome,
     operator_approved: Option<bool>,
 ) -> Option<&'static str> {
     match outcome {
         ActionOutcome::Completed { .. } => Some("Action result"),
+        ActionOutcome::Rejected { error, .. } if is_action_approval_expired(error) => {
+            Some("Action expired")
+        }
         ActionOutcome::Rejected { .. } => Some(action_context_label_for_rejection(
             operator_approved.unwrap_or(true),
         )),
@@ -7347,6 +7428,7 @@ fn action_receipt_outcome_label(
 ) -> &'static str {
     match outcome {
         ActionOutcome::Completed { .. } => "executed",
+        ActionOutcome::Rejected { error, .. } if is_action_approval_expired(error) => "expired",
         ActionOutcome::Rejected { .. } if operator_approved == Some(false) => "denied",
         ActionOutcome::Rejected { .. } => "failed",
         ActionOutcome::PendingApproval { .. } => "pending",
@@ -7367,6 +7449,9 @@ fn action_receipt_summary(
                 format!("Succeeded: {detail}")
             }
         }
+        ActionOutcome::Rejected { error, .. } if is_action_approval_expired(error) => {
+            "Approval expired before execution.".to_string()
+        }
         ActionOutcome::Rejected { error, .. } if operator_approved == Some(false) => {
             let detail = compact_operator_text(error, ACTION_STATUS_OUTPUT_MAX_CHARS);
             if detail.is_empty() || detail == "operator rejected the action" {
@@ -7385,6 +7470,10 @@ fn action_receipt_summary(
         }
         ActionOutcome::PendingApproval { .. } => "Pending approval.".to_string(),
     }
+}
+
+fn is_action_approval_expired(error: &str) -> bool {
+    error.contains("approval expired before operator response")
 }
 
 fn action_status_subject(description: Option<&str>) -> String {
@@ -8104,22 +8193,6 @@ pub(crate) fn extract_requested_messages_recipient(text: &str) -> Option<String>
         return None;
     }
 
-    let lower = normalized.to_lowercase();
-    let lower_with_spaces = format!(" {lower} ");
-    if [
-        " myself ",
-        " my self ",
-        " me ",
-        " myself,",
-        " myself.",
-        " myself:",
-    ]
-    .iter()
-    .any(|needle| lower_with_spaces.contains(needle))
-    {
-        return None;
-    }
-
     if let Some(after_to) = extract_after_marker_ci(
         normalized,
         &[
@@ -8276,6 +8349,11 @@ fn clean_requested_recipient_phrase(raw: &str) -> Option<String> {
         return None;
     }
 
+    let first_lc = words[0].to_ascii_lowercase();
+    if matches!(first_lc.as_str(), "me" | "myself" | "self" | "i" | "my") {
+        return None;
+    }
+
     if words.len() == 1 {
         return Some(words[0].to_string());
     }
@@ -8289,9 +8367,54 @@ fn clean_requested_recipient_phrase(raw: &str) -> Option<String> {
 
     if has_explicit_delimiter {
         Some(cleaned.to_string())
+    } else if let Some(name) = leading_name_like_words(&words) {
+        Some(name)
     } else {
         Some(words[0].to_string())
     }
+}
+
+fn leading_name_like_words(words: &[&str]) -> Option<String> {
+    let mut parts = Vec::new();
+    for word in words.iter().take(4) {
+        if is_name_like_token(word) {
+            parts.push(clean_name_like_token(word));
+        } else {
+            break;
+        }
+    }
+    if parts.len() >= 2 {
+        Some(parts.join(" "))
+    } else {
+        None
+    }
+}
+
+fn is_name_like_token(word: &str) -> bool {
+    let cleaned = clean_name_like_token(word);
+    let lower = cleaned.to_ascii_lowercase();
+    if lower.ends_with("'ll")
+        || lower.ends_with("'m")
+        || lower.ends_with("'re")
+        || lower.ends_with("'ve")
+        || lower.ends_with("'d")
+        || lower.ends_with("n't")
+    {
+        return false;
+    }
+    let mut chars = cleaned.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphabetic() || c == '\'' || c == '-' || c == '.')
+}
+
+fn clean_name_like_token(word: &str) -> String {
+    word.trim_matches(|c: char| c == '"' || c == '\'' || c.is_ascii_punctuation())
+        .to_string()
 }
 
 fn escape_applescript_literal(s: &str) -> String {
@@ -10103,7 +10226,16 @@ end tell"#;
         );
         assert_eq!(
             extract_requested_messages_recipient("text John Smith hello").as_deref(),
-            Some("John")
+            Some("John Smith")
+        );
+        assert_eq!(
+            extract_requested_messages_recipient("message Jason Phillips can you call me")
+                .as_deref(),
+            Some("Jason Phillips")
+        );
+        assert_eq!(
+            extract_requested_messages_recipient("text Mom hello").as_deref(),
+            Some("Mom")
         );
     }
 
@@ -10391,6 +10523,22 @@ end tell"#;
             action_context_status_text("Action result", "Action completed: Run: echo hi."),
             "[Action result: Action completed: Run: echo hi.]"
         );
+    }
+
+    #[test]
+    fn action_approval_warning_uses_review_language_not_internal_category() {
+        let warning = action_approval_warning_text(
+            &ActionCategory::Destructive,
+            "Run: rm -rf /tmp/example",
+            90,
+        );
+
+        assert!(warning.contains("Review before I run this"));
+        assert!(warning.contains("approval required"));
+        assert!(warning.contains("Reply yes to approve, no to skip, or cancel"));
+        assert!(warning.contains("Run: rm -rf /tmp/example"));
+        assert!(!warning.to_lowercase().contains("destructive"));
+        assert!(!warning.to_lowercase().contains("blocked"));
     }
 
     #[test]
@@ -11445,6 +11593,58 @@ end tell"#;
 
         // The system message must also be unchanged.
         assert!(messages[0].images.is_none());
+    }
+
+    #[test]
+    fn screencapture_bin_env_override_ignores_empty_value() {
+        const KEY: &str = "DEXTER_SCREENCAPTURE_BIN";
+        let old = std::env::var(KEY).ok();
+
+        std::env::set_var(KEY, "/tmp/dexter-missing-screencapture-test");
+        assert_eq!(
+            CoreOrchestrator::screencapture_bin(),
+            "/tmp/dexter-missing-screencapture-test"
+        );
+
+        std::env::set_var(KEY, "   ");
+        assert_eq!(CoreOrchestrator::screencapture_bin(), "screencapture");
+
+        match old {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_screen_returns_none_when_screencapture_bin_is_missing() {
+        const KEY: &str = "DEXTER_SCREENCAPTURE_BIN";
+        let old = std::env::var(KEY).ok();
+        std::env::set_var(KEY, "/tmp/dexter-no-such-screencapture-bin");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = test_config(tmp.path());
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let (action_tx, _) = tokio::sync::mpsc::channel(8);
+        let (generation_tx, _) = tokio::sync::mpsc::channel(4);
+        let orch = CoreOrchestrator::new(
+            &cfg,
+            "test-session".to_string(),
+            tx,
+            action_tx,
+            generation_tx,
+            crate::orchestrator::SharedDaemonState::new_degraded(),
+        )
+        .expect("orchestrator creation should succeed");
+
+        assert!(
+            orch.capture_screen().await.is_none(),
+            "missing screencapture binary must degrade to None"
+        );
+
+        match old {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
     }
 
     #[tokio::test]

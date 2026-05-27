@@ -1,4 +1,5 @@
 mod action;
+mod action_diagnostic;
 mod browser;
 mod config;
 mod constants;
@@ -145,7 +146,8 @@ async fn main() -> Result<()> {
     // ── Graceful shutdown via signal race ─────────────────────────────────────
     //
     // `ipc::serve()` blocks until the server exits or is interrupted. We race it
-    // against `ctrl_c()` so a SIGINT (Ctrl+C) or SIGTERM gracefully stops the daemon.
+    // against an explicit shutdown-signal future so SIGINT (Ctrl+C) and SIGTERM
+    // both run the daemon cleanup path.
     //
     // On signal receipt: the server future is dropped, which closes the listening socket.
     // The live session task sees inbound.message() return Err or Ok(None) on the next
@@ -163,12 +165,60 @@ async fn main() -> Result<()> {
                 info!("gRPC server exited normally");
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Shutdown signal received (Ctrl+C / SIGTERM) — daemon exiting");
+        signal = shutdown_signal() => {
+            info!(signal, "Shutdown signal received — daemon exiting");
         }
     }
 
+    cleanup_socket_file_on_exit(&cfg.core.socket_path, "gRPC socket");
+    cleanup_socket_file_on_exit(constants::SHELL_SOCKET_PATH, "shell context socket");
+
     Ok(())
+}
+
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Failed to install SIGTERM handler; falling back to Ctrl+C-only shutdown"
+                    );
+                    return wait_for_ctrl_c().await;
+                }
+            };
+
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                match result {
+                    Ok(()) => "SIGINT",
+                    Err(error) => {
+                        warn!(error = %error, "Ctrl+C signal listener failed");
+                        "signal-listener-error"
+                    }
+                }
+            }
+            _ = sigterm.recv() => "SIGTERM",
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        wait_for_ctrl_c().await
+    }
+}
+
+async fn wait_for_ctrl_c() -> &'static str {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => "SIGINT",
+        Err(error) => {
+            warn!(error = %error, "Ctrl+C signal listener failed");
+            "signal-listener-error"
+        }
+    }
 }
 
 /// Checks whether a stale socket file exists from a previous crash.
@@ -195,4 +245,14 @@ async fn cleanup_stale_socket(path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cleanup_socket_file_on_exit(path: &str, label: &str) {
+    match std::fs::remove_file(path) {
+        Ok(()) => info!(path, label, "Removed socket file on daemon exit"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(path, label, error = %error, "Could not remove socket file on daemon exit")
+        }
+    }
 }

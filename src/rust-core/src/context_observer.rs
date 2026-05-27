@@ -372,6 +372,7 @@ const TERMINAL_BUNDLE_IDS: &[&str] = &[
     "com.googlecode.iterm2.nightly", // iTerm2 (nightly builds)
     "io.alacritty",                  // Alacritty
     "net.kovidgoyal.kitty",          // kitty
+    "dev.warp.Warp",                 // Warp
     "dev.warp.Warp-Stable",          // Warp
     "com.mitchellh.ghostty",         // Ghostty
     "co.zeit.hyper",                 // Hyper
@@ -736,6 +737,7 @@ mod tests {
         assert!(is_terminal_bundle("com.googlecode.iterm2.nightly"));
         assert!(is_terminal_bundle("io.alacritty"));
         assert!(is_terminal_bundle("net.kovidgoyal.kitty"));
+        assert!(is_terminal_bundle("dev.warp.Warp"));
         assert!(is_terminal_bundle("dev.warp.Warp-Stable"));
         assert!(is_terminal_bundle("com.mitchellh.ghostty"));
         assert!(is_terminal_bundle("co.zeit.hyper"));

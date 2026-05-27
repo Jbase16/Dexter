@@ -371,6 +371,16 @@ pub const ACTION_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 /// 90s gives the script room to complete while still bounding runaway scripts.
 pub const ACTION_APPLESCRIPT_TIMEOUT_SECS: u64 = 90;
 
+/// How long an approval-required action may sit pending before it expires.
+///
+/// The approval gate is a privilege boundary between model output and real side
+/// effects. Leaving a confirmation live indefinitely creates stale approvals:
+/// the operator can approve an action long after the context that produced it
+/// has changed. Two minutes is long enough for a human to read the HUD warning
+/// and decide, but short enough that an unattended sheet does not become a
+/// reusable execution token.
+pub const ACTION_APPROVAL_TIMEOUT_SECS: u64 = 120;
+
 /// Opening delimiter for action blocks embedded in model responses.
 ///
 /// The personality system prompt instructs the model to wrap action JSON

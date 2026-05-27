@@ -105,6 +105,19 @@ private final class SmokeActionApprovalGate: @unchecked Sendable {
     }
 }
 
+private struct FinalResponseSnapshot: Sendable {
+    let revision: UInt64
+    let userText: String
+    let assistantText: String
+}
+
+private struct DexterActionDiagnosticHUDResponse: Sendable {
+    let markdown: String
+    let cause: String
+    let hasDiagnostic: Bool
+    let hasSessionClue: Bool
+}
+
 enum DexterWorkerRestartTarget: String, CaseIterable, Sendable {
     case stt
     case tts
@@ -162,6 +175,36 @@ private func actionCategoryLabel(_ category: Dexter_V1_ActionCategory) -> String
     case .destructive: return "destructive"
     case .unspecified: return "unspecified"
     case .UNRECOGNIZED(let value): return "unrecognized(\(value))"
+    }
+}
+
+private func actionReviewLabel(_ category: Dexter_V1_ActionCategory) -> String {
+    switch category {
+    case .safe:
+        return "no approval required"
+    case .cautious:
+        return "reviewed by policy"
+    case .destructive:
+        return "approval required"
+    case .unspecified:
+        return "approval required"
+    case .UNRECOGNIZED:
+        return "approval required"
+    }
+}
+
+private func actionReviewLabel(_ category: String) -> String {
+    switch category.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "safe":
+        return "no approval required"
+    case "cautious":
+        return "reviewed by policy"
+    case "destructive":
+        return "approval required"
+    case "":
+        return "unknown"
+    default:
+        return category
     }
 }
 
@@ -228,6 +271,10 @@ actor DexterClient {
     private var proactiveHealthProbeTask: Task<Void, Never>?
     private var lastSurfacedHealthComponents = Set<String>()
     private var lastHealthSurfaceAt: Date?
+    private var turnRevision: UInt64 = 0
+    private var currentOperatorText: String = ""
+    private var currentResponseText: String = ""
+    private var actionReceiptRevision: UInt64?
 
     private static func boundedEnvSeconds(
         _ key: String,
@@ -458,6 +505,7 @@ actor DexterClient {
                             // window is FloatingWindow (@unchecked Sendable) — same capture
                             // pattern used throughout the session onResponse closure.
                             await MainActor.run { window.hud.showOperatorInput(transcript) }
+                            await self?.recordOperatorText(transcript)
 
                             // Phase 24c: suppress the echo when Rust already has the transcript.
                             // This eliminates the duplicate inference that would otherwise occur
@@ -552,6 +600,9 @@ actor DexterClient {
                             default: break
                             }
                         }
+                        if state == .thinking {
+                            await self?.beginResponseCapture()
+                        }
 
                         // Push-to-talk gate: arm VoiceCapture for exactly one utterance
                         // when Rust confirms LISTENING state. The hotkey press → Rust
@@ -566,9 +617,44 @@ actor DexterClient {
                     case .textResponse(let resp):
                         print("[DexterClient] onResponse ← textResponse: isFinal=\(resp.isFinal), \(resp.content.prefix(40))...")
                         audioPlayer.prepareForResponseTrace(event.traceID)
+                        let finalSnapshot = await self?.recordResponseToken(resp.content, isFinal: resp.isFinal)
                         await MainActor.run {
                             window.hud.appendToken(resp.content)
                             if resp.isFinal { window.hud.responseComplete() }
+                        }
+                        if let finalSnapshot {
+                            Task { [weak self, window] in
+                                try? await Task.sleep(for: .seconds(1))
+                                guard await self?.isCurrentTurn(finalSnapshot.revision) == true else {
+                                    print("[DexterClient] Auto no-receipt diagnostic skipped — newer turn started")
+                                    return
+                                }
+                                guard await self?.hasActionReceipt(for: finalSnapshot.revision) != true else {
+                                    print("[DexterClient] Auto no-receipt diagnostic skipped — action receipt already explains turn")
+                                    return
+                                }
+                                guard !finalSnapshot.assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                    return
+                                }
+                                let report = await self?.fetchActionDiagnosticReport(
+                                    actionLimit: 3,
+                                    currentUserText: finalSnapshot.userText,
+                                    currentAssistantText: finalSnapshot.assistantText,
+                                    onlyIfClue: true,
+                                    ignoreActionReceipts: true
+                                )
+                                guard let report, report.hasDiagnostic else {
+                                    return
+                                }
+                                guard await self?.isCurrentTurn(finalSnapshot.revision) == true else {
+                                    print("[DexterClient] Auto no-receipt diagnostic render skipped — newer turn started")
+                                    return
+                                }
+                                print("[DexterClient] Auto no-receipt diagnostic surfaced cause=\(report.cause)")
+                                await MainActor.run {
+                                    window.hud.showActionDiagnostic(report.markdown)
+                                }
+                            }
                         }
 
                     case .actionRequest(let req):
@@ -608,28 +694,53 @@ actor DexterClient {
                                 : "Swift HUD smoke auto-denied"
                             print("[HUDSmoke] actionApproval actionID=\(req.actionID) approved=\(approved)")
                         } else {
-                            approved = await withCheckedContinuation { continuation in
+                            let decision: (Bool, String) = await withCheckedContinuation { continuation in
                                 Task { @MainActor in
                                     let alert = NSAlert()
-                                    alert.messageText = req.category == .destructive
-                                        ? "Destructive Action Requires Approval"
-                                        : "Action Requires Approval"
+                                    alert.messageText = "Review Action Before Running"
                                     // description_p: protoc-gen-swift appends _p to field names
                                     // that collide with Swift reserved words. `description` is
                                     // used by CustomStringConvertible, hence the suffix.
+                                    let timeoutSecs = Int(req.timeoutSecs)
+                                    let expiryText = timeoutSecs > 0
+                                        ? "\n\nExpires in \(timeoutSecs) seconds."
+                                        : ""
                                     alert.informativeText = """
-                                    Category: \(categoryLabel)
+                                    Review: \(actionReviewLabel(req.category))
 
                                     Action:
-                                    \(req.description_p)
+                                    \(req.description_p)\(expiryText)
                                     """
                                     alert.addButton(withTitle: "Approve")
-                                    alert.addButton(withTitle: "Deny")
+                                    alert.addButton(withTitle: "Don't Run")
+                                    var didResume = false
+                                    func finish(approved: Bool, note: String) {
+                                        guard !didResume else { return }
+                                        didResume = true
+                                        continuation.resume(returning: (approved, note))
+                                    }
+                                    if timeoutSecs > 0 {
+                                        Task { @MainActor in
+                                            try? await Task.sleep(for: .seconds(timeoutSecs))
+                                            guard !didResume else { return }
+                                            if let sheetParent = alert.window.sheetParent {
+                                                sheetParent.endSheet(alert.window, returnCode: .alertSecondButtonReturn)
+                                            } else {
+                                                alert.window.close()
+                                            }
+                                            print("[DexterClient] Action approval expired in HUD: id=\(req.actionID)")
+                                            finish(
+                                                approved: false,
+                                                note: "Swift HUD approval expired before operator response"
+                                            )
+                                        }
+                                    }
                                     let response = await alert.beginSheetModal(for: window)
-                                    continuation.resume(returning: response == .alertFirstButtonReturn)
+                                    finish(approved: response == .alertFirstButtonReturn, note: "")
                                 }
                             }
-                            approvalNote = ""
+                            approved = decision.0
+                            approvalNote = decision.1
                         }
 
                         let approval = Dexter_V1_ClientEvent.with {
@@ -649,8 +760,33 @@ actor DexterClient {
                             print("[HUDSmoke] actionReceipt id=\(receipt.actionID) outcome=\(receipt.outcome) type=\(receipt.actionType)")
                         }
                         let markdown = Self.actionReceiptMarkdown(receipt)
+                        let shouldAutoSurfaceDiagnostic = Self.shouldAutoSurfaceActionDiagnostic(for: receipt)
+                        let receiptRevision = await self?.markActionReceiptSeen() ?? 0
                         await MainActor.run {
                             window.hud.showActionReceipt(markdown)
+                        }
+                        if shouldAutoSurfaceDiagnostic {
+                            print("[DexterClient] Auto action diagnostic scheduled for receipt id=\(receipt.actionID), outcome=\(receipt.outcome)")
+                            Task { [weak self, window] in
+                                try? await Task.sleep(for: .seconds(1))
+                                guard await self?.isCurrentTurn(receiptRevision) == true else {
+                                    print("[DexterClient] Auto action diagnostic skipped — newer turn started")
+                                    return
+                                }
+                                let markdown = await self?.fetchActionDiagnosticMarkdown(actionLimit: 3)
+                                    ?? """
+                                    ### Action Diagnostic
+
+                                    Dexter client is not ready.
+                                    """
+                                guard await self?.isCurrentTurn(receiptRevision) == true else {
+                                    print("[DexterClient] Auto action diagnostic render skipped — newer turn started")
+                                    return
+                                }
+                                await MainActor.run {
+                                    window.hud.showActionDiagnostic(markdown)
+                                }
+                            }
                         }
 
                     case .audioResponse(let audio):
@@ -723,6 +859,38 @@ actor DexterClient {
         }
     }
 
+    func fetchOperatorStatusReport(actionLimit: UInt32 = 5) async -> DexterHealthHUDReport {
+        do {
+            let health = try await requestHealthSnapshot()
+            print("[DexterClient] Health RPC OK status=\(health.status) degraded=\(health.degradedComponents.joined(separator: ","))")
+
+            var actionHistory: Dexter_V1_ActionHistoryResponse?
+            var actionHistoryError: String?
+            do {
+                let history = try await requestActionHistory(limit: actionLimit)
+                let firstDescription = history.receipts.first
+                    .map { Self.receiptLine($0.description_p, fallback: "requested action") }
+                    ?? "none"
+                print("[DexterClient] ActionHistory RPC OK receipts=\(history.receipts.count) first=\(firstDescription.prefix(80))")
+                actionHistory = history
+            } catch {
+                actionHistoryError = "\(error)"
+                print("[DexterClient] ActionHistory RPC unavailable for status error=\(error)")
+            }
+
+            return Self.operatorStatusHUDReport(
+                for: health,
+                actionHistory: actionHistory,
+                actionHistoryError: actionHistoryError
+            )
+        } catch {
+            return DexterHealthHUDReport(
+                markdown: Self.unavailableHealthMarkdown(reason: "\(error)"),
+                restartTargets: []
+            )
+        }
+    }
+
     private func requestHealthSnapshot() async throws -> Dexter_V1_HealthResponse {
         try await withGRPCClient(
             transport: .http2NIOPosix(
@@ -733,6 +901,114 @@ actor DexterClient {
             let stub = Dexter_V1_DexterService.Client(wrapping: client)
             return try await stub.health(
                 Dexter_V1_HealthRequest.with { $0.traceID = UUID().uuidString }
+            )
+        }
+    }
+
+    func fetchActionHistoryMarkdown(limit: UInt32 = 20) async -> String {
+        do {
+            let history = try await requestActionHistory(limit: limit)
+            let firstDescription = history.receipts.first
+                .map { Self.receiptLine($0.description_p, fallback: "requested action") }
+                ?? "none"
+            print("[DexterClient] ActionHistory RPC OK receipts=\(history.receipts.count) first=\(firstDescription.prefix(80))")
+            return Self.actionHistoryMarkdown(history)
+        } catch {
+            return """
+            ### Recent Actions
+
+            Action history unavailable.
+
+            \(error)
+            """
+        }
+    }
+
+    func fetchActionDiagnosticMarkdown(actionLimit: UInt32 = 3) async -> String {
+        await fetchActionDiagnosticReport(actionLimit: actionLimit).markdown
+    }
+
+    private func fetchActionDiagnosticReport(
+        actionLimit: UInt32 = 3,
+        currentUserText: String = "",
+        currentAssistantText: String = "",
+        onlyIfClue: Bool = false,
+        ignoreActionReceipts: Bool = false
+    ) async -> DexterActionDiagnosticHUDResponse {
+        do {
+            let response = try await requestActionDiagnostic(
+                limit: actionLimit,
+                currentUserText: currentUserText,
+                currentAssistantText: currentAssistantText,
+                onlyIfClue: onlyIfClue,
+                ignoreActionReceipts: ignoreActionReceipts
+            )
+            let firstDescription = response.receipts.first
+                .map { Self.receiptLine($0.description_p, fallback: "requested action") }
+                ?? "none"
+            print("[DexterClient] ActionDiagnostic report generated cause=\(response.cause) receipts=\(response.receipts.count) sessionClue=\(response.hasSessionClue_p) first=\(firstDescription.prefix(80))")
+            return DexterActionDiagnosticHUDResponse(
+                markdown: response.markdown,
+                cause: response.cause,
+                hasDiagnostic: response.hasDiagnostic_p,
+                hasSessionClue: response.hasSessionClue_p
+            )
+        } catch {
+            return DexterActionDiagnosticHUDResponse(
+                markdown: """
+                ### Action Diagnostic
+
+                Action diagnostic unavailable.
+
+                \(error)
+                """,
+                cause: "Action diagnostic unavailable.",
+                hasDiagnostic: !onlyIfClue,
+                hasSessionClue: false
+            )
+        }
+    }
+
+    private func requestActionDiagnostic(
+        limit: UInt32,
+        currentUserText: String,
+        currentAssistantText: String,
+        onlyIfClue: Bool,
+        ignoreActionReceipts: Bool
+    ) async throws -> Dexter_V1_ActionDiagnosticResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.actionDiagnostic(
+                Dexter_V1_ActionDiagnosticRequest.with {
+                    $0.traceID = UUID().uuidString
+                    $0.limit = limit
+                    $0.currentUserText = currentUserText
+                    $0.currentAssistantText = currentAssistantText
+                    $0.onlyIfClue = onlyIfClue
+                    $0.ignoreActionReceipts = ignoreActionReceipts
+                }
+            )
+        }
+    }
+
+    private func requestActionHistory(limit: UInt32) async throws -> Dexter_V1_ActionHistoryResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.actionHistory(
+                Dexter_V1_ActionHistoryRequest.with {
+                    $0.traceID = UUID().uuidString
+                    $0.limit = limit
+                }
             )
         }
     }
@@ -888,6 +1164,7 @@ actor DexterClient {
 
     private func sendTextInput(_ text: String, fromVoice: Bool, label: String) async {
         print("[DexterClient] \(label) called: '\(text)' | fromVoice=\(fromVoice) | sessionID=\(currentSessionID ?? "NIL") | continuation=\(eventContinuation != nil ? "live" : "NIL")")
+        recordOperatorText(text)
         guard let sessionID = currentSessionID else {
             print("[DexterClient] \(label) DROPPED — no active session")
             return
@@ -902,6 +1179,42 @@ actor DexterClient {
         }
         send(event)
         print("[DexterClient] \(label) enqueued to stream")
+    }
+
+    private func recordOperatorText(_ text: String) {
+        turnRevision &+= 1
+        currentOperatorText = text
+        currentResponseText = ""
+        actionReceiptRevision = nil
+    }
+
+    private func beginResponseCapture() {
+        currentResponseText = ""
+    }
+
+    private func recordResponseToken(_ token: String, isFinal: Bool) -> FinalResponseSnapshot? {
+        currentResponseText += token
+        guard isFinal else {
+            return nil
+        }
+        return FinalResponseSnapshot(
+            revision: turnRevision,
+            userText: currentOperatorText,
+            assistantText: currentResponseText
+        )
+    }
+
+    private func markActionReceiptSeen() -> UInt64 {
+        actionReceiptRevision = turnRevision
+        return turnRevision
+    }
+
+    private func hasActionReceipt(for revision: UInt64) -> Bool {
+        actionReceiptRevision == revision
+    }
+
+    private func isCurrentTurn(_ revision: UInt64) -> Bool {
+        turnRevision == revision
     }
 }
 
@@ -924,6 +1237,21 @@ extension DexterClient {
     ) -> DexterHealthHUDReport {
         DexterHealthHUDReport(
             markdown: healthMarkdown(for: health, notice: notice),
+            restartTargets: restartTargets(for: health)
+        )
+    }
+
+    private static func operatorStatusHUDReport(
+        for health: Dexter_V1_HealthResponse,
+        actionHistory: Dexter_V1_ActionHistoryResponse?,
+        actionHistoryError: String?
+    ) -> DexterHealthHUDReport {
+        DexterHealthHUDReport(
+            markdown: operatorStatusMarkdown(
+                for: health,
+                actionHistory: actionHistory,
+                actionHistoryError: actionHistoryError
+            ),
             restartTargets: restartTargets(for: health)
         )
     }
@@ -959,7 +1287,7 @@ extension DexterClient {
     private static func actionReceiptMarkdown(_ receipt: Dexter_V1_ActionReceipt) -> String {
         let outcome = receiptLine(receipt.outcome, fallback: "unknown")
         let actionType = receiptLine(receipt.actionType, fallback: "unknown")
-        let category = receiptLine(receipt.category, fallback: "unknown")
+        let review = actionReviewLabel(receiptLine(receipt.category, fallback: "unknown"))
         let description = receiptLine(receipt.description_p, fallback: "requested action")
         let summary = receiptLine(receipt.summary, fallback: "No result summary returned.")
         let auditPath = receiptLine(receipt.auditLogPath, fallback: "audit path unavailable")
@@ -968,11 +1296,133 @@ extension DexterClient {
         ### Action Receipt
 
         Outcome: \(outcome)
-        Action: \(actionType) (\(category))
+        Action: \(actionType)
+        Review: \(review)
         Target: \(description)
         Result: \(summary)
         Audit: `\(auditPath)`
         """
+    }
+
+    private static func actionHistoryMarkdown(_ response: Dexter_V1_ActionHistoryResponse) -> String {
+        let auditPath = receiptLine(response.auditLogPath, fallback: "audit path unavailable")
+        guard !response.receipts.isEmpty else {
+            return """
+            ### Recent Actions
+
+            No actions recorded yet.
+
+            Audit: `\(auditPath)`
+            """
+        }
+
+        let rows = response.receipts.map { receipt in
+            let outcome = receiptLine(receipt.outcome, fallback: "unknown")
+            let actionType = receiptLine(receipt.actionType, fallback: "unknown")
+            let review = actionReviewLabel(receiptLine(receipt.category, fallback: "unknown"))
+            let description = receiptLine(receipt.description_p, fallback: "requested action")
+            let summary = receiptLine(receipt.summary, fallback: "No result summary returned.")
+            return "- `\(outcome)` \(actionType) [\(review)]: \(description) - \(summary)"
+        }.joined(separator: "\n")
+
+        return """
+        ### Recent Actions
+
+        \(rows)
+
+        Audit: `\(auditPath)`
+        """
+    }
+
+    private static func actionReceiptOutcome(_ receipt: Dexter_V1_ActionReceipt) -> String {
+        receiptLine(receipt.outcome, fallback: "unknown").lowercased()
+    }
+
+    private static func shouldAutoSurfaceActionDiagnostic(for receipt: Dexter_V1_ActionReceipt) -> Bool {
+        switch actionReceiptOutcome(receipt) {
+        case "executed", "pending":
+            return false
+        default:
+            return true
+        }
+    }
+
+    private static func operatorStatusMarkdown(
+        for health: Dexter_V1_HealthResponse,
+        actionHistory: Dexter_V1_ActionHistoryResponse?,
+        actionHistoryError: String?
+    ) -> String {
+        let status = cleanStatus(health.status)
+        let restartableTargets = restartTargets(for: health)
+        var lines: [String] = [
+            "### Dexter Status",
+            "",
+            "Status: \(status)"
+        ]
+
+        if !health.degradedComponents.isEmpty {
+            lines.append("Attention: \(health.degradedComponents.joined(separator: ", "))")
+        }
+
+        if !restartableTargets.isEmpty {
+            let names = restartableTargets.map(\.displayName).joined(separator: ", ")
+            lines.append("Recovery: use the restart buttons below for \(names).")
+        }
+
+        lines.append("")
+        lines.append("Workers")
+        lines.append("- STT: \(cleanStatus(health.sttWorker))")
+        lines.append("- TTS: \(cleanStatus(health.ttsWorker))")
+        lines.append("- Browser: \(cleanStatus(health.browserWorker))")
+
+        lines.append("")
+        lines.append("Models")
+        lines.append("- Fast: \(modelName(health.fastModel)) - \(warmLabel(health.fastModelWarm))")
+        lines.append("- Primary: \(modelName(health.primaryModel)) - \(warmLabel(health.primaryModelWarm))")
+        lines.append("- Embed: \(modelName(health.embedModel)) - \(warmLabel(health.embedModelWarm))")
+
+        lines.append("")
+        lines.append("Disk")
+        if health.disk.isEmpty {
+            lines.append("- No disk snapshot returned by daemon.")
+        } else {
+            for disk in health.disk {
+                lines.append(diskLine(disk))
+            }
+        }
+
+        lines.append("")
+        lines.append("Recent Actions")
+        if let actionHistory {
+            if actionHistory.receipts.isEmpty {
+                lines.append("- No actions recorded yet.")
+            } else {
+                for receipt in actionHistory.receipts {
+                    let outcome = receiptLine(receipt.outcome, fallback: "unknown")
+                    let actionType = receiptLine(receipt.actionType, fallback: "unknown")
+                    let review = actionReviewLabel(receiptLine(receipt.category, fallback: "unknown"))
+                    let description = receiptLine(receipt.description_p, fallback: "requested action")
+                    let summary = receiptLine(receipt.summary, fallback: "No result summary returned.")
+                    lines.append("- `\(outcome)` \(actionType) [\(review)]: \(description) - \(summary)")
+                }
+            }
+
+            lines.append("- Audit: `\(receiptLine(actionHistory.auditLogPath, fallback: "audit path unavailable"))`")
+        } else {
+            lines.append("- Action history unavailable.")
+            if let actionHistoryError, !actionHistoryError.isEmpty {
+                lines.append("- Error: \(receiptLine(actionHistoryError, fallback: "unknown error"))")
+            }
+        }
+
+        lines.append("")
+        lines.append("Paths")
+        lines.append("- Config: \(fallback(health.configPath))")
+        lines.append("- State: \(fallback(health.stateDir))")
+        lines.append("- Personality: \(fallback(health.personalityPath))")
+        lines.append("- Ollama: \(fallback(health.ollamaURL))")
+
+        return lines.joined(separator: "\n")
     }
 
     private static func receiptLine(_ value: String, fallback: String) -> String {

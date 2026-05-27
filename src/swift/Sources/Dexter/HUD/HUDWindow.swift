@@ -109,6 +109,12 @@ final class HUDWindow: NSPanel {
     /// Set by App.swift. Called when the operator asks for daemon health.
     var onHealthRequest: (() -> Void)?
 
+    /// Set by App.swift. Called when the operator asks for recent action receipts.
+    var onActionHistoryRequest: (() -> Void)?
+
+    /// Set by App.swift. Called when the operator asks why the latest action did or did not run.
+    var onActionDiagnosticRequest: (() -> Void)?
+
     /// Set by App.swift. Called when the operator asks to restart a degraded worker.
     var onHealthRestartRequest: ((DexterWorkerRestartTarget) -> Void)?
 
@@ -132,8 +138,14 @@ final class HUDWindow: NSPanel {
     // Toggle button — shows/hides the history panel.
     private let toggleButton: NSButton
 
-    // Health button — requests a compact daemon health snapshot.
+    // Status button — requests a compact daemon health + recent action snapshot.
     private let healthButton: NSButton
+
+    // Recent actions button — requests a compact audit-log receipt history.
+    private let actionHistoryButton: NSButton
+
+    // Why button — explains the most recent action/refusal from local evidence.
+    private let actionDiagnosticButton: NSButton
 
     // Mute button — toggles TTS on/off.
     private let muteButton: NSButton
@@ -204,6 +216,18 @@ final class HUDWindow: NSPanel {
             width: C.toggleButtonSize,
             height: C.toggleButtonSize
         )
+        let actionHistoryRect = NSRect(
+            x: healthRect.minX - C.toggleButtonSize - C.muteButtonGap,
+            y: btnY,
+            width: C.toggleButtonSize,
+            height: C.toggleButtonSize
+        )
+        let actionDiagnosticRect = NSRect(
+            x: actionHistoryRect.minX - C.toggleButtonSize - C.muteButtonGap,
+            y: btnY,
+            width: C.toggleButtonSize,
+            height: C.toggleButtonSize
+        )
 
         // Mute button: right-aligned in the input bar, vertically centred.
         let muteX = C.width - C.inputPadding - C.muteButtonSize
@@ -228,6 +252,8 @@ final class HUDWindow: NSPanel {
         restartBrowserButton = NSButton(frame: .zero)
         historyView  = HUDHistoryView(frame: historyRect)
         healthButton = NSButton(frame: healthRect)
+        actionHistoryButton = NSButton(frame: actionHistoryRect)
+        actionDiagnosticButton = NSButton(frame: actionDiagnosticRect)
         toggleButton = NSButton(frame: toggleRect)
         muteButton   = NSButton(frame: muteRect)
 
@@ -332,12 +358,12 @@ final class HUDWindow: NSPanel {
         toggleButton.action           = #selector(toggleHistory)
         effect.addSubview(toggleButton)
 
-        // Health button — quiet status/diagnostics surface, left of history.
-        if let healthImage = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Show health") {
+        // Status button — quiet operator diagnostics surface, left of history.
+        if let healthImage = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Show Dexter status") {
             healthButton.image        = healthImage
             healthButton.imageScaling = .scaleProportionallyDown
         } else {
-            healthButton.title = "H"
+            healthButton.title = "S"
         }
         healthButton.bezelStyle       = .inline
         healthButton.isBordered       = false
@@ -345,7 +371,40 @@ final class HUDWindow: NSPanel {
         healthButton.autoresizingMask = [.minXMargin, .minYMargin]
         healthButton.target           = self
         healthButton.action           = #selector(requestHealth)
+        healthButton.toolTip          = "Show Dexter status"
         effect.addSubview(healthButton)
+
+        // Recent actions button — compact audit receipts, left of health.
+        if let actionsImage = NSImage(systemSymbolName: "list.bullet.rectangle", accessibilityDescription: "Show recent actions") {
+            actionHistoryButton.image        = actionsImage
+            actionHistoryButton.imageScaling = .scaleProportionallyDown
+        } else {
+            actionHistoryButton.title = "A"
+        }
+        actionHistoryButton.bezelStyle       = .inline
+        actionHistoryButton.isBordered       = false
+        actionHistoryButton.alphaValue       = 0.45
+        actionHistoryButton.autoresizingMask = [.minXMargin, .minYMargin]
+        actionHistoryButton.target           = self
+        actionHistoryButton.action           = #selector(requestActionHistory)
+        actionHistoryButton.toolTip          = "Show recent actions"
+        effect.addSubview(actionHistoryButton)
+
+        // Why button — explains the last action/refusal from local evidence, left of actions.
+        if let whyImage = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "Explain latest action") {
+            actionDiagnosticButton.image        = whyImage
+            actionDiagnosticButton.imageScaling = .scaleProportionallyDown
+        } else {
+            actionDiagnosticButton.title = "?"
+        }
+        actionDiagnosticButton.bezelStyle       = .inline
+        actionDiagnosticButton.isBordered       = false
+        actionDiagnosticButton.alphaValue       = 0.45
+        actionDiagnosticButton.autoresizingMask = [.minXMargin, .minYMargin]
+        actionDiagnosticButton.target           = self
+        actionDiagnosticButton.action           = #selector(requestActionDiagnostic)
+        actionDiagnosticButton.toolTip          = "Explain latest action"
+        effect.addSubview(actionDiagnosticButton)
 
         // Mute button — stays at bottom-right of input bar as window grows upward.
         muteButton.bezelStyle       = .inline
@@ -386,11 +445,21 @@ final class HUDWindow: NSPanel {
         onHealthRequest?()
     }
 
+    @objc private func requestActionHistory() {
+        cancelDismiss()
+        onActionHistoryRequest?()
+    }
+
+    @objc private func requestActionDiagnostic() {
+        cancelDismiss()
+        onActionDiagnosticRequest?()
+    }
+
     func showHealthLoading() {
         showUtilityMarkdown("""
-        ### Dexter Health
+        ### Dexter Status
 
-        Checking daemon health...
+        Checking daemon health and recent actions...
         """, restartTargets: [])
     }
 
@@ -407,6 +476,32 @@ final class HUDWindow: NSPanel {
         showUtilityMarkdown(markdown, restartTargets: [])
     }
 
+    func showActionHistoryLoading() {
+        showUtilityMarkdown("""
+        ### Recent Actions
+
+        Reading action audit...
+        """, restartTargets: [])
+    }
+
+    func showActionHistory(_ markdown: String) {
+        HUDSmokeLog.log("showActionHistory chars=\(markdown.count)")
+        showUtilityMarkdown(markdown, restartTargets: [])
+    }
+
+    func showActionDiagnosticLoading() {
+        showUtilityMarkdown("""
+        ### Action Diagnostic
+
+        Reading action evidence...
+        """, restartTargets: [])
+    }
+
+    func showActionDiagnostic(_ markdown: String) {
+        HUDSmokeLog.log("showActionDiagnostic chars=\(markdown.count)")
+        showUtilityMarkdown(markdown, restartTargets: [])
+    }
+
     func showHealthRestarting(_ target: DexterWorkerRestartTarget) {
         showUtilityMarkdown("""
         ### Dexter Health
@@ -418,6 +513,16 @@ final class HUDWindow: NSPanel {
     func performHealthRequestForSmoke() {
         HUDSmokeLog.log("healthRequest")
         requestHealth()
+    }
+
+    func performActionHistoryRequestForSmoke() {
+        HUDSmokeLog.log("actionHistoryRequest")
+        requestActionHistory()
+    }
+
+    func performActionDiagnosticRequestForSmoke() {
+        HUDSmokeLog.log("actionDiagnosticRequest")
+        requestActionDiagnostic()
     }
 
     func performHealthRestartForSmoke(_ target: DexterWorkerRestartTarget) {

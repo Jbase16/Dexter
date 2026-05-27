@@ -19,7 +19,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    action::ActionResult,
+    action::{audit::recent_action_receipts, ActionResult},
+    action_diagnostic::{build_action_diagnostic, ActionDiagnosticInput},
     config::{resolve_config_path, DexterConfig},
     constants::{
         BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, SHELL_SOCKET_PATH, VOICE_PYTHON_EXE,
@@ -37,9 +38,10 @@ pub mod proto {
 
 use proto::{
     dexter_service_server::{DexterService, DexterServiceServer},
-    AudioChunk, ClientEvent, DiskHealth, EntityState, EntityStateChange, HealthRequest,
-    HealthResponse, PingRequest, PingResponse, RestartComponent, RestartComponentRequest,
-    RestartComponentResponse, ServerEvent, TranscriptChunk,
+    ActionDiagnosticRequest, ActionDiagnosticResponse, ActionHistoryRequest, ActionHistoryResponse,
+    ActionReceipt, AudioChunk, ClientEvent, DiskHealth, EntityState, EntityStateChange,
+    HealthRequest, HealthResponse, PingRequest, PingResponse, RestartComponent,
+    RestartComponentRequest, RestartComponentResponse, ServerEvent, TranscriptChunk,
 };
 
 fn is_benign_session_stream_close(status: &Status) -> bool {
@@ -48,6 +50,41 @@ fn is_benign_session_stream_close(status: &Status) -> bool {
         && (message.contains("h2 protocol error: error reading a body from connection")
             || message.contains("operation was canceled")
             || message.contains("stream closed"))
+}
+
+fn nonempty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn action_diagnostic_health_warnings(health: &HealthResponse) -> Vec<String> {
+    if health.status == "ready" {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    if !health.degraded_components.is_empty() {
+        warnings.push(format!(
+            "Degraded components: {}",
+            health.degraded_components.join(", ")
+        ));
+    }
+    for (name, status) in [
+        ("STT worker", health.stt_worker.as_str()),
+        ("TTS worker", health.tts_worker.as_str()),
+        ("browser worker", health.browser_worker.as_str()),
+    ] {
+        if matches!(status, "degraded" | "failed" | "unavailable") {
+            warnings.push(format!("{name}: {status}"));
+        }
+    }
+    if warnings.is_empty() {
+        warnings.push(format!("Health status: {}", health.status));
+    }
+    warnings
 }
 
 // ── Startup health summary ───────────────────────────────────────────────────
@@ -83,6 +120,7 @@ struct StartupHealthSnapshot {
     fast_model_warm: bool,
     primary_model_warm: bool,
     embed_model_warm: bool,
+    startup_warmup_complete: bool,
     stt_worker: ComponentStartupStatus,
     tts_worker: ComponentStartupStatus,
     browser_worker: ComponentStartupStatus,
@@ -102,30 +140,39 @@ impl StartupHealthSnapshot {
             fast_model_warm: shared.fast_model_warm.load(Ordering::SeqCst),
             primary_model_warm: shared.primary_model_warm.load(Ordering::SeqCst),
             embed_model_warm: shared.embed_model_warm.load(Ordering::SeqCst),
+            startup_warmup_complete: shared.startup_warmup_complete.load(Ordering::SeqCst),
             stt_worker,
-            tts_worker: component_status(shared.voice.is_tts_available()),
-            browser_worker: component_status(shared.browser.is_available()),
+            tts_worker: worker_startup_status(
+                shared.voice.is_tts_available(),
+                shared.startup_warmup_complete.load(Ordering::SeqCst),
+            ),
+            browser_worker: worker_startup_status(
+                shared.browser.is_available(),
+                shared.startup_warmup_complete.load(Ordering::SeqCst),
+            ),
             disk: diagnostics::collect_operator_disk_health(&cfg.core.state_dir),
         }
     }
 
     fn overall_status(&self) -> &'static str {
-        if self.degraded_components().is_empty() {
-            "ready"
-        } else {
+        if self.has_degraded_components() {
             "degraded"
+        } else if self.has_pending_components() {
+            "pending"
+        } else {
+            "ready"
         }
     }
 
     fn degraded_components(&self) -> Vec<String> {
         let mut components = Vec::new();
-        if !self.fast_model_warm {
+        if self.fast_model_status() != ComponentStartupStatus::Ready {
             components.push("fast_model".to_string());
         }
-        if !self.primary_model_warm {
+        if self.primary_model_status() != ComponentStartupStatus::Ready {
             components.push("primary_model".to_string());
         }
-        if !self.embed_model_warm {
+        if self.embed_model_status() != ComponentStartupStatus::Ready {
             components.push("embed_model".to_string());
         }
         if !self.stt_worker.is_ready() {
@@ -139,6 +186,37 @@ impl StartupHealthSnapshot {
         }
         components.extend(diagnostics::disk_degraded_components(&self.disk));
         components
+    }
+
+    fn has_degraded_components(&self) -> bool {
+        self.fast_model_status() == ComponentStartupStatus::Degraded
+            || self.primary_model_status() == ComponentStartupStatus::Degraded
+            || self.embed_model_status() == ComponentStartupStatus::Degraded
+            || self.stt_worker == ComponentStartupStatus::Degraded
+            || self.tts_worker == ComponentStartupStatus::Degraded
+            || self.browser_worker == ComponentStartupStatus::Degraded
+            || self.disk.iter().any(|disk| !disk.status.is_ready())
+    }
+
+    fn has_pending_components(&self) -> bool {
+        self.fast_model_status() == ComponentStartupStatus::Pending
+            || self.primary_model_status() == ComponentStartupStatus::Pending
+            || self.embed_model_status() == ComponentStartupStatus::Pending
+            || self.stt_worker == ComponentStartupStatus::Pending
+            || self.tts_worker == ComponentStartupStatus::Pending
+            || self.browser_worker == ComponentStartupStatus::Pending
+    }
+
+    fn fast_model_status(&self) -> ComponentStartupStatus {
+        model_startup_status(self.fast_model_warm, self.startup_warmup_complete)
+    }
+
+    fn primary_model_status(&self) -> ComponentStartupStatus {
+        model_startup_status(self.primary_model_warm, self.startup_warmup_complete)
+    }
+
+    fn embed_model_status(&self) -> ComponentStartupStatus {
+        model_startup_status(self.embed_model_warm, self.startup_warmup_complete)
     }
 
     fn degraded_components_label(&self) -> String {
@@ -194,11 +272,23 @@ fn disk_health_proto(snapshot: DiskHealthSnapshot) -> DiskHealth {
     }
 }
 
-fn component_status(is_ready: bool) -> ComponentStartupStatus {
+fn worker_startup_status(is_ready: bool, startup_warmup_complete: bool) -> ComponentStartupStatus {
     if is_ready {
         ComponentStartupStatus::Ready
-    } else {
+    } else if startup_warmup_complete {
         ComponentStartupStatus::Degraded
+    } else {
+        ComponentStartupStatus::Pending
+    }
+}
+
+fn model_startup_status(is_warm: bool, startup_warmup_complete: bool) -> ComponentStartupStatus {
+    if is_warm {
+        ComponentStartupStatus::Ready
+    } else if startup_warmup_complete {
+        ComponentStartupStatus::Degraded
+    } else {
+        ComponentStartupStatus::Pending
     }
 }
 
@@ -258,6 +348,29 @@ async fn log_startup_health_summary(
             browser_worker = snapshot.browser_worker.as_str(),
             disk_degraded_components = %disk_degraded_components,
             "Dexter startup health summary"
+        );
+    } else if status == "pending" {
+        info!(
+            status = %status,
+            degraded_components = %degraded_components,
+            version = CORE_VERSION,
+            socket = %cfg.core.socket_path,
+            shell_socket = SHELL_SOCKET_PATH,
+            config_path = %config_path,
+            state_dir = %cfg.core.state_dir.display(),
+            personality_path = %cfg.core.personality_path,
+            ollama_url = %cfg.inference.ollama_base_url,
+            fast_model = %snapshot.fast_model,
+            primary_model = %snapshot.primary_model,
+            embed_model = %snapshot.embed_model,
+            fast_model_warm = snapshot.fast_model_warm,
+            primary_model_warm = snapshot.primary_model_warm,
+            embed_model_warm = snapshot.embed_model_warm,
+            stt_worker = snapshot.stt_worker.as_str(),
+            tts_worker = snapshot.tts_worker.as_str(),
+            browser_worker = snapshot.browser_worker.as_str(),
+            disk_degraded_components = %disk_degraded_components,
+            "Dexter startup health summary — warmup still pending"
         );
     } else {
         warn!(
@@ -617,6 +730,125 @@ impl DexterService for CoreService {
         );
 
         Ok(Response::new(health))
+    }
+
+    async fn action_history(
+        &self,
+        request: Request<ActionHistoryRequest>,
+    ) -> Result<Response<ActionHistoryResponse>, Status> {
+        let req = request.into_inner();
+        let trace_id = req.trace_id;
+        let limit = if req.limit == 0 {
+            20
+        } else {
+            req.limit.min(100)
+        } as usize;
+
+        let (audit_log_path, receipts) = recent_action_receipts(&self.cfg.core.state_dir, limit)
+            .map_err(|e| {
+                error!(
+                    trace_id = %trace_id,
+                    error = %e,
+                    "Action history read failed"
+                );
+                Status::internal(format!("action history unavailable: {e}"))
+            })?;
+        let receipt_count = receipts.len();
+        let receipts = receipts
+            .into_iter()
+            .map(|receipt| ActionReceipt {
+                action_id: receipt.action_id,
+                action_type: receipt.action_type,
+                category: receipt.category,
+                description: receipt.description,
+                outcome: receipt.outcome,
+                summary: receipt.summary,
+                audit_log_path: audit_log_path.display().to_string(),
+            })
+            .collect();
+
+        info!(
+            trace_id = %trace_id,
+            limit,
+            receipt_count,
+            audit_log_path = %audit_log_path.display(),
+            "Action history requested"
+        );
+
+        Ok(Response::new(ActionHistoryResponse {
+            trace_id,
+            audit_log_path: audit_log_path.display().to_string(),
+            receipts,
+        }))
+    }
+
+    async fn action_diagnostic(
+        &self,
+        request: Request<ActionDiagnosticRequest>,
+    ) -> Result<Response<ActionDiagnosticResponse>, Status> {
+        let req = request.into_inner();
+        let trace_id = req.trace_id;
+        let limit = if req.limit == 0 {
+            3
+        } else {
+            req.limit.min(100)
+        } as usize;
+        let health = self.health_response_for_trace(trace_id.clone());
+        let health_warnings = action_diagnostic_health_warnings(&health);
+
+        let report = build_action_diagnostic(ActionDiagnosticInput {
+            state_dir: &self.cfg.core.state_dir,
+            limit,
+            current_user_text: nonempty_string(req.current_user_text),
+            current_assistant_text: nonempty_string(req.current_assistant_text),
+            health_warnings,
+            only_if_clue: req.only_if_clue,
+            ignore_action_receipts: req.ignore_action_receipts,
+        })
+        .map_err(|e| {
+            error!(
+                trace_id = %trace_id,
+                error = %e,
+                "Action diagnostic failed"
+            );
+            Status::internal(format!("action diagnostic unavailable: {e}"))
+        })?;
+
+        let receipt_count = report.receipts.len();
+        let receipts = report
+            .receipts
+            .into_iter()
+            .map(|receipt| ActionReceipt {
+                action_id: receipt.action_id,
+                action_type: receipt.action_type,
+                category: receipt.category,
+                description: receipt.description,
+                outcome: receipt.outcome,
+                summary: receipt.summary,
+                audit_log_path: report.audit_log_path.display().to_string(),
+            })
+            .collect();
+
+        info!(
+            trace_id = %trace_id,
+            limit,
+            receipt_count,
+            has_session_clue = report.has_session_clue,
+            has_diagnostic = report.has_diagnostic,
+            cause = %report.cause,
+            audit_log_path = %report.audit_log_path.display(),
+            "Action diagnostic requested"
+        );
+
+        Ok(Response::new(ActionDiagnosticResponse {
+            trace_id,
+            markdown: report.markdown,
+            cause: report.cause,
+            audit_log_path: report.audit_log_path.display().to_string(),
+            has_session_clue: report.has_session_clue,
+            has_diagnostic: report.has_diagnostic,
+            receipts,
+        }))
     }
 
     async fn restart_component(
@@ -1208,15 +1440,13 @@ mod startup_health_tests {
     use crate::diagnostics::{DiskHealthSnapshot, DiskStatus};
 
     use super::{
-        component_status, stt_startup_status, ComponentStartupStatus, DexterConfig,
+        stt_startup_status, worker_startup_status, ComponentStartupStatus, DexterConfig,
         StartupHealthSnapshot,
     };
     use std::sync::atomic::AtomicBool;
 
     #[test]
-    fn component_status_maps_bool_to_label() {
-        assert_eq!(component_status(true), ComponentStartupStatus::Ready);
-        assert_eq!(component_status(false), ComponentStartupStatus::Degraded);
+    fn component_status_labels_are_stable() {
         assert_eq!(ComponentStartupStatus::Ready.as_str(), "ready");
         assert_eq!(ComponentStartupStatus::Degraded.as_str(), "degraded");
         assert_eq!(ComponentStartupStatus::Pending.as_str(), "pending");
@@ -1245,6 +1475,22 @@ mod startup_health_tests {
     }
 
     #[test]
+    fn worker_startup_status_distinguishes_pending_from_degraded() {
+        assert_eq!(
+            worker_startup_status(false, false),
+            ComponentStartupStatus::Pending
+        );
+        assert_eq!(
+            worker_startup_status(false, true),
+            ComponentStartupStatus::Degraded
+        );
+        assert_eq!(
+            worker_startup_status(true, false),
+            ComponentStartupStatus::Ready
+        );
+    }
+
+    #[test]
     fn startup_health_snapshot_reports_degraded_components() {
         let snapshot = StartupHealthSnapshot {
             fast_model: "fast".to_string(),
@@ -1253,6 +1499,7 @@ mod startup_health_tests {
             fast_model_warm: true,
             primary_model_warm: false,
             embed_model_warm: true,
+            startup_warmup_complete: true,
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Degraded,
             browser_worker: ComponentStartupStatus::Ready,
@@ -1279,6 +1526,7 @@ mod startup_health_tests {
             fast_model_warm: true,
             primary_model_warm: true,
             embed_model_warm: true,
+            startup_warmup_complete: true,
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Ready,
@@ -1291,6 +1539,36 @@ mod startup_health_tests {
     }
 
     #[test]
+    fn startup_health_snapshot_reports_pending_before_warmup_attempt_finishes() {
+        let snapshot = StartupHealthSnapshot {
+            fast_model: "fast".to_string(),
+            primary_model: "primary".to_string(),
+            embed_model: "embed".to_string(),
+            fast_model_warm: false,
+            primary_model_warm: false,
+            embed_model_warm: false,
+            startup_warmup_complete: false,
+            stt_worker: ComponentStartupStatus::Pending,
+            tts_worker: ComponentStartupStatus::Ready,
+            browser_worker: ComponentStartupStatus::Ready,
+            disk: Vec::new(),
+        };
+
+        assert_eq!(snapshot.overall_status(), "pending");
+        assert!(!snapshot.has_degraded_components());
+        assert!(snapshot.has_pending_components());
+        assert_eq!(
+            snapshot.degraded_components(),
+            vec![
+                "fast_model".to_string(),
+                "primary_model".to_string(),
+                "embed_model".to_string(),
+                "stt_worker".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn startup_health_snapshot_includes_disk_pressure_as_degraded() {
         let snapshot = StartupHealthSnapshot {
             fast_model: "fast".to_string(),
@@ -1299,6 +1577,7 @@ mod startup_health_tests {
             fast_model_warm: true,
             primary_model_warm: true,
             embed_model_warm: true,
+            startup_warmup_complete: true,
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Ready,
@@ -1329,6 +1608,7 @@ mod startup_health_tests {
             fast_model_warm: true,
             primary_model_warm: true,
             embed_model_warm: false,
+            startup_warmup_complete: true,
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Degraded,

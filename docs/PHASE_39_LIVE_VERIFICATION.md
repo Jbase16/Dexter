@@ -45,7 +45,7 @@ Observed results:
 | `make live-smoke-action-matrix` | PASS | Deterministic action matrix green. |
 | `make live-smoke-cli` | PASS | Natural-language CLI live smoke green. |
 | `make live-smoke-message-contact` | PASS | Contacts-backed message path reached approval and auto-denied. |
-| `make live-smoke-hud-approval` | PASS | Real Swift HUD destructive-action approval smoke green. |
+| `make live-smoke-hud-approval` | PASS | Real Swift HUD approval-required action smoke green. |
 | `make live-smoke-hud` | PASS | Real Swift HUD baseline lifecycle smoke green. |
 | `make live-smoke-action-cancel` | PASS | Long-running action subprocess killed on hotkey cancel. |
 | `make live-smoke-barge-in` | PASS | Swift/TTS barge-in smoke green. |
@@ -54,6 +54,172 @@ Observed results:
 
 After the live smoke runs, `/tmp/dexter.sock` was checked and no Dexter daemon
 was left accepting connections.
+
+---
+
+## Action Consolidation Addendum — 2026-05-22
+
+The action regression surface gained one more deterministic failure-path smoke:
+
+```bash
+make live-smoke-external-failures
+```
+
+This target starts its own release core with test-only failure knobs and verifies:
+
+- generic `message_send` actions fail closed unless the orchestrator resolves
+  the recipient through Contacts first;
+- AppleScript runtime errors are visible to the operator;
+- AppleScript timeouts are bounded and visible in action receipts;
+- failed `screencapture` demotes Vision to PRIMARY instead of sending a fake
+  text-only vision request.
+
+The action smoke scripts that start their own daemon now stop only that daemon
+and assert `/tmp/dexter.sock` plus `/tmp/dexter-shell.sock` are gone on
+successful runs. Their daemon warmup window is now 300s by default
+(`DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS` overrides it) to avoid false failures
+when Ollama cold-loads slowly under macOS memory pressure.
+
+Observed consolidation results:
+
+| Check | Result | Notes |
+|---|---:|---|
+| `cargo test --bin dexter-core` | PASS | 614 passed, 7 ignored. |
+| `cargo test --bin dexter-cli` | PASS | 33 passed. |
+| `make live-smoke-external-failures` | PASS | External failure paths green. |
+| `make smoke` | PASS | Rust check, Swift build, and Python worker tests green. |
+
+---
+
+## Operator Status Addendum — 2026-05-22
+
+`dexter-cli --status` and `make status` provide the single operator summary
+view for local troubleshooting. The command reuses the doctor health checks,
+prints worker recovery suggestions when applicable, and includes the latest
+local action receipts from `audit.jsonl`.
+
+The status smoke:
+
+```bash
+make live-smoke-operator-status
+```
+
+starts a fresh release core, writes one safe synthetic action receipt, runs
+`dexter-cli --status`, and verifies the report contains:
+
+- health checks, including daemon ping;
+- recent action receipt source;
+- the seeded action receipt;
+- a final result line.
+
+The Swift HUD status surface now mirrors the same operator shape in-app. The
+HUD status button fetches `Health` and recent `ActionHistory`, renders both in
+one `Dexter Status` document, and keeps restart buttons for degraded
+daemon-lifetime workers.
+
+```bash
+make live-smoke-hud-health
+```
+
+verifies the real Swift app requests Health plus ActionHistory from the daemon,
+surfaces the status document in the HUD, restarts a worker through
+`RestartComponent`, and receives post-restart health.
+
+`dexter-cli --why` and `make why` provide a local evidence report for "why did
+or didn't Dexter act?" When the daemon is running, the CLI asks the Rust-owned
+`ActionDiagnostic` RPC for the report; if the daemon is unavailable, it falls
+back to the same offline audit/session evidence it used before. The report
+combines current health, recent `audit.jsonl` receipts, and persisted or
+in-flight session text for Rust-side refusals that never reached the action
+engine, such as off-host command surfacing or Contacts-backed message refusal.
+
+```bash
+make live-smoke-action-diagnostic
+```
+
+starts a fresh release core, drives a synthetic `message_send` that must fail
+closed before bypassing Contacts resolution, then verifies `dexter-cli --why`
+explains the failure from the audit/session evidence.
+
+The Swift HUD now exposes the same "why did/didn't that action run?" evidence
+without Terminal. The HUD Why button calls the daemon `ActionDiagnostic` RPC and
+renders a compact `Action Diagnostic` document in-app, so the classification
+rules live in Rust rather than being duplicated in Swift.
+
+```bash
+make live-smoke-hud-action-diagnostic
+```
+
+starts a fresh release core, seeds a blocked raw `message_send` receipt through
+`dexter-cli`, then verifies the real Swift HUD explains that block using local
+evidence only.
+
+Denied, expired, abandoned, and failed live action receipts now auto-surface
+that same diagnostic after the immediate receipt is shown. `make
+live-smoke-hud-approval` verifies this with a destructive action denial: the
+HUD shows the action receipt, then automatically renders the fuller diagnostic
+without requiring the operator to click the Why button.
+
+Final text responses that look like no-receipt action refusals are also probed
+through `ActionDiagnostic` after a short delay. The HUD only renders the report
+when the daemon finds a concrete refusal clue, and turn/action guards prevent
+that delayed report from overwriting a newer operator turn or a real action
+receipt.
+
+---
+
+## Contacts Diagnostic Refresh Addendum — 2026-05-27
+
+The action diagnostic and Contacts message path gained a targeted hardening pass
+after the first operator-status checkpoint. The pass fixed two concrete drifts:
+
+- no-receipt Contacts refusals now classify exact-recipient misses and
+  handle/contact mismatches in both the daemon `ActionDiagnostic` path and the
+  offline `dexter-cli --why` fallback;
+- message-recipient extraction now treats `message Jason Phillips can you call
+  me` as `Jason Phillips` instead of confusing the body pronoun `me` with a
+  self-send request.
+
+Two stale live-smoke assertions were refreshed to match the current operator
+surface:
+
+- `scripts/live-action-diagnostic-smoke.sh` now checks for the daemon-backed
+  `Action Diagnostic` markdown shape and the current `Send iMessage to: ...`
+  target text;
+- `scripts/live-message-contact-smoke.sh` now checks the current approval
+  wording (`review=approval required`) instead of an old destructive-category
+  field.
+
+Observed refresh results:
+
+| Check | Result | Notes |
+|---|---:|---|
+| `cargo test --bin dexter-core` | PASS | 619 passed, 7 ignored. |
+| `cargo test --bin dexter-cli` | PASS | 45 passed. |
+| `cargo fmt --check` | PASS | Rust formatting clean. |
+| `cargo build --release --bin dexter-core --bin dexter-cli` | PASS | Release core and CLI build clean. |
+| `make live-smoke-action-receipts` | PASS | Safe, denied, and approved receipts inspect correctly. |
+| `make live-smoke-approval-lifecycle` | PASS | Typed approval, cancel, denial, and timeout lifecycle green. |
+| `make live-smoke-external-failures` | PASS | Raw `message_send`, AppleScript failures, and Vision demotion green. |
+| `make live-smoke-action-diagnostic` | PASS | CLI `--why` explains blocked raw message-send evidence. |
+| `make live-smoke-operator-status` | PASS | Status view combines health and recent action context. |
+| `DEXTER_SMOKE_CONTACT_NAME="Jason Phillips" make live-smoke-message-contact` | PASS | Contacts resolved and approval auto-denied; no real iMessage sent. |
+| `make live-smoke-action-matrix` | PASS | Deterministic shell/file/browser/AppleScript policy matrix green. |
+| `make live-smoke-cli` | PASS | Humor Engine, natural-language actions, off-host, browser, clipboard, and shell context green. |
+| `make live-smoke-recovery` | PASS | Browser, TTS, and STT worker restarts recover cleanly. |
+| `make live-smoke-degraded-mode` | PASS | Bad config, Ollama outage, and missing worker diagnostics fail visibly. |
+| `make live-smoke-hud` | PASS | Real Swift HUD typed lifecycle green. |
+| `make live-smoke-hud-health` | PASS | HUD health/status and worker restart surface green. |
+| `make live-smoke-hud-action-history` | PASS | HUD recent-actions RPC surface green. |
+| `make live-smoke-hud-action-diagnostic` | PASS | HUD Why surface explains blocked action evidence. |
+| `make live-smoke-hud-approval` | PASS | HUD approval denial and auto-diagnostic path green. |
+| `make live-smoke-action-cancel` | PASS | Long-running subprocess is killed on hotkey cancel. |
+| `make live-smoke-barge-in` | PASS | Swift/TTS barge-in smoke green. |
+| `make smoke` | PASS | Rust check, Swift build, and 20 Python worker tests green. |
+
+This refresh still deliberately does not include
+`make live-smoke-message-contact-approve`, because that target sends a real
+iMessage and should remain opt-in per run.
 
 ---
 
@@ -133,8 +299,8 @@ being tested.
 release Rust core, submit a typed turn through the HUD path, and observe the
 expected client/core lifecycle.
 
-`make live-smoke-hud-approval` verifies the real Swift HUD receives and handles a
-destructive action approval request without executing it in deny mode.
+`make live-smoke-hud-approval` verifies the real Swift HUD receives and handles
+an approval-required action request without executing it in deny mode.
 
 ### Cancellation and barge-in
 
@@ -226,6 +392,13 @@ Deterministic action boundary:
 
 ```bash
 make live-smoke-action-matrix
+make live-smoke-external-failures
+make live-smoke-operator-status
+make live-smoke-action-diagnostic
+make live-smoke-hud-action-diagnostic
+make live-smoke-hud-health
+make live-smoke-action-receipts
+make live-smoke-approval-lifecycle
 ```
 
 Main live CLI behavior:
@@ -256,14 +429,13 @@ make live-smoke-all
 
 ## Next Phase Candidate
 
-The next useful phase should be observability and operator diagnostics, not more
-policy surface area.
+The next useful phase should continue observability around local evidence:
+summary artifacts and clearer refusal/action-failure explanations rather than
+more policy surface area.
 
 Recommended focus:
 
-- Startup health summary: model warm state, worker availability, browser/TTS/STT
-  status, and degraded-mode reasons.
-- Operator-facing diagnostic command: "why didn't Dexter act?" or equivalent.
+- Operator-facing diagnostic copy for "why didn't Dexter act?" scenarios.
 - Clearer local logs for action refusal causes, Contacts resolution failures,
   worker degradation, and off-host refusal.
 - Optional smoke summary artifact written to a local file after live suites.

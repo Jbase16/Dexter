@@ -308,6 +308,8 @@ impl ProactiveEngine {
         let clock_patterns: &[&str] = &[
             "it's ",
             "it is ",
+            "current time is ",
+            "the current time is ",
             "the time is ",
             "time is ",
             "currently ",
@@ -328,9 +330,14 @@ impl ProactiveEngine {
         // 2. Bare date / day announcements.
         let date_leads: &[&str] = &[
             "today is ",
+            "today's date is ",
+            "todays date is ",
             "it's ",
             "it is ",
+            "current date is ",
+            "the current date is ",
             "the date is ",
+            "the date today is ",
             "the day is ",
         ];
         let months: &[&str] = &[
@@ -974,6 +981,8 @@ mod tests {
         let cases = [
             "It's 3:42 PM.",
             "it's 3:42pm",
+            "Current time is 3:42 PM.",
+            "The current time is 3:42 PM.",
             "The time is 3:42 PM.",
             "Time is 3:42 PM",
             "Currently 3:42 PM.",
@@ -1008,6 +1017,10 @@ mod tests {
             "It's April 22.",
             "It is April 22, 2026.",
             "The date is April 22, 2026.",
+            "Current date is May 21, 2026.",
+            "The current date is May 21, 2026.",
+            "Today's date is May 21, 2026.",
+            "The date today is May 21, 2026.",
             "Today is Tuesday, April 22.",
         ];
         for c in &cases {

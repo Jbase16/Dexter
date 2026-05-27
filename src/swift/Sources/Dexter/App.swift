@@ -68,18 +68,53 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                 Task { await c?.setTtsMuted(muted) }
             }
 
-            // On-demand daemon health: cheap unary Health RPC, rendered locally in the HUD.
-            // This does not touch the session stream, model router, TTS, or action pipeline.
+            // On-demand operator status: cheap unary Health + ActionHistory RPCs, rendered
+            // locally in the HUD. This does not touch the session stream, model router,
+            // TTS, or action pipeline.
             window.hud.onHealthRequest = { [weak c, weak window] in
                 window?.hud.showHealthLoading()
                 Task { [weak c, weak window] in
-                    let report = await c?.fetchHealthReport()
+                    let report = await c?.fetchOperatorStatusReport()
                         ?? DexterHealthHUDReport(
                             markdown: DexterClient.unavailableHealthMarkdown(reason: "Dexter client is not ready."),
                             restartTargets: []
                         )
                     await MainActor.run {
                         window?.hud.showHealthReport(report)
+                    }
+                }
+            }
+
+            // On-demand recent action receipts: cheap unary ActionHistory RPC,
+            // rendered locally from the append-only Rust audit log.
+            window.hud.onActionHistoryRequest = { [weak c, weak window] in
+                window?.hud.showActionHistoryLoading()
+                Task { [weak c, weak window] in
+                    let markdown = await c?.fetchActionHistoryMarkdown()
+                        ?? """
+                        ### Recent Actions
+
+                        Dexter client is not ready.
+                        """
+                    await MainActor.run {
+                        window?.hud.showActionHistory(markdown)
+                    }
+                }
+            }
+
+            // On-demand "why did/didn't that action run?": rendered in the HUD,
+            // but classified by Rust's daemon-backed ActionDiagnostic RPC.
+            window.hud.onActionDiagnosticRequest = { [weak c, weak window] in
+                window?.hud.showActionDiagnosticLoading()
+                Task { [weak c, weak window] in
+                    let markdown = await c?.fetchActionDiagnosticMarkdown()
+                        ?? """
+                        ### Action Diagnostic
+
+                        Dexter client is not ready.
+                        """
+                    await MainActor.run {
+                        window?.hud.showActionDiagnostic(markdown)
                     }
                 }
             }
@@ -102,13 +137,17 @@ final class DexterApp: NSObject, NSApplicationDelegate {
 
             if HUDSmokeConfig.enabled {
                 HUDSmokeConfig.log(
-                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
+                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) actionHistory=\(HUDSmokeConfig.actionHistoryRequest) actionDiagnostic=\(HUDSmokeConfig.actionDiagnosticRequest) restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
                 )
                 Task {
                     try? await Task.sleep(for: .seconds(HUDSmokeConfig.submitDelaySecs))
                     await MainActor.run {
                         if HUDSmokeConfig.idleOnly {
                             HUDSmokeConfig.log("idleOnly")
+                        } else if HUDSmokeConfig.actionDiagnosticRequest {
+                            window.hud.performActionDiagnosticRequestForSmoke()
+                        } else if HUDSmokeConfig.actionHistoryRequest {
+                            window.hud.performActionHistoryRequestForSmoke()
                         } else if HUDSmokeConfig.healthRequest {
                             window.hud.performHealthRequestForSmoke()
                         } else {
@@ -188,6 +227,16 @@ private enum HUDSmokeConfig {
 
     static let healthRequest: Bool = {
         let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_HEALTH"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let actionHistoryRequest: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_ACTION_HISTORY"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let actionDiagnosticRequest: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_ACTION_DIAGNOSTIC"] ?? ""
         return ["1", "true", "yes"].contains(raw.lowercased())
     }()
 

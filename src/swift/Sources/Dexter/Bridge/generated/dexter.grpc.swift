@@ -44,6 +44,30 @@ internal enum Dexter_V1_DexterService: Sendable {
                 method: "Health"
             )
         }
+        /// Namespace for "ActionHistory" metadata.
+        internal enum ActionHistory: Sendable {
+            /// Request type for "ActionHistory".
+            internal typealias Input = Dexter_V1_ActionHistoryRequest
+            /// Response type for "ActionHistory".
+            internal typealias Output = Dexter_V1_ActionHistoryResponse
+            /// Descriptor for "ActionHistory".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "ActionHistory"
+            )
+        }
+        /// Namespace for "ActionDiagnostic" metadata.
+        internal enum ActionDiagnostic: Sendable {
+            /// Request type for "ActionDiagnostic".
+            internal typealias Input = Dexter_V1_ActionDiagnosticRequest
+            /// Response type for "ActionDiagnostic".
+            internal typealias Output = Dexter_V1_ActionDiagnosticResponse
+            /// Descriptor for "ActionDiagnostic".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "ActionDiagnostic"
+            )
+        }
         /// Namespace for "RestartComponent" metadata.
         internal enum RestartComponent: Sendable {
             /// Request type for "RestartComponent".
@@ -84,6 +108,8 @@ internal enum Dexter_V1_DexterService: Sendable {
         internal static let descriptors: [GRPCCore.MethodDescriptor] = [
             Ping.descriptor,
             Health.descriptor,
+            ActionHistory.descriptor,
+            ActionDiagnostic.descriptor,
             RestartComponent.descriptor,
             Session.descriptor,
             StreamAudio.descriptor
@@ -148,6 +174,44 @@ extension Dexter_V1_DexterService {
             request: GRPCCore.StreamingServerRequest<Dexter_V1_HealthRequest>,
             context: GRPCCore.ServerContext
         ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_HealthResponse>
+
+        /// Handle the "ActionHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent action audit receipts. No session stream, no model generation, and
+        /// > no side effects beyond reading Dexter's local append-only action audit.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_ActionHistoryRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_ActionHistoryResponse` messages.
+        func actionHistory(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_ActionHistoryRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_ActionHistoryResponse>
+
+        /// Handle the "ActionDiagnostic" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+        /// > and no side effects beyond reading action/session state.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_ActionDiagnosticRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_ActionDiagnosticResponse` messages.
+        func actionDiagnostic(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_ActionDiagnosticRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_ActionDiagnosticResponse>
 
         /// Handle the "RestartComponent" method.
         ///
@@ -256,6 +320,44 @@ extension Dexter_V1_DexterService {
             context: GRPCCore.ServerContext
         ) async throws -> GRPCCore.ServerResponse<Dexter_V1_HealthResponse>
 
+        /// Handle the "ActionHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent action audit receipts. No session stream, no model generation, and
+        /// > no side effects beyond reading Dexter's local append-only action audit.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_ActionHistoryRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_ActionHistoryResponse` message.
+        func actionHistory(
+            request: GRPCCore.ServerRequest<Dexter_V1_ActionHistoryRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_ActionHistoryResponse>
+
+        /// Handle the "ActionDiagnostic" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+        /// > and no side effects beyond reading action/session state.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_ActionDiagnosticRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_ActionDiagnosticResponse` message.
+        func actionDiagnostic(
+            request: GRPCCore.ServerRequest<Dexter_V1_ActionDiagnosticRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_ActionDiagnosticResponse>
+
         /// Handle the "RestartComponent" method.
         ///
         /// > Source IDL Documentation:
@@ -361,6 +463,44 @@ extension Dexter_V1_DexterService {
             context: GRPCCore.ServerContext
         ) async throws -> Dexter_V1_HealthResponse
 
+        /// Handle the "ActionHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent action audit receipts. No session stream, no model generation, and
+        /// > no side effects beyond reading Dexter's local append-only action audit.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_ActionHistoryRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_ActionHistoryResponse` to respond with.
+        func actionHistory(
+            request: Dexter_V1_ActionHistoryRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_ActionHistoryResponse
+
+        /// Handle the "ActionDiagnostic" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+        /// > and no side effects beyond reading action/session state.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_ActionDiagnosticRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_ActionDiagnosticResponse` to respond with.
+        func actionDiagnostic(
+            request: Dexter_V1_ActionDiagnosticRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_ActionDiagnosticResponse
+
         /// Handle the "RestartComponent" method.
         ///
         /// > Source IDL Documentation:
@@ -453,6 +593,28 @@ extension Dexter_V1_DexterService.StreamingServiceProtocol {
             }
         )
         router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.ActionHistory.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_ActionHistoryRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_ActionHistoryResponse>(),
+            handler: { request, context in
+                try await self.actionHistory(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.ActionDiagnostic.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_ActionDiagnosticRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_ActionDiagnosticResponse>(),
+            handler: { request, context in
+                try await self.actionDiagnostic(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
             forMethod: Dexter_V1_DexterService.Method.RestartComponent.descriptor,
             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_RestartComponentRequest>(),
             serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_RestartComponentResponse>(),
@@ -513,6 +675,28 @@ extension Dexter_V1_DexterService.ServiceProtocol {
         return GRPCCore.StreamingServerResponse(single: response)
     }
 
+    internal func actionHistory(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_ActionHistoryRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_ActionHistoryResponse> {
+        let response = try await self.actionHistory(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
+
+    internal func actionDiagnostic(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_ActionDiagnosticRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_ActionDiagnosticResponse> {
+        let response = try await self.actionDiagnostic(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
+
     internal func restartComponent(
         request: GRPCCore.StreamingServerRequest<Dexter_V1_RestartComponentRequest>,
         context: GRPCCore.ServerContext
@@ -547,6 +731,32 @@ extension Dexter_V1_DexterService.SimpleServiceProtocol {
     ) async throws -> GRPCCore.ServerResponse<Dexter_V1_HealthResponse> {
         return GRPCCore.ServerResponse<Dexter_V1_HealthResponse>(
             message: try await self.health(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func actionHistory(
+        request: GRPCCore.ServerRequest<Dexter_V1_ActionHistoryRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_ActionHistoryResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_ActionHistoryResponse>(
+            message: try await self.actionHistory(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func actionDiagnostic(
+        request: GRPCCore.ServerRequest<Dexter_V1_ActionDiagnosticRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_ActionDiagnosticResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_ActionDiagnosticResponse>(
+            message: try await self.actionDiagnostic(
                 request: request.message,
                 context: context
             ),
@@ -656,6 +866,54 @@ extension Dexter_V1_DexterService {
             deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_HealthResponse>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_HealthResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "ActionHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent action audit receipts. No session stream, no model generation, and
+        /// > no side effects beyond reading Dexter's local append-only action audit.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_ActionHistoryRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_ActionHistoryRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_ActionHistoryResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func actionHistory<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_ActionHistoryRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_ActionHistoryRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_ActionHistoryResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionHistoryResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "ActionDiagnostic" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+        /// > and no side effects beyond reading action/session state.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_ActionDiagnosticRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_ActionDiagnosticRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_ActionDiagnosticResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func actionDiagnostic<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_ActionDiagnosticRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_ActionDiagnosticRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_ActionDiagnosticResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionDiagnosticResponse>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "RestartComponent" method.
@@ -813,6 +1071,76 @@ extension Dexter_V1_DexterService {
             try await self.client.unary(
                 request: request,
                 descriptor: Dexter_V1_DexterService.Method.Health.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "ActionHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent action audit receipts. No session stream, no model generation, and
+        /// > no side effects beyond reading Dexter's local append-only action audit.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_ActionHistoryRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_ActionHistoryRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_ActionHistoryResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func actionHistory<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_ActionHistoryRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_ActionHistoryRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_ActionHistoryResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionHistoryResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.ActionHistory.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "ActionDiagnostic" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+        /// > and no side effects beyond reading action/session state.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_ActionDiagnosticRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_ActionDiagnosticRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_ActionDiagnosticResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func actionDiagnostic<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_ActionDiagnosticRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_ActionDiagnosticRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_ActionDiagnosticResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionDiagnosticResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.ActionDiagnostic.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -989,6 +1317,66 @@ extension Dexter_V1_DexterService.ClientProtocol {
         )
     }
 
+    /// Call the "ActionHistory" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Recent action audit receipts. No session stream, no model generation, and
+    /// > no side effects beyond reading Dexter's local append-only action audit.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_ActionHistoryRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func actionHistory<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_ActionHistoryRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionHistoryResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.actionHistory(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_ActionHistoryRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_ActionHistoryResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "ActionDiagnostic" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+    /// > and no side effects beyond reading action/session state.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_ActionDiagnosticRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func actionDiagnostic<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_ActionDiagnosticRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionDiagnosticResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.actionDiagnostic(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_ActionDiagnosticRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_ActionDiagnosticResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "RestartComponent" method.
     ///
     /// > Source IDL Documentation:
@@ -1144,6 +1532,74 @@ extension Dexter_V1_DexterService.ClientProtocol {
             metadata: metadata
         )
         return try await self.health(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "ActionHistory" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Recent action audit receipts. No session stream, no model generation, and
+    /// > no side effects beyond reading Dexter's local append-only action audit.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func actionHistory<Result>(
+        _ message: Dexter_V1_ActionHistoryRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionHistoryResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_ActionHistoryRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.actionHistory(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "ActionDiagnostic" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Local evidence report for "why did/didn't Dexter act?". No model generation
+    /// > and no side effects beyond reading action/session state.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func actionDiagnostic<Result>(
+        _ message: Dexter_V1_ActionDiagnosticRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionDiagnosticResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_ActionDiagnosticRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.actionDiagnostic(
             request: request,
             options: options,
             onResponse: handleResponse
