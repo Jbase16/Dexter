@@ -218,6 +218,8 @@ main() {
         assert_contains "$status_out" "Dexter Operator Status" "status prints operator header" || ok=1
         assert_contains "$status_out" "Health" "status prints health section" || ok=1
         assert_contains "$status_out" "daemon ping" "status includes daemon ping check" || ok=1
+        assert_contains "$status_out" "model residency" "status includes residency health check" || ok=1
+        assert_contains "$status_out" "mode " "status includes residency mode detail" || ok=1
         assert_contains "$status_out" "Current Context" "status prints current context section" || ok=1
         assert_contains_any "$status_out" "status includes context capabilities or fallback" "Dexter can:" "No focused app context" || ok=1
         assert_contains "$status_out" "Latest Action Summary" "status prints latest action summary" || ok=1

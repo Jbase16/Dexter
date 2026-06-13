@@ -1,4 +1,4 @@
-use crate::context_observer::{is_terminal_bundle, ContextSnapshot};
+use crate::context_observer::{format_visible_windows_inline, is_terminal_bundle, ContextSnapshot};
 
 pub(crate) const NO_CONTEXT_MARKDOWN: &str =
     "- No focused app context has been observed yet.\n\
@@ -40,6 +40,13 @@ pub(crate) fn format_operator_context_markdown(snapshot: Option<&ContextSnapshot
         .is_some_and(|text| !text.is_empty())
     {
         lines.push("- Clipboard: text is available if you ask Dexter to use it.".to_string());
+    }
+
+    if !snapshot.visible_windows.is_empty() {
+        lines.push(format!(
+            "- Visible windows: {}",
+            format_visible_windows_inline(&snapshot.visible_windows, 6)
+        ));
     }
 
     lines.push("- Dexter can:".to_string());
@@ -156,7 +163,9 @@ fn is_editor_context(app_lc: &str, bundle_lc: &str) -> bool {
 mod tests {
     use chrono::Utc;
 
-    use crate::context_observer::{AxElementInfo, ContextSnapshot, ShellCommandContext};
+    use crate::context_observer::{
+        AxElementInfo, ContextSnapshot, ShellCommandContext, VisibleWindowInfo,
+    };
 
     use super::format_operator_context_markdown;
 
@@ -168,6 +177,7 @@ mod tests {
             is_screen_locked: false,
             clipboard_text: None,
             clipboard_changed_at: None,
+            visible_windows: Vec::new(),
             last_shell_command: None,
             snapshot_hash: 42,
             last_updated: Utc::now(),
@@ -218,6 +228,39 @@ mod tests {
         assert!(markdown.contains("Focus: Safari - Example Page"));
         assert!(markdown.contains("summarize the current page"));
         assert!(markdown.contains("click, type, or navigate"));
+    }
+
+    #[test]
+    fn visible_windows_are_reported_for_operator_status() {
+        let mut snap = snapshot("Claude", "com.anthropic.claudefordesktop");
+        snap.visible_windows = vec![
+            VisibleWindowInfo {
+                owner_name: "Claude".to_string(),
+                title: Some("Dexter debugging".to_string()),
+                x: 20,
+                y: 40,
+                width: 1200,
+                height: 900,
+                is_frontmost: true,
+            },
+            VisibleWindowInfo {
+                owner_name: "Terminal".to_string(),
+                title: Some("Dexter Live Logs".to_string()),
+                x: 1300,
+                y: 80,
+                width: 900,
+                height: 700,
+                is_frontmost: false,
+            },
+        ];
+
+        let markdown = format_operator_context_markdown(Some(&snap));
+        assert!(
+            markdown.contains(
+                "Visible windows: frontmost Claude \"Dexter debugging\"; Terminal \"Dexter Live Logs\""
+            ),
+            "visible window metadata should be operator-visible: {markdown}"
+        );
     }
 
     #[test]

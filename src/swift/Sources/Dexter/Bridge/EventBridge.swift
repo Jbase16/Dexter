@@ -111,6 +111,11 @@ final class EventBridge: @unchecked Sendable {
     // Mirrors Rust's CLIPBOARD_POLL_INTERVAL_MS.
     private static let clipboardPollIntervalMs: Int = 1_000
 
+    // Bounded visible-window metadata sent with APP_FOCUSED. This is window
+    // inventory, not content scraping: owner app, title, bounds, frontmost flag.
+    private static let visibleWindowMaxCount: Int = 8
+    private static let visibleWindowTitleMaxChars: Int = 100
+
     // Privacy keywords: an AX label containing any of these → is_sensitive = true,
     // value is never read or transmitted.
     private static let sensitiveKeywords = ["password", "credit card", "cvv", "ssn"]
@@ -383,6 +388,7 @@ final class EventBridge: @unchecked Sendable {
         if queryElement, let axDict = queryFocusedElement(for: app.processIdentifier) {
             payload["ax_element"] = axDict
         }
+        payload["visible_windows"] = visibleWindowSnapshot(frontmostPID: app.processIdentifier)
         sendSystemEvent(.appFocused, payload: payload)
     }
 
@@ -614,6 +620,85 @@ final class EventBridge: @unchecked Sendable {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success else { return nil }
         return ref as? String
+    }
+
+    // ── Visible window metadata ───────────────────────────────────────────────
+
+    /// Return a bounded front-to-back list of visible, normal-level windows.
+    ///
+    /// CGWindowList does not expose window contents; this is metadata only. Window
+    /// titles can still be sensitive, so titles are compacted and truncated before
+    /// crossing the process boundary.
+    private func visibleWindowSnapshot(frontmostPID: pid_t) -> [[String: Any]] {
+        guard let rawWindows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return []
+        }
+
+        var windows: [[String: Any]] = []
+        for raw in rawWindows {
+            guard intValue(raw[kCGWindowLayer as String]) == 0 else { continue }
+
+            let ownerName = compactWindowText(
+                raw[kCGWindowOwnerName as String] as? String ?? "",
+                maxChars: 48
+            )
+            guard !ownerName.isEmpty else { continue }
+            if ownerName == "Dexter" { continue }
+
+            let ownerPID = pid_t(intValue(raw[kCGWindowOwnerPID as String]) ?? 0)
+            let bounds = raw[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            let title = compactWindowText(
+                raw[kCGWindowName as String] as? String ?? "",
+                maxChars: Self.visibleWindowTitleMaxChars
+            )
+
+            var item: [String: Any] = [
+                "owner_name":   ownerName,
+                "title":        title,
+                "x":            intValue(bounds["X"]) ?? 0,
+                "y":            intValue(bounds["Y"]) ?? 0,
+                "width":        intValue(bounds["Width"]) ?? 0,
+                "height":       intValue(bounds["Height"]) ?? 0,
+                "is_frontmost": ownerPID == frontmostPID,
+            ]
+            if title.isEmpty {
+                item["title"] = ""
+            }
+            windows.append(item)
+
+            if windows.count >= Self.visibleWindowMaxCount {
+                break
+            }
+        }
+        return windows
+    }
+
+    private func compactWindowText(_ value: String, maxChars: Int) -> String {
+        let compact = value
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard compact.count > maxChars else { return compact }
+        return String(compact.prefix(maxChars)) + "..."
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let int = value as? Int {
+            return int
+        }
+        if let double = value as? Double {
+            return Int(double)
+        }
+        if let cgFloat = value as? CGFloat {
+            return Int(cgFloat)
+        }
+        return nil
     }
 
     // ── gRPC event emission ───────────────────────────────────────────────────

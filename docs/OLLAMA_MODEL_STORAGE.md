@@ -22,6 +22,52 @@ especially for `gemma4:26b` and `mxbai-embed-large`.
 
 This is not a drift from the external-drive plan. It is the active hot set.
 
+## Residency Policy
+
+Dexter also has a model residency layer for PRIMARY. The daemon can map the same
+GGUF blob that Ollama maps and wire those shared file-backed pages resident with
+`mlock`. This is why Dexter forces Ollama requests to use mmap: without mmap,
+Ollama loads weights into anonymous memory and Dexter's cross-process pin cannot
+reach them.
+
+The default config is conservative:
+
+```toml
+[residency]
+mode = "pin_keepalive"
+```
+
+Modes:
+
+- `off`: do not pin PRIMARY; the legacy keepalive ping is the only residency
+  mechanism.
+- `pin_keepalive`: pin PRIMARY and keep the 30-second keepalive ping. This is
+  the default because the cross-process pin mechanism is proven, but pin-alone
+  has not yet been proven to eliminate cold-loads under real idle memory
+  pressure on the daily machine.
+- `pin_retire_keepalive`: pin PRIMARY and stop the keepalive ping once the pin
+  succeeds. Use this only after the idle-pressure discriminator proves PRIMARY
+  stays resident while Ollama still lists it as loaded.
+
+Operator visibility:
+
+```bash
+make doctor
+make status
+```
+
+Both commands include a `model residency` health row showing the mode, whether
+PRIMARY is pinned, and how many bytes are wired.
+
+Safe mechanism proof:
+
+```bash
+make live-smoke-residency-proof
+```
+
+That target proves cross-process pinning on `mxbai-embed-large` by default
+instead of wiring the full PRIMARY blob during routine verification.
+
 ## External Library
 
 Path:

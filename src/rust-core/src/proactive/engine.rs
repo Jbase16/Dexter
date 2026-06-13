@@ -603,6 +603,7 @@ mod tests {
             is_screen_locked: false,
             clipboard_text: None,
             clipboard_changed_at: None,
+            visible_windows: Vec::new(),
             last_shell_command: None,
             snapshot_hash: 1,
             last_updated: chrono::Utc::now(),

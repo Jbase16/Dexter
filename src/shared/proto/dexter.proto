@@ -13,6 +13,20 @@ service DexterService {
   // no side effects beyond reading Dexter's local append-only action audit.
   rpc ActionHistory(ActionHistoryRequest) returns (ActionHistoryResponse);
 
+  // Recent ambient events. No session stream, no model generation, and no side
+  // effects beyond reading Dexter's local append-only ambient event log.
+  rpc AmbientHistory(AmbientHistoryRequest) returns (AmbientHistoryResponse);
+
+  // Unacknowledged ambient trigger matches that should be surfaced to the
+  // operator. No model generation and no side effects beyond reading local
+  // ambient event and acknowledgement state.
+  rpc AmbientInbox(AmbientInboxRequest) returns (AmbientInboxResponse);
+
+  // Mark ambient inbox events as seen by the operator. This updates only the
+  // local acknowledgement sidecar; the append-only ambient event log remains
+  // immutable.
+  rpc AcknowledgeAmbientEvents(AcknowledgeAmbientEventsRequest) returns (AcknowledgeAmbientEventsResponse);
+
   // Local evidence report for "why did/didn't Dexter act?". No model generation
   // and no side effects beyond reading action/session state.
   rpc ActionDiagnostic(ActionDiagnosticRequest) returns (ActionDiagnosticResponse);
@@ -74,6 +88,15 @@ message HealthResponse {
   // current context without asking the model or duplicating context logic in
   // Swift.
   string operator_context_markdown = 21;
+
+  // Operator-visible model residency state. This reports whether the daemon's
+  // cross-process weight pinner is configured and currently holding PRIMARY's
+  // GGUF blob resident. It is diagnostic only; model readiness is still
+  // reported by the warm flags above.
+  string residency_mode = 22;                  // off | pin_keepalive | pin_retire_keepalive
+  bool primary_residency_pinned = 23;
+  uint64 primary_residency_wired_bytes = 24;
+  bool residency_lock_poisoned = 25;
 }
 
 message DiskHealth {
@@ -100,6 +123,54 @@ message ActionHistoryResponse {
   // Daemon-owned latest-action summary markdown. Kept here so the Swift HUD
   // does not duplicate Rust's operator-facing action evidence rules.
   string latest_action_summary_markdown = 4;
+}
+
+// ── Ambient history ──────────────────────────────────────────────────────────
+
+message AmbientHistoryRequest {
+  string trace_id = 1;
+  uint32 limit    = 2;  // Defaults to 20; daemon caps oversized requests.
+}
+
+message AmbientHistoryResponse {
+  string trace_id       = 1;
+  string event_log_path = 2;
+  repeated AmbientEvent events = 3;  // Newest first
+}
+
+message AmbientInboxRequest {
+  string trace_id = 1;
+  uint32 limit    = 2;  // Defaults to 5; daemon caps oversized requests.
+}
+
+message AmbientInboxResponse {
+  string trace_id             = 1;
+  string event_log_path       = 2;
+  string acknowledgement_path = 3;
+  repeated AmbientEvent events = 4;  // Newest first
+}
+
+message AcknowledgeAmbientEventsRequest {
+  string trace_id = 1;
+  repeated string event_ids = 2;
+}
+
+message AcknowledgeAmbientEventsResponse {
+  string trace_id = 1;
+  string acknowledgement_path = 2;
+  uint32 newly_acknowledged_count = 3;
+}
+
+message AmbientEvent {
+  string event_id  = 1;
+  string timestamp = 2;
+  string source    = 3;
+  string kind      = 4;
+  string severity  = 5;  // info | warn | critical
+  string title     = 6;
+  string summary   = 7;
+  string status    = 8;  // new | acknowledged | dismissed
+  string payload_json = 9;
 }
 
 message ActionDiagnosticRequest {

@@ -56,6 +56,42 @@ internal enum Dexter_V1_DexterService: Sendable {
                 method: "ActionHistory"
             )
         }
+        /// Namespace for "AmbientHistory" metadata.
+        internal enum AmbientHistory: Sendable {
+            /// Request type for "AmbientHistory".
+            internal typealias Input = Dexter_V1_AmbientHistoryRequest
+            /// Response type for "AmbientHistory".
+            internal typealias Output = Dexter_V1_AmbientHistoryResponse
+            /// Descriptor for "AmbientHistory".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "AmbientHistory"
+            )
+        }
+        /// Namespace for "AmbientInbox" metadata.
+        internal enum AmbientInbox: Sendable {
+            /// Request type for "AmbientInbox".
+            internal typealias Input = Dexter_V1_AmbientInboxRequest
+            /// Response type for "AmbientInbox".
+            internal typealias Output = Dexter_V1_AmbientInboxResponse
+            /// Descriptor for "AmbientInbox".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "AmbientInbox"
+            )
+        }
+        /// Namespace for "AcknowledgeAmbientEvents" metadata.
+        internal enum AcknowledgeAmbientEvents: Sendable {
+            /// Request type for "AcknowledgeAmbientEvents".
+            internal typealias Input = Dexter_V1_AcknowledgeAmbientEventsRequest
+            /// Response type for "AcknowledgeAmbientEvents".
+            internal typealias Output = Dexter_V1_AcknowledgeAmbientEventsResponse
+            /// Descriptor for "AcknowledgeAmbientEvents".
+            internal static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "dexter.v1.DexterService"),
+                method: "AcknowledgeAmbientEvents"
+            )
+        }
         /// Namespace for "ActionDiagnostic" metadata.
         internal enum ActionDiagnostic: Sendable {
             /// Request type for "ActionDiagnostic".
@@ -109,6 +145,9 @@ internal enum Dexter_V1_DexterService: Sendable {
             Ping.descriptor,
             Health.descriptor,
             ActionHistory.descriptor,
+            AmbientHistory.descriptor,
+            AmbientInbox.descriptor,
+            AcknowledgeAmbientEvents.descriptor,
             ActionDiagnostic.descriptor,
             RestartComponent.descriptor,
             Session.descriptor,
@@ -193,6 +232,65 @@ extension Dexter_V1_DexterService {
             request: GRPCCore.StreamingServerRequest<Dexter_V1_ActionHistoryRequest>,
             context: GRPCCore.ServerContext
         ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_ActionHistoryResponse>
+
+        /// Handle the "AmbientHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent ambient events. No session stream, no model generation, and no side
+        /// > effects beyond reading Dexter's local append-only ambient event log.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_AmbientHistoryRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_AmbientHistoryResponse` messages.
+        func ambientHistory(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_AmbientHistoryRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_AmbientHistoryResponse>
+
+        /// Handle the "AmbientInbox" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Unacknowledged ambient trigger matches that should be surfaced to the
+        /// > operator. No model generation and no side effects beyond reading local
+        /// > ambient event and acknowledgement state.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_AmbientInboxRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_AmbientInboxResponse` messages.
+        func ambientInbox(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_AmbientInboxRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_AmbientInboxResponse>
+
+        /// Handle the "AcknowledgeAmbientEvents" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Mark ambient inbox events as seen by the operator. This updates only the
+        /// > local acknowledgement sidecar; the append-only ambient event log remains
+        /// > immutable.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request of `Dexter_V1_AcknowledgeAmbientEventsRequest` messages.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A streaming response of `Dexter_V1_AcknowledgeAmbientEventsResponse` messages.
+        func acknowledgeAmbientEvents(
+            request: GRPCCore.StreamingServerRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>
 
         /// Handle the "ActionDiagnostic" method.
         ///
@@ -339,6 +437,65 @@ extension Dexter_V1_DexterService {
             context: GRPCCore.ServerContext
         ) async throws -> GRPCCore.ServerResponse<Dexter_V1_ActionHistoryResponse>
 
+        /// Handle the "AmbientHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent ambient events. No session stream, no model generation, and no side
+        /// > effects beyond reading Dexter's local append-only ambient event log.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AmbientHistoryRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_AmbientHistoryResponse` message.
+        func ambientHistory(
+            request: GRPCCore.ServerRequest<Dexter_V1_AmbientHistoryRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_AmbientHistoryResponse>
+
+        /// Handle the "AmbientInbox" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Unacknowledged ambient trigger matches that should be surfaced to the
+        /// > operator. No model generation and no side effects beyond reading local
+        /// > ambient event and acknowledgement state.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AmbientInboxRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_AmbientInboxResponse` message.
+        func ambientInbox(
+            request: GRPCCore.ServerRequest<Dexter_V1_AmbientInboxRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_AmbientInboxResponse>
+
+        /// Handle the "AcknowledgeAmbientEvents" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Mark ambient inbox events as seen by the operator. This updates only the
+        /// > local acknowledgement sidecar; the append-only ambient event log remains
+        /// > immutable.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AcknowledgeAmbientEventsRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A response containing a single `Dexter_V1_AcknowledgeAmbientEventsResponse` message.
+        func acknowledgeAmbientEvents(
+            request: GRPCCore.ServerRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+            context: GRPCCore.ServerContext
+        ) async throws -> GRPCCore.ServerResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>
+
         /// Handle the "ActionDiagnostic" method.
         ///
         /// > Source IDL Documentation:
@@ -482,6 +639,65 @@ extension Dexter_V1_DexterService {
             context: GRPCCore.ServerContext
         ) async throws -> Dexter_V1_ActionHistoryResponse
 
+        /// Handle the "AmbientHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent ambient events. No session stream, no model generation, and no side
+        /// > effects beyond reading Dexter's local append-only ambient event log.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_AmbientHistoryRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_AmbientHistoryResponse` to respond with.
+        func ambientHistory(
+            request: Dexter_V1_AmbientHistoryRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_AmbientHistoryResponse
+
+        /// Handle the "AmbientInbox" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Unacknowledged ambient trigger matches that should be surfaced to the
+        /// > operator. No model generation and no side effects beyond reading local
+        /// > ambient event and acknowledgement state.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_AmbientInboxRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_AmbientInboxResponse` to respond with.
+        func ambientInbox(
+            request: Dexter_V1_AmbientInboxRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_AmbientInboxResponse
+
+        /// Handle the "AcknowledgeAmbientEvents" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Mark ambient inbox events as seen by the operator. This updates only the
+        /// > local acknowledgement sidecar; the append-only ambient event log remains
+        /// > immutable.
+        ///
+        /// - Parameters:
+        ///   - request: A `Dexter_V1_AcknowledgeAmbientEventsRequest` message.
+        ///   - context: Context providing information about the RPC.
+        /// - Throws: Any error which occurred during the processing of the request. Thrown errors
+        ///     of type `RPCError` are mapped to appropriate statuses. All other errors are converted
+        ///     to an internal error.
+        /// - Returns: A `Dexter_V1_AcknowledgeAmbientEventsResponse` to respond with.
+        func acknowledgeAmbientEvents(
+            request: Dexter_V1_AcknowledgeAmbientEventsRequest,
+            context: GRPCCore.ServerContext
+        ) async throws -> Dexter_V1_AcknowledgeAmbientEventsResponse
+
         /// Handle the "ActionDiagnostic" method.
         ///
         /// > Source IDL Documentation:
@@ -604,6 +820,39 @@ extension Dexter_V1_DexterService.StreamingServiceProtocol {
             }
         )
         router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.AmbientHistory.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_AmbientHistoryRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AmbientHistoryResponse>(),
+            handler: { request, context in
+                try await self.ambientHistory(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.AmbientInbox.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_AmbientInboxRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AmbientInboxResponse>(),
+            handler: { request, context in
+                try await self.ambientInbox(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
+            forMethod: Dexter_V1_DexterService.Method.AcknowledgeAmbientEvents.descriptor,
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_AcknowledgeAmbientEventsRequest>(),
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AcknowledgeAmbientEventsResponse>(),
+            handler: { request, context in
+                try await self.acknowledgeAmbientEvents(
+                    request: request,
+                    context: context
+                )
+            }
+        )
+        router.registerHandler(
             forMethod: Dexter_V1_DexterService.Method.ActionDiagnostic.descriptor,
             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_ActionDiagnosticRequest>(),
             serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_ActionDiagnosticResponse>(),
@@ -686,6 +935,39 @@ extension Dexter_V1_DexterService.ServiceProtocol {
         return GRPCCore.StreamingServerResponse(single: response)
     }
 
+    internal func ambientHistory(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_AmbientHistoryRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_AmbientHistoryResponse> {
+        let response = try await self.ambientHistory(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
+
+    internal func ambientInbox(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_AmbientInboxRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_AmbientInboxResponse> {
+        let response = try await self.ambientInbox(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
+
+    internal func acknowledgeAmbientEvents(
+        request: GRPCCore.StreamingServerRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.StreamingServerResponse<Dexter_V1_AcknowledgeAmbientEventsResponse> {
+        let response = try await self.acknowledgeAmbientEvents(
+            request: GRPCCore.ServerRequest(stream: request),
+            context: context
+        )
+        return GRPCCore.StreamingServerResponse(single: response)
+    }
+
     internal func actionDiagnostic(
         request: GRPCCore.StreamingServerRequest<Dexter_V1_ActionDiagnosticRequest>,
         context: GRPCCore.ServerContext
@@ -744,6 +1026,45 @@ extension Dexter_V1_DexterService.SimpleServiceProtocol {
     ) async throws -> GRPCCore.ServerResponse<Dexter_V1_ActionHistoryResponse> {
         return GRPCCore.ServerResponse<Dexter_V1_ActionHistoryResponse>(
             message: try await self.actionHistory(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func ambientHistory(
+        request: GRPCCore.ServerRequest<Dexter_V1_AmbientHistoryRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_AmbientHistoryResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_AmbientHistoryResponse>(
+            message: try await self.ambientHistory(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func ambientInbox(
+        request: GRPCCore.ServerRequest<Dexter_V1_AmbientInboxRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_AmbientInboxResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_AmbientInboxResponse>(
+            message: try await self.ambientInbox(
+                request: request.message,
+                context: context
+            ),
+            metadata: [:]
+        )
+    }
+
+    internal func acknowledgeAmbientEvents(
+        request: GRPCCore.ServerRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+        context: GRPCCore.ServerContext
+    ) async throws -> GRPCCore.ServerResponse<Dexter_V1_AcknowledgeAmbientEventsResponse> {
+        return GRPCCore.ServerResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>(
+            message: try await self.acknowledgeAmbientEvents(
                 request: request.message,
                 context: context
             ),
@@ -890,6 +1211,80 @@ extension Dexter_V1_DexterService {
             deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_ActionHistoryResponse>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_ActionHistoryResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "AmbientHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent ambient events. No session stream, no model generation, and no side
+        /// > effects beyond reading Dexter's local append-only ambient event log.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AmbientHistoryRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_AmbientHistoryRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_AmbientHistoryResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func ambientHistory<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_AmbientHistoryRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_AmbientHistoryRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_AmbientHistoryResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientHistoryResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "AmbientInbox" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Unacknowledged ambient trigger matches that should be surfaced to the
+        /// > operator. No model generation and no side effects beyond reading local
+        /// > ambient event and acknowledgement state.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AmbientInboxRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_AmbientInboxRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_AmbientInboxResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func ambientInbox<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_AmbientInboxRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_AmbientInboxRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_AmbientInboxResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientInboxResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "AcknowledgeAmbientEvents" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Mark ambient inbox events as seen by the operator. This updates only the
+        /// > local acknowledgement sidecar; the append-only ambient event log remains
+        /// > immutable.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AcknowledgeAmbientEventsRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_AcknowledgeAmbientEventsRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_AcknowledgeAmbientEventsResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func acknowledgeAmbientEvents<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_AcknowledgeAmbientEventsResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "ActionDiagnostic" method.
@@ -1106,6 +1501,113 @@ extension Dexter_V1_DexterService {
             try await self.client.unary(
                 request: request,
                 descriptor: Dexter_V1_DexterService.Method.ActionHistory.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "AmbientHistory" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Recent ambient events. No session stream, no model generation, and no side
+        /// > effects beyond reading Dexter's local append-only ambient event log.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AmbientHistoryRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_AmbientHistoryRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_AmbientHistoryResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func ambientHistory<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_AmbientHistoryRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_AmbientHistoryRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_AmbientHistoryResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientHistoryResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.AmbientHistory.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "AmbientInbox" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Unacknowledged ambient trigger matches that should be surfaced to the
+        /// > operator. No model generation and no side effects beyond reading local
+        /// > ambient event and acknowledgement state.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AmbientInboxRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_AmbientInboxRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_AmbientInboxResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func ambientInbox<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_AmbientInboxRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_AmbientInboxRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_AmbientInboxResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientInboxResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.AmbientInbox.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "AcknowledgeAmbientEvents" method.
+        ///
+        /// > Source IDL Documentation:
+        /// >
+        /// > Mark ambient inbox events as seen by the operator. This updates only the
+        /// > local acknowledgement sidecar; the append-only ambient event log remains
+        /// > immutable.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Dexter_V1_AcknowledgeAmbientEventsRequest` message.
+        ///   - serializer: A serializer for `Dexter_V1_AcknowledgeAmbientEventsRequest` messages.
+        ///   - deserializer: A deserializer for `Dexter_V1_AcknowledgeAmbientEventsResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        internal func acknowledgeAmbientEvents<Result>(
+            request: GRPCCore.ClientRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+            serializer: some GRPCCore.MessageSerializer<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Dexter_V1_AcknowledgeAmbientEventsResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Dexter_V1_DexterService.Method.AcknowledgeAmbientEvents.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -1347,6 +1849,98 @@ extension Dexter_V1_DexterService.ClientProtocol {
         )
     }
 
+    /// Call the "AmbientHistory" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Recent ambient events. No session stream, no model generation, and no side
+    /// > effects beyond reading Dexter's local append-only ambient event log.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_AmbientHistoryRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func ambientHistory<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_AmbientHistoryRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientHistoryResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.ambientHistory(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AmbientHistoryRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_AmbientHistoryResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "AmbientInbox" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Unacknowledged ambient trigger matches that should be surfaced to the
+    /// > operator. No model generation and no side effects beyond reading local
+    /// > ambient event and acknowledgement state.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_AmbientInboxRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func ambientInbox<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_AmbientInboxRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientInboxResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.ambientInbox(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AmbientInboxRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_AmbientInboxResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "AcknowledgeAmbientEvents" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Mark ambient inbox events as seen by the operator. This updates only the
+    /// > local acknowledgement sidecar; the append-only ambient event log remains
+    /// > immutable.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Dexter_V1_AcknowledgeAmbientEventsRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func acknowledgeAmbientEvents<Result>(
+        request: GRPCCore.ClientRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.acknowledgeAmbientEvents(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AcknowledgeAmbientEventsRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_AcknowledgeAmbientEventsResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "ActionDiagnostic" method.
     ///
     /// > Source IDL Documentation:
@@ -1566,6 +2160,110 @@ extension Dexter_V1_DexterService.ClientProtocol {
             metadata: metadata
         )
         return try await self.actionHistory(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "AmbientHistory" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Recent ambient events. No session stream, no model generation, and no side
+    /// > effects beyond reading Dexter's local append-only ambient event log.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func ambientHistory<Result>(
+        _ message: Dexter_V1_AmbientHistoryRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientHistoryResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_AmbientHistoryRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.ambientHistory(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "AmbientInbox" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Unacknowledged ambient trigger matches that should be surfaced to the
+    /// > operator. No model generation and no side effects beyond reading local
+    /// > ambient event and acknowledgement state.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func ambientInbox<Result>(
+        _ message: Dexter_V1_AmbientInboxRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AmbientInboxResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_AmbientInboxRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.ambientInbox(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "AcknowledgeAmbientEvents" method.
+    ///
+    /// > Source IDL Documentation:
+    /// >
+    /// > Mark ambient inbox events as seen by the operator. This updates only the
+    /// > local acknowledgement sidecar; the append-only ambient event log remains
+    /// > immutable.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    internal func acknowledgeAmbientEvents<Result>(
+        _ message: Dexter_V1_AcknowledgeAmbientEventsRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Dexter_V1_AcknowledgeAmbientEventsResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Dexter_V1_AcknowledgeAmbientEventsRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.acknowledgeAmbientEvents(
             request: request,
             options: options,
             onResponse: handleResponse

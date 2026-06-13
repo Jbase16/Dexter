@@ -610,17 +610,43 @@ impl SharedDaemonState {
         // ("the real fix is mlock-ing Ollama's weight pages") — done from outside
         // Ollama, so no upstream patch is required.
         if self.primary_model_warm.load(Ordering::SeqCst) {
-            let pinned = self.residency.pin_primary(&cfg.models.primary);
-            if pinned {
+            let mode = cfg.residency.mode;
+
+            // Pin (when the mode asks for it). The mlock faults + wires ~17 GB
+            // off NVMe synchronously, so it runs on a blocking thread — never on
+            // the async runtime — and is announced first so startup doesn't look
+            // hung. The pin is daemon-lifetime; the keepalive decision below uses
+            // its real success/failure, not an optimistic assumption.
+            let pinned = if mode.pins() {
                 info!(
                     model = %cfg.models.primary,
-                    "PRIMARY weights pinned resident — keepalive ping retired for this run"
+                    mode = mode.as_str(),
+                    "Residency: pinning PRIMARY weights resident (~17 GB) — this can take a few seconds"
                 );
+                let residency = self.residency.clone();
+                let primary = cfg.models.primary.clone();
+                tokio::task::spawn_blocking(move || residency.pin_primary(&primary))
+                    .await
+                    .unwrap_or(false)
             } else {
-                warn!(
-                    model = %cfg.models.primary,
-                    "PRIMARY residency pin unavailable — falling back to keepalive ping"
-                );
+                false
+            };
+
+            // Keepalive ping policy:
+            //   - Off                  → ping (legacy behaviour, no pin)
+            //   - PinKeepalive (default)→ ping AND pin (belt + suspenders until the
+            //                             idle-pressure discriminator proves the pin
+            //                             alone keeps PRIMARY resident)
+            //   - PinRetireKeepalive   → ping ONLY if the pin failed
+            // Across all modes, a failed pin always keeps the ping as a fallback.
+            let run_keepalive = !pinned || mode.keepalive_after_pin();
+            info!(
+                mode = mode.as_str(),
+                pinned,
+                keepalive_ping = run_keepalive,
+                "Residency policy resolved"
+            );
+            if run_keepalive {
                 CoreOrchestrator::spawn_primary_keepalive_task(
                     engine.clone(),
                     cfg.models.primary.clone(),
@@ -901,6 +927,10 @@ pub struct CoreOrchestrator {
     /// same action spec as the previous step, the chain is stopped immediately with an
     /// error message rather than re-dispatching the identical failing action.
     last_agentic_action_json: Option<String>,
+    /// Residency policy (off / pin+keepalive / pin-retire-keepalive). Read by
+    /// `maybe_rewarm_primary` to decide whether to re-pin PRIMARY after a HEAVY
+    /// swap. Sourced from `[residency]` in config; defaults to `pin_keepalive`.
+    residency_mode: crate::config::ResidencyMode,
 }
 
 impl CoreOrchestrator {
@@ -981,6 +1011,7 @@ impl CoreOrchestrator {
             personality,
             context,
             model_config: cfg.models.clone(),
+            residency_mode: cfg.residency.mode,
             session_mgr,
             context_observer: ContextObserver::new(),
             shared: shared.clone(),
@@ -1590,6 +1621,7 @@ impl CoreOrchestrator {
         let primary_name = self.model_config.primary.clone();
         let warm_flag = self.primary_model_warm.clone();
         let residency = self.shared.residency.clone();
+        let residency_pins = self.residency_mode.pins();
         let session_id = self.session_id.clone();
         // Clone twice: one moves into the spawned task; one stays in this scope
         // for the trailing `info!` after spawn.
@@ -1674,19 +1706,27 @@ impl CoreOrchestrator {
                     while rx.recv().await.is_some() {}
                     warm_flag.store(true, Ordering::SeqCst);
                     // Residency: re-wire PRIMARY now that it is warm again and
-                    // HEAVY has been evicted. Restores the deterministic-residency
-                    // invariant the keepalive ping used to chase.
-                    if residency.pin_primary(&primary_name) {
+                    // HEAVY has been evicted. Only when the mode pins at all; the
+                    // mlock runs on a blocking thread (it faults ~17 GB), never on
+                    // the async runtime.
+                    if residency_pins {
+                        let residency = residency.clone();
+                        let primary = primary_name.clone();
+                        let repinned =
+                            tokio::task::spawn_blocking(move || residency.pin_primary(&primary))
+                                .await
+                                .unwrap_or(false);
                         info!(
-                            session = %session_id,
-                            model   = %primary_name,
-                            "PRIMARY model warm — weights re-pinned resident"
+                            session  = %session_id,
+                            model    = %primary_name,
+                            repinned,
+                            "PRIMARY model warm — residency re-pin attempted"
                         );
                     } else {
                         info!(
                             session = %session_id,
                             model   = %primary_name,
-                            "PRIMARY model warm (residency re-pin unavailable)"
+                            "PRIMARY model warm"
                         );
                     }
                 }

@@ -2,7 +2,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
 };
 
@@ -25,6 +25,7 @@ use crate::{
     },
     action_diagnostic::{build_action_diagnostic, ActionDiagnosticInput},
     action_evidence::{format_failed_action_evidence_block, format_success_action_evidence_block},
+    ambient::{AmbientEvent, AmbientEventStore, AmbientSeverity},
     config::{resolve_config_path, DexterConfig},
     constants::{
         BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, SHELL_SOCKET_PATH, VOICE_PYTHON_EXE,
@@ -42,9 +43,11 @@ pub mod proto {
 
 use proto::{
     dexter_service_server::{DexterService, DexterServiceServer},
-    ActionDiagnosticRequest, ActionDiagnosticResponse, ActionHistoryRequest, ActionHistoryResponse,
-    ActionReceipt, AudioChunk, ClientEvent, DiskHealth, EntityState, EntityStateChange,
-    HealthRequest, HealthResponse, PingRequest, PingResponse, RestartComponent,
+    AcknowledgeAmbientEventsRequest, AcknowledgeAmbientEventsResponse, ActionDiagnosticRequest,
+    ActionDiagnosticResponse, ActionHistoryRequest, ActionHistoryResponse, ActionReceipt,
+    AmbientEvent as AmbientEventProto, AmbientHistoryRequest, AmbientHistoryResponse,
+    AmbientInboxRequest, AmbientInboxResponse, AudioChunk, ClientEvent, DiskHealth, EntityState,
+    EntityStateChange, HealthRequest, HealthResponse, PingRequest, PingResponse, RestartComponent,
     RestartComponentRequest, RestartComponentResponse, ServerEvent, TranscriptChunk,
 };
 
@@ -62,6 +65,36 @@ fn nonempty_string(value: String) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn ambient_event_proto(event: AmbientEvent, trace_id: &str) -> AmbientEventProto {
+    AmbientEventProto {
+        event_id: event.event_id,
+        timestamp: event.timestamp,
+        source: event.source,
+        kind: event.kind,
+        severity: event.severity.as_str().to_string(),
+        title: event.title,
+        summary: event.summary,
+        status: event.status.as_str().to_string(),
+        payload_json: serde_json::to_string(&event.payload).unwrap_or_else(|error| {
+            warn!(
+                trace_id = %trace_id,
+                error = %error,
+                "Ambient event payload could not be serialized for RPC"
+            );
+            "{}".to_string()
+        }),
+    }
+}
+
+fn restart_component_label(component: RestartComponent) -> &'static str {
+    match component {
+        RestartComponent::Stt => "stt",
+        RestartComponent::Tts => "tts",
+        RestartComponent::Browser => "browser",
+        RestartComponent::Unspecified => "unspecified",
     }
 }
 
@@ -252,6 +285,7 @@ impl StartupHealthSnapshot {
         trace_id: String,
         cfg: &DexterConfig,
         config_path: String,
+        residency: crate::system::residency::ResidencyStatus,
     ) -> HealthResponse {
         let status = self.overall_status().to_string();
         let degraded_components = self.degraded_components();
@@ -277,6 +311,10 @@ impl StartupHealthSnapshot {
             browser_worker: self.browser_worker.as_str().to_string(),
             disk: self.disk.into_iter().map(disk_health_proto).collect(),
             operator_context_markdown: String::new(),
+            residency_mode: cfg.residency.mode.as_str().to_string(),
+            primary_residency_pinned: residency.primary_pinned,
+            primary_residency_wired_bytes: residency.primary_wired_bytes as u64,
+            residency_lock_poisoned: residency.lock_poisoned,
         }
     }
 }
@@ -345,6 +383,16 @@ async fn log_startup_health_summary(
     let config_path = resolve_config_path()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|e| format!("unresolved: {e}"));
+
+    // Residency status — operator-visible "is the weight pin armed?" health line.
+    let residency = shared.residency.status();
+    info!(
+        mode = cfg.residency.mode.as_str(),
+        primary_pinned = residency.primary_pinned,
+        primary_wired_gb = residency.primary_wired_bytes as f64 / 1_073_741_824.0,
+        lock_poisoned = residency.lock_poisoned,
+        "Residency status"
+    );
 
     if status == "ready" {
         info!(
@@ -607,6 +655,8 @@ pub struct CoreService {
     /// `Health()` can report status without blocking on an active utterance.
     stt_ready: Arc<AtomicBool>,
     stt_prewarm_complete: Arc<AtomicBool>,
+    ambient_store: AmbientEventStore,
+    last_ambient_health_status: StdMutex<Option<String>>,
 }
 
 impl CoreService {
@@ -654,6 +704,33 @@ impl CoreService {
             .await;
         });
 
+        let ambient_store = AmbientEventStore::new(&cfg.core.state_dir);
+        match ambient_store.ensure_default_triggers() {
+            Ok(installed) if !installed.is_empty() => {
+                info!(
+                    installed = installed.len(),
+                    "Ambient default triggers installed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "Ambient default triggers could not be installed");
+            }
+        }
+        if let Err(error) = ambient_store.record_event_and_evaluate(
+            "daemon",
+            "daemon_started",
+            AmbientSeverity::Info,
+            "Dexter daemon started",
+            "Dexter core started and is preparing workers, models, and IPC.",
+            serde_json::json!({
+                "socket_path": cfg.core.socket_path,
+                "state_dir": cfg.core.state_dir.display().to_string()
+            }),
+        ) {
+            warn!(error = %error, "Ambient daemon-start event could not be recorded");
+        }
+
         let service = Self {
             cfg,
             stt,
@@ -661,6 +738,8 @@ impl CoreService {
             shared,
             stt_ready,
             stt_prewarm_complete,
+            ambient_store,
+            last_ambient_health_status: StdMutex::new(None),
         };
 
         // Phase 30: spawn shell context listener. Accepts one-shot connections from the
@@ -679,9 +758,115 @@ impl CoreService {
         let config_path = resolve_config_path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|e| format!("unresolved: {e}"));
-        let mut health = snapshot.into_health_response(trace_id, &self.cfg, config_path);
+        let mut health = snapshot.into_health_response(
+            trace_id,
+            &self.cfg,
+            config_path,
+            self.shared.residency.status(),
+        );
         health.operator_context_markdown = self.shared.operator_context_markdown();
+        self.record_health_transition(&health);
         health
+    }
+
+    fn record_health_transition(&self, health: &HealthResponse) {
+        let status = health.status.trim();
+        if status.is_empty() {
+            return;
+        }
+
+        let should_record = match self.last_ambient_health_status.lock() {
+            Ok(mut guard) => {
+                if guard.as_deref() == Some(status) {
+                    false
+                } else {
+                    *guard = Some(status.to_string());
+                    true
+                }
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Ambient health transition lock poisoned — event not recorded"
+                );
+                false
+            }
+        };
+
+        if !should_record {
+            return;
+        }
+
+        let severity = match status {
+            "ready" => AmbientSeverity::Info,
+            "pending" => AmbientSeverity::Warn,
+            "degraded" => AmbientSeverity::Critical,
+            _ => AmbientSeverity::Warn,
+        };
+        let title = format!("Dexter health {status}");
+        let summary = if health.degraded_components.is_empty() {
+            format!("Daemon health changed to {status}.")
+        } else {
+            format!(
+                "Daemon health changed to {status}; attention components: {}.",
+                health.degraded_components.join(", ")
+            )
+        };
+
+        if let Err(error) = self.ambient_store.record_event_and_evaluate(
+            "health",
+            "health_status_changed",
+            severity,
+            title,
+            summary,
+            serde_json::json!({
+                "status": health.status,
+                "degraded_components": health.degraded_components,
+                "fast_model": health.fast_model,
+                "primary_model": health.primary_model,
+                "embed_model": health.embed_model,
+                "stt_worker": health.stt_worker,
+                "tts_worker": health.tts_worker,
+                "browser_worker": health.browser_worker
+            }),
+        ) {
+            warn!(error = %error, "Ambient health transition event could not be recorded");
+        }
+    }
+
+    fn record_component_restart_event(
+        &self,
+        component: RestartComponent,
+        success: bool,
+        message: &str,
+        trace_id: &str,
+    ) {
+        let component_name = restart_component_label(component);
+        let severity = if success {
+            AmbientSeverity::Info
+        } else {
+            AmbientSeverity::Warn
+        };
+        let title = if success {
+            format!("{component_name} restarted")
+        } else {
+            format!("{component_name} restart failed")
+        };
+
+        if let Err(error) = self.ambient_store.record_event_and_evaluate(
+            "operator",
+            "component_restarted",
+            severity,
+            title,
+            message.to_string(),
+            serde_json::json!({
+                "component": component_name,
+                "success": success,
+                "trace_id": trace_id
+            }),
+        ) {
+            warn!(error = %error, "Ambient component restart event could not be recorded");
+        }
     }
 
     async fn restart_stt_now(&self) -> bool {
@@ -803,6 +988,125 @@ impl DexterService for CoreService {
             audit_log_path: audit_log_path.display().to_string(),
             receipts,
             latest_action_summary_markdown,
+        }))
+    }
+
+    async fn ambient_history(
+        &self,
+        request: Request<AmbientHistoryRequest>,
+    ) -> Result<Response<AmbientHistoryResponse>, Status> {
+        let req = request.into_inner();
+        let trace_id = req.trace_id;
+        let limit = if req.limit == 0 {
+            20
+        } else {
+            req.limit.min(100)
+        } as usize;
+
+        let (event_log_path, events) = self.ambient_store.recent_events(limit).map_err(|e| {
+            error!(
+                trace_id = %trace_id,
+                error = %e,
+                "Ambient history read failed"
+            );
+            Status::internal(format!("ambient history unavailable: {e}"))
+        })?;
+        let event_count = events.len();
+        let events = events
+            .into_iter()
+            .map(|event| ambient_event_proto(event, &trace_id))
+            .collect();
+
+        info!(
+            trace_id = %trace_id,
+            limit,
+            event_count,
+            event_log_path = %event_log_path.display(),
+            "Ambient history requested"
+        );
+
+        Ok(Response::new(AmbientHistoryResponse {
+            trace_id,
+            event_log_path: event_log_path.display().to_string(),
+            events,
+        }))
+    }
+
+    async fn ambient_inbox(
+        &self,
+        request: Request<AmbientInboxRequest>,
+    ) -> Result<Response<AmbientInboxResponse>, Status> {
+        let req = request.into_inner();
+        let trace_id = req.trace_id;
+        let limit = if req.limit == 0 { 5 } else { req.limit.min(50) } as usize;
+
+        let (event_log_path, events) =
+            self.ambient_store
+                .unread_trigger_matches(limit)
+                .map_err(|e| {
+                    error!(
+                        trace_id = %trace_id,
+                        error = %e,
+                        "Ambient inbox read failed"
+                    );
+                    Status::internal(format!("ambient inbox unavailable: {e}"))
+                })?;
+        let event_count = events.len();
+        let events = events
+            .into_iter()
+            .map(|event| ambient_event_proto(event, &trace_id))
+            .collect();
+        let acknowledgement_path = self.ambient_store.acknowledgements_path();
+
+        info!(
+            trace_id = %trace_id,
+            limit,
+            event_count,
+            event_log_path = %event_log_path.display(),
+            acknowledgement_path = %acknowledgement_path.display(),
+            "Ambient inbox requested"
+        );
+
+        Ok(Response::new(AmbientInboxResponse {
+            trace_id,
+            event_log_path: event_log_path.display().to_string(),
+            acknowledgement_path: acknowledgement_path.display().to_string(),
+            events,
+        }))
+    }
+
+    async fn acknowledge_ambient_events(
+        &self,
+        request: Request<AcknowledgeAmbientEventsRequest>,
+    ) -> Result<Response<AcknowledgeAmbientEventsResponse>, Status> {
+        let req = request.into_inner();
+        let trace_id = req.trace_id;
+        let requested_count = req.event_ids.len();
+        let (acknowledgement_path, newly_acknowledged_count) = self
+            .ambient_store
+            .acknowledge_events(&req.event_ids)
+            .map_err(|e| {
+                error!(
+                    trace_id = %trace_id,
+                    error = %e,
+                    requested_count,
+                    "Ambient acknowledgement failed"
+                );
+                Status::internal(format!("ambient acknowledgement unavailable: {e}"))
+            })?;
+
+        info!(
+            trace_id = %trace_id,
+            requested_count,
+            newly_acknowledged_count,
+            acknowledgement_path = %acknowledgement_path.display(),
+            "Ambient events acknowledged"
+        );
+
+        Ok(Response::new(AcknowledgeAmbientEventsResponse {
+            trace_id,
+            acknowledgement_path: acknowledgement_path.display().to_string(),
+            newly_acknowledged_count: newly_acknowledged_count as u32,
         }))
     }
 
@@ -931,6 +1235,7 @@ impl DexterService for CoreService {
             }
         };
 
+        self.record_component_restart_event(component, success, &message, &trace_id);
         let health = self.health_response_for_trace(trace_id.clone());
         info!(
             trace_id = %trace_id,
@@ -1645,6 +1950,11 @@ mod startup_health_tests {
             "trace-123".to_string(),
             &cfg,
             "/Users/jason/.dexter/config.toml".to_string(),
+            crate::system::residency::ResidencyStatus {
+                primary_pinned: true,
+                primary_wired_bytes: 123,
+                lock_poisoned: false,
+            },
         );
 
         assert_eq!(response.trace_id, "trace-123");
@@ -1656,6 +1966,10 @@ mod startup_health_tests {
         assert_eq!(response.embed_model, "embed");
         assert_eq!(response.browser_worker, "degraded");
         assert_eq!(response.config_path, "/Users/jason/.dexter/config.toml");
+        assert_eq!(response.residency_mode, "pin_keepalive");
+        assert!(response.primary_residency_pinned);
+        assert_eq!(response.primary_residency_wired_bytes, 123);
+        assert!(!response.residency_lock_poisoned);
     }
 
     #[test]

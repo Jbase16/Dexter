@@ -27,7 +27,7 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -127,6 +127,23 @@ status: cli
 why: cli
 	$(RUST_CORE_DIR)/target/release/dexter-cli --why
 
+## events: build dexter-cli and print recent ambient event records
+events: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --events --limit 20
+
+## triggers: build dexter-cli and print ambient trigger definitions
+triggers: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --triggers
+
+## inbox: build dexter-cli and print unacknowledged ambient notices
+inbox: cli
+	$(RUST_CORE_DIR)/target/release/dexter-cli --inbox --limit 20
+
+## ack-event: acknowledge an ambient notice by EVENT_ID, e.g. make ack-event EVENT_ID=...
+ack-event: cli
+	@test -n "$(EVENT_ID)" || (echo "ERROR: EVENT_ID is required, e.g. make ack-event EVENT_ID=..." >&2; exit 2)
+	$(RUST_CORE_DIR)/target/release/dexter-cli --ack-event "$(EVENT_ID)"
+
 ## actions-last: build dexter-cli and print the latest local action receipt
 actions-last: cli
 	$(RUST_CORE_DIR)/target/release/dexter-cli --actions last
@@ -164,6 +181,26 @@ live-smoke-startup-readiness: ensure-core-not-running
 live-smoke-process-control: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-process-control-smoke.sh
+
+## live-smoke-ambient-events: verify daemon startup/health transitions write ambient events
+live-smoke-ambient-events: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ambient-events-smoke.sh
+
+## live-smoke-ambient-actions: verify action outcomes write ambient events
+live-smoke-ambient-actions: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ambient-actions-smoke.sh
+
+## live-smoke-ambient-inbox: verify trigger matches surface in HUD and become acknowledged
+live-smoke-ambient-inbox: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ambient-inbox-smoke.sh
+
+## live-smoke-ambient-trigger-actions: verify ask-approval/start-task trigger follow-up events
+live-smoke-ambient-trigger-actions: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ambient-trigger-actions-smoke.sh
 
 ## live-smoke-stop-report: verify make stop prints labeled process evidence
 live-smoke-stop-report: ensure-core-not-running
@@ -218,6 +255,11 @@ live-smoke-recovery: ensure-core-not-running
 live-smoke-degraded-mode: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-degraded-mode-smoke.sh
+
+## live-smoke-residency-proof: prove cross-process residency pinning on a safe-sized model blob
+live-smoke-residency-proof:
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-residency-proof-smoke.sh
 
 ## live-smoke-external-failures: run deterministic external-integration failure smoke
 ##
@@ -416,6 +458,7 @@ live-smoke-all:
 	$(MAKE) live-smoke-dock-launcher
 	$(MAKE) live-smoke-recovery
 	$(MAKE) live-smoke-degraded-mode
+	$(MAKE) live-smoke-residency-proof
 	$(MAKE) live-smoke-external-failures
 	$(MAKE) live-smoke-operator-status
 	$(MAKE) live-smoke-action-diagnostic
@@ -469,6 +512,7 @@ live-smoke-operator-controls:
 ## recovery, and HUD recovery guidance when the Rust core is unreachable.
 live-smoke-runtime-health:
 	bash scripts/live-smoke-summary.sh \
+		live-smoke-residency-proof \
 		live-smoke-startup-readiness \
 		live-smoke-operator-status \
 		live-smoke-hud-health \
@@ -505,6 +549,7 @@ live-smoke-acceptance:
 		live-smoke-hud-lifecycle \
 		live-smoke-hud-placement \
 		live-smoke-placement-command \
+		live-smoke-residency-proof \
 		live-smoke-startup-readiness \
 		live-smoke-operator-status \
 		live-smoke-hud-health \

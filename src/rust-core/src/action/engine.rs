@@ -29,6 +29,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    ambient::{AmbientEventStore, AmbientSeverity},
     browser::BrowserCoordinator,
     constants::{
         ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_APPROVAL_TIMEOUT_SECS, ACTION_DEFAULT_TIMEOUT_SECS,
@@ -172,6 +173,7 @@ pub struct ActionEngine {
     #[allow(dead_code)] // stored for test assertions; AuditLog owns its own path reference
     state_dir: PathBuf,
     audit: Arc<tokio::sync::Mutex<AuditLog>>,
+    ambient: AmbientEventStore,
     pending_actions: HashMap<String, PendingAction>,
     browser: BrowserCoordinator, // Phase 14 — start_browser() called by server.rs
 }
@@ -242,6 +244,7 @@ impl ActionEngine {
         Self {
             state_dir: state_dir.to_path_buf(),
             audit: AuditLog::new_shared(state_dir),
+            ambient: AmbientEventStore::new(state_dir),
             pending_actions: HashMap::new(),
             browser,
         }
@@ -257,6 +260,7 @@ impl ActionEngine {
     pub fn executor_handle(&self) -> ExecutorHandle {
         ExecutorHandle {
             audit: self.audit.clone(),
+            ambient: self.ambient.clone(),
             browser: self.browser.clone(),
         }
     }
@@ -322,6 +326,14 @@ impl ActionEngine {
                 %description,
                 expires_at = %expires_at.to_rfc3339(),
                 "Action requires operator approval — pending"
+            );
+            self.record_approval_requested_event(
+                &action_id,
+                &spec,
+                category,
+                &description,
+                expires_at_unix_ms,
+                timeout_secs as u32,
             );
             self.pending_actions.insert(
                 action_id.clone(),
@@ -398,6 +410,7 @@ impl ActionEngine {
             if let Err(e) = guard.append(&entry) {
                 error!(action_id = %action_id, error = %e, "Audit log append failed");
             }
+            self.record_action_audit_event(&entry, &pending.spec);
             return ActionOutcome::Rejected {
                 action_id: action_id.to_string(),
                 error: "approval expired before operator response".to_string(),
@@ -428,6 +441,7 @@ impl ActionEngine {
             if let Err(e) = guard.append(&entry) {
                 error!(action_id = %action_id, error = %e, "Audit log append failed");
             }
+            self.record_action_audit_event(&entry, &pending.spec);
             return ActionOutcome::Rejected {
                 action_id: action_id.to_string(),
                 error: "operator rejected the action".to_string(),
@@ -446,6 +460,7 @@ impl ActionEngine {
     /// Each surviving pending action is logged with `outcome="rejected"` and
     /// `operator_approved=null` — session ended before the operator responded.
     pub async fn drain_pending_on_shutdown(&mut self) {
+        let ambient = self.ambient.clone();
         let guard = self.audit.lock().await;
         for (action_id, pending) in self.pending_actions.drain() {
             let category = PolicyEngine::classify(&pending.spec);
@@ -469,6 +484,7 @@ impl ActionEngine {
                     "Audit log append failed during shutdown drain"
                 );
             }
+            record_action_audit_event(&ambient, &entry, &pending.spec);
         }
     }
 
@@ -571,6 +587,7 @@ impl ActionEngine {
                 error!(action_id = %action_id, error = %e, "Audit log append failed");
             }
         }
+        self.record_action_audit_event(&entry, spec);
 
         if result.success {
             // This is the approval-path execution (handle_approval calls execute directly
@@ -743,6 +760,54 @@ impl ActionEngine {
     pub async fn audit_log_path(&self) -> PathBuf {
         self.audit.lock().await.path().to_path_buf()
     }
+
+    fn record_approval_requested_event(
+        &self,
+        action_id: &str,
+        spec: &ActionSpec,
+        category: ActionCategory,
+        description: &str,
+        expires_at_unix_ms: u64,
+        timeout_secs: u32,
+    ) {
+        if let Err(error) = self.ambient.record_event_and_evaluate(
+            "action",
+            "action_approval_requested",
+            AmbientSeverity::Warn,
+            "Action needs approval",
+            format!("{description} is waiting for operator approval."),
+            serde_json::json!({
+                "action_id": action_id,
+                "action_type": Self::type_str(spec),
+                "category": Self::category_str(category),
+                "description": Self::describe_for_ambient(spec),
+                "expires_at_unix_ms": expires_at_unix_ms,
+                "timeout_secs": timeout_secs
+            }),
+        ) {
+            warn!(action_id = %action_id, error = %error, "Ambient action approval event failed");
+        }
+    }
+
+    fn record_action_audit_event(&self, entry: &AuditEntry<'_>, spec: &ActionSpec) {
+        record_action_audit_event(&self.ambient, entry, spec);
+    }
+
+    fn describe_for_ambient(spec: &ActionSpec) -> String {
+        match spec {
+            ActionSpec::AppleScript { rationale, .. } => rationale
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("AppleScript: {value}"))
+                .unwrap_or_else(|| "AppleScript action".to_string()),
+            ActionSpec::Browser {
+                action: BrowserActionKind::Type { selector, .. },
+                ..
+            } => format!("Browser type into: {selector}"),
+            _ => Self::describe(spec),
+        }
+    }
 }
 
 // ── ActionResult ─────────────────────────────────────────────────────────────
@@ -775,6 +840,7 @@ pub struct ActionResult {
 #[derive(Clone)]
 pub struct ExecutorHandle {
     audit: Arc<tokio::sync::Mutex<AuditLog>>,
+    ambient: AmbientEventStore,
     browser: BrowserCoordinator,
 }
 
@@ -867,6 +933,7 @@ impl ExecutorHandle {
                 error!(action_id = %action_id, error = %e, "Audit log append failed (background)");
             }
         }
+        record_action_audit_event(&self.ambient, &entry, spec);
 
         if result.success {
             ActionOutcome::Completed {
@@ -894,6 +961,57 @@ impl ExecutorHandle {
                 error,
             }
         }
+    }
+}
+
+fn record_action_audit_event(
+    ambient: &AmbientEventStore,
+    entry: &AuditEntry<'_>,
+    spec: &ActionSpec,
+) {
+    let (kind, severity, title) = match entry.outcome {
+        "success" => (
+            "action_succeeded",
+            AmbientSeverity::Info,
+            "Action completed",
+        ),
+        "rejected" => ("action_denied", AmbientSeverity::Warn, "Action did not run"),
+        "timeout" => ("action_failed", AmbientSeverity::Warn, "Action timed out"),
+        _ => ("action_failed", AmbientSeverity::Warn, "Action failed"),
+    };
+    let description = ActionEngine::describe_for_ambient(spec);
+    let summary = match entry.outcome {
+        "success" => format!("{} completed successfully.", description),
+        "rejected" => format!("{} did not run.", description),
+        "timeout" => format!("{} timed out.", description),
+        _ => format!("{} failed.", description),
+    };
+
+    if let Err(error) = ambient.record_event_and_evaluate(
+        "action",
+        kind,
+        severity,
+        title,
+        summary,
+        serde_json::json!({
+            "action_id": entry.action_id,
+            "action_type": entry.r#type,
+            "category": entry.category,
+            "description": description,
+            "outcome": entry.outcome,
+            "exit_code": entry.exit_code,
+            "duration_ms": entry.duration_ms,
+            "operator_approved": entry.operator_approved,
+            "has_output": entry.output_preview.is_some(),
+            "has_error": entry.error.is_some()
+        }),
+    ) {
+        warn!(
+            action_id = %entry.action_id,
+            outcome = %entry.outcome,
+            error = %error,
+            "Ambient action audit event failed"
+        );
     }
 }
 
@@ -1146,6 +1264,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_safe_shell_records_ambient_success_event() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+
+        let outcome = engine
+            .submit(make_safe_shell(), "trace-ambient-success")
+            .await;
+        let action_id = match outcome {
+            ActionOutcome::Completed { action_id, .. } => action_id,
+            other => panic!("expected Completed, got: {other:?}"),
+        };
+
+        let (_, events) = engine
+            .ambient
+            .recent_events(5)
+            .expect("ambient events should be readable");
+        let event = events
+            .iter()
+            .find(|event| event.kind == "action_succeeded")
+            .expect("successful action should create an ambient event");
+        assert_eq!(event.source, "action");
+        assert_eq!(event.severity, AmbientSeverity::Info);
+        assert_eq!(event.payload["action_id"], action_id);
+        assert_eq!(event.payload["action_type"], "shell");
+        assert_eq!(event.payload["outcome"], "success");
+    }
+
+    #[tokio::test]
     async fn submit_cautious_file_write_executes_immediately() {
         let tmp = tempdir().unwrap();
         let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
@@ -1165,12 +1311,23 @@ mod tests {
 
         let outcome = engine.submit(make_destructive_shell(), "trace-003").await;
         match outcome {
-            ActionOutcome::PendingApproval { .. } => {
+            ActionOutcome::PendingApproval { action_id, .. } => {
                 assert_eq!(
                     engine.pending_actions.len(),
                     1,
                     "must be stored in pending_actions"
                 );
+                let (_, events) = engine
+                    .ambient
+                    .recent_events(5)
+                    .expect("ambient events should be readable");
+                let event = events
+                    .iter()
+                    .find(|event| event.kind == "action_approval_requested")
+                    .expect("pending destructive action should create an ambient event");
+                assert_eq!(event.severity, AmbientSeverity::Warn);
+                assert_eq!(event.payload["action_id"], action_id);
+                assert_eq!(event.payload["category"], "destructive");
             }
             other => panic!("expected PendingApproval, got: {other:?}"),
         }
@@ -1231,6 +1388,19 @@ mod tests {
             "got: {resolved:?}"
         );
         assert_eq!(engine.pending_actions.len(), 0);
+
+        let (_, events) = engine
+            .ambient
+            .recent_events(10)
+            .expect("ambient events should be readable");
+        let event = events
+            .iter()
+            .find(|event| event.kind == "action_denied")
+            .expect("operator denial should create an ambient event");
+        assert_eq!(event.severity, AmbientSeverity::Warn);
+        assert_eq!(event.payload["action_id"], action_id);
+        assert_eq!(event.payload["outcome"], "rejected");
+        assert_eq!(event.payload["operator_approved"], false);
     }
 
     #[tokio::test]

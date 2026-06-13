@@ -67,6 +67,16 @@ pass "Info.plist is valid"
 /bin/zsh -n "$LAUNCHER"
 pass "launcher shell syntax is valid"
 
+APPLESCRIPT="$TMP_ROOT/DexterLauncher.applescript"
+awk '
+    /^osascript <<OSA$/ { capture = 1; next }
+    /^OSA$/ { capture = 0 }
+    capture { print }
+' "$LAUNCHER" > "$APPLESCRIPT"
+[[ -s "$APPLESCRIPT" ]] || fail "launcher AppleScript heredoc was not extracted"
+osacompile -o "$TMP_ROOT/DexterLauncher.scpt" "$APPLESCRIPT" >/dev/null
+pass "launcher AppleScript syntax is valid"
+
 assert_plist_value "CFBundleExecutable" "DexterLauncher"
 assert_plist_value "CFBundleIdentifier" "com.jason.dexter.launcher"
 assert_plist_value "CFBundleName" "Dexter"

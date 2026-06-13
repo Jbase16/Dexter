@@ -44,6 +44,22 @@ pub struct AxElementInfo {
     pub is_sensitive: bool,
 }
 
+/// Bounded, privacy-light snapshot of a visible on-screen window.
+///
+/// This is intentionally metadata only: owner app, optional window title, bounds, and
+/// whether it belongs to the frontmost app. It lets Dexter reason about the operator's
+/// open windows without scraping arbitrary window contents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisibleWindowInfo {
+    pub owner_name: String,
+    pub title: Option<String>,
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub is_frontmost: bool,
+}
+
 /// Shell command context — the most recently completed command in the operator's shell.
 ///
 /// Populated by `CoreOrchestrator::handle_shell_command()` on receipt of
@@ -78,6 +94,13 @@ pub struct ContextSnapshot {
     /// to decide whether clipboard content is fresh enough to inject automatically
     /// (< CLIPBOARD_RECENCY_SECS) vs requiring an explicit operator reference.
     pub clipboard_changed_at: Option<DateTime<Utc>>,
+    /// Visible on-screen windows from the latest APP_FOCUSED event.
+    ///
+    /// This is not a content scrape. Swift sends top-level window metadata from
+    /// CGWindowList so the model can distinguish "the Claude window" from "the
+    /// Terminal log window" or "a browser window" when the operator says "this
+    /// window" or "my open windows".
+    pub visible_windows: Vec<VisibleWindowInfo>,
     /// Most recently completed shell command. None until the first InternalEvent::ShellCommand
     /// arrives from the zsh hook listener. Overwritten on each command completion.
     /// Injected as [Shell: ...] in prepare_messages_for_inference when fresh.
@@ -110,6 +133,8 @@ struct AppFocusedPayload {
     bundle_id: String,
     name: String,
     ax_element: Option<AxElementPayload>,
+    #[serde(default)]
+    visible_windows: Vec<VisibleWindowPayload>,
 }
 
 /// Deserialized from AX_ELEMENT_CHANGED event payload JSON, and from the
@@ -120,6 +145,18 @@ struct AxElementPayload {
     label: Option<String>,
     value_preview: Option<String>,
     is_sensitive: bool,
+}
+
+/// Deserialized from visible_windows inside an APP_FOCUSED payload.
+#[derive(Deserialize)]
+struct VisibleWindowPayload {
+    owner_name: String,
+    title: Option<String>,
+    x: Option<i64>,
+    y: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    is_frontmost: bool,
 }
 
 // ── ContextObserver implementation ────────────────────────────────────────────
@@ -134,6 +171,7 @@ impl ContextObserver {
             is_screen_locked: false,
             clipboard_text: None,
             clipboard_changed_at: None,
+            visible_windows: Vec::new(),
             last_shell_command: None,
             snapshot_hash: 0,
             last_updated: Utc::now(),
@@ -167,6 +205,11 @@ impl ContextObserver {
 
         self.snapshot.app_bundle_id = Some(bundle_id);
         self.snapshot.app_name = Some(payload.name);
+        self.snapshot.visible_windows = payload
+            .visible_windows
+            .into_iter()
+            .filter_map(window_payload_to_info)
+            .collect();
         // Phase 36: terminal-emulator scrollback leaks our own log output back into
         // the model's context ("the screen shows a terminal window with a SQLite
         // query being executed..."). Strip value_preview for any terminal bundle;
@@ -346,10 +389,19 @@ impl ContextObserver {
             }
         });
 
-        Some(match element_part {
+        let focus = match element_part {
             Some(part) => format!("{app_name} \u{2014} {part}"),
             None => app_name.to_string(),
-        })
+        };
+
+        if self.snapshot.visible_windows.is_empty() {
+            return Some(focus);
+        }
+
+        Some(format!(
+            "{focus}; visible windows: {}",
+            format_visible_windows_inline(&self.snapshot.visible_windows, 5)
+        ))
     }
 }
 
@@ -414,6 +466,92 @@ fn ax_payload_to_info(p: AxElementPayload) -> AxElementInfo {
     }
 }
 
+fn window_payload_to_info(p: VisibleWindowPayload) -> Option<VisibleWindowInfo> {
+    let owner_name = p.owner_name.trim();
+    if owner_name.is_empty() {
+        return None;
+    }
+
+    let title = p
+        .title
+        .map(|title| compact_window_text(&title, 80))
+        .filter(|title| !title.is_empty());
+
+    Some(VisibleWindowInfo {
+        owner_name: compact_window_text(owner_name, 48),
+        title,
+        x: p.x.unwrap_or_default(),
+        y: p.y.unwrap_or_default(),
+        width: p.width.unwrap_or_default(),
+        height: p.height.unwrap_or_default(),
+        is_frontmost: p.is_frontmost,
+    })
+}
+
+pub(crate) fn format_visible_windows_inline(windows: &[VisibleWindowInfo], limit: usize) -> String {
+    if windows.is_empty() {
+        return String::new();
+    }
+
+    if limit == 0 {
+        return format!("{} visible windows", windows.len());
+    }
+
+    let mut grouped: Vec<(String, bool, usize)> = Vec::new();
+    for window in windows {
+        let label = visible_window_label(window);
+        if let Some((_, is_frontmost, count)) = grouped
+            .iter_mut()
+            .find(|(existing_label, _, _)| existing_label == &label)
+        {
+            *is_frontmost |= window.is_frontmost;
+            *count += 1;
+        } else {
+            grouped.push((label, window.is_frontmost, 1));
+        }
+    }
+
+    let mut parts: Vec<String> = grouped
+        .iter()
+        .take(limit)
+        .map(|(label, is_frontmost, count)| {
+            let front = if *is_frontmost { "frontmost " } else { "" };
+            if *count > 1 {
+                format!("{front}{label} ({count} windows)")
+            } else {
+                format!("{front}{label}")
+            }
+        })
+        .collect();
+
+    if grouped.len() > limit {
+        let remaining_windows: usize = grouped.iter().skip(limit).map(|(_, _, count)| *count).sum();
+        parts.push(format!("+{} more", remaining_windows));
+    }
+
+    parts.join("; ")
+}
+
+fn visible_window_label(window: &VisibleWindowInfo) -> String {
+    let title = window.title.as_deref().unwrap_or("").trim();
+    if title.is_empty() {
+        window.owner_name.clone()
+    } else {
+        format!("{} \"{}\"", window.owner_name, title)
+    }
+}
+
+fn compact_window_text(value: &str, max_chars: usize) -> String {
+    let trimmed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.chars().count() <= max_chars {
+        trimmed
+    } else {
+        let mut out: String = trimmed.chars().take(max_chars).collect();
+        out.push_str("...");
+        out
+    }
+}
+
 /// Compute a `u64` hash over the semantic fields of a `ContextSnapshot`.
 ///
 /// `DefaultHasher` is sufficient — this hash is only used as a cheap local
@@ -431,6 +569,15 @@ fn compute_hash(s: &ContextSnapshot) -> u64 {
     }
     s.is_screen_locked.hash(&mut h);
     s.clipboard_text.as_deref().unwrap_or("").hash(&mut h);
+    for window in &s.visible_windows {
+        window.owner_name.hash(&mut h);
+        window.title.as_deref().unwrap_or("").hash(&mut h);
+        window.x.hash(&mut h);
+        window.y.hash(&mut h);
+        window.width.hash(&mut h);
+        window.height.hash(&mut h);
+        window.is_frontmost.hash(&mut h);
+    }
     // Hash shell command content (not received_at — timestamp changes don't represent
     // a semantic state change; only a different command/cwd/exit_code does).
     if let Some(shell) = &s.last_shell_command {
@@ -451,6 +598,12 @@ mod tests {
 
     fn app_focused_payload(bundle_id: &str, name: &str) -> String {
         format!(r#"{{"bundle_id":"{bundle_id}","name":"{name}"}}"#)
+    }
+
+    fn app_focused_payload_with_windows(bundle_id: &str, name: &str) -> String {
+        format!(
+            r#"{{"bundle_id":"{bundle_id}","name":"{name}","visible_windows":[{{"owner_name":"Claude","title":"Dexter debugging","x":20,"y":40,"width":1200,"height":900,"is_frontmost":true}},{{"owner_name":"Terminal","title":"Dexter Live Logs","x":1300,"y":80,"width":900,"height":700,"is_frontmost":false}}]}}"#
+        )
     }
 
     fn app_focused_payload_with_element(
@@ -497,6 +650,84 @@ mod tests {
         assert_eq!(snap.app_bundle_id.as_deref(), Some("com.apple.Xcode"));
         assert_eq!(snap.app_name.as_deref(), Some("Xcode"));
         assert!(snap.focused_element.is_none());
+        assert!(snap.visible_windows.is_empty());
+    }
+
+    #[test]
+    fn update_app_focused_stores_visible_windows() {
+        let mut obs = ContextObserver::new();
+        let changed = obs.update_from_app_focused(&app_focused_payload_with_windows(
+            "com.anthropic.claudefordesktop",
+            "Claude",
+        ));
+        assert!(changed, "Window metadata should change the snapshot");
+
+        let snap = obs.snapshot();
+        assert_eq!(snap.visible_windows.len(), 2);
+        assert_eq!(snap.visible_windows[0].owner_name, "Claude");
+        assert_eq!(
+            snap.visible_windows[0].title.as_deref(),
+            Some("Dexter debugging")
+        );
+        assert!(snap.visible_windows[0].is_frontmost);
+        assert_eq!(snap.visible_windows[1].owner_name, "Terminal");
+        assert_eq!(
+            snap.visible_windows[1].title.as_deref(),
+            Some("Dexter Live Logs")
+        );
+    }
+
+    #[test]
+    fn context_summary_includes_visible_windows() {
+        let mut obs = ContextObserver::new();
+        obs.update_from_app_focused(&app_focused_payload_with_windows(
+            "com.anthropic.claudefordesktop",
+            "Claude",
+        ));
+
+        let summary = obs.context_summary().expect("summary should be present");
+        assert!(summary.contains("Claude"));
+        assert!(summary.contains("visible windows: frontmost Claude \"Dexter debugging\""));
+        assert!(summary.contains("Terminal \"Dexter Live Logs\""));
+    }
+
+    #[test]
+    fn visible_window_formatter_groups_duplicate_untitled_windows() {
+        let windows = vec![
+            VisibleWindowInfo {
+                owner_name: "Terminal".to_string(),
+                title: None,
+                x: 0,
+                y: 0,
+                width: 900,
+                height: 700,
+                is_frontmost: true,
+            },
+            VisibleWindowInfo {
+                owner_name: "Finder".to_string(),
+                title: None,
+                x: 40,
+                y: 40,
+                width: 900,
+                height: 700,
+                is_frontmost: false,
+            },
+            VisibleWindowInfo {
+                owner_name: "Terminal".to_string(),
+                title: None,
+                x: 100,
+                y: 100,
+                width: 900,
+                height: 700,
+                is_frontmost: false,
+            },
+        ];
+
+        let formatted = format_visible_windows_inline(&windows, 6);
+        assert_eq!(
+            formatted, "frontmost Terminal (2 windows); Finder",
+            "duplicate untitled windows should not spam the context line"
+        );
     }
 
     #[test]

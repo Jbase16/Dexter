@@ -169,10 +169,13 @@ pub const PRIMARY_MODEL_KEEP_ALIVE: &str = "30m";
 ///   ~15s margin against an observed ≈45s reclamation floor. Cost still trivial:
 ///   `num_predict: 1` is ~150 ms GPU time, so 30 s cadence = ~0.5 % duty cycle.
 ///
-/// If 30 s still fails: the real fix is `mlock`-ing Ollama's weight pages
-/// (requires patching Ollama) or moving to a supervisor that keeps a fixed slice
-/// of VRAM carved out for PRIMARY. Going below 30 s starts to feel pathological;
-/// at that point structural mitigation is more honest than chasing the cadence.
+/// If 30 s still fails: the structural mitigation is `system::residency`, which
+/// maps the same GGUF blob inode from Dexter and wires those shared UBC pages
+/// resident with `mlock` while forcing Ollama requests to use mmap. That path is
+/// configured conservatively as pin+keepalive until an idle-pressure
+/// discriminator proves pin-alone is enough on this machine. Going below 30 s
+/// starts to feel pathological; at that point trust residency evidence rather
+/// than chasing the cadence.
 ///
 /// Cost: one tiny Ollama request every 30 seconds — negligible compared to the
 /// 20+ second cold-load penalty it prevents. The ping uses the inference engine's

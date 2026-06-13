@@ -456,6 +456,30 @@ struct Dexter_V1_HealthResponse: @unchecked Sendable {
     set {_uniqueStorage()._operatorContextMarkdown = newValue}
   }
 
+  /// Operator-visible model residency state. This reports whether the daemon's
+  /// cross-process weight pinner is configured and currently holding PRIMARY's
+  /// GGUF blob resident. It is diagnostic only; model readiness is still
+  /// reported by the warm flags above.
+  var residencyMode: String {
+    get {_storage._residencyMode}
+    set {_uniqueStorage()._residencyMode = newValue}
+  }
+
+  var primaryResidencyPinned: Bool {
+    get {_storage._primaryResidencyPinned}
+    set {_uniqueStorage()._primaryResidencyPinned = newValue}
+  }
+
+  var primaryResidencyWiredBytes: UInt64 {
+    get {_storage._primaryResidencyWiredBytes}
+    set {_uniqueStorage()._primaryResidencyWiredBytes = newValue}
+  }
+
+  var residencyLockPoisoned: Bool {
+    get {_storage._residencyLockPoisoned}
+    set {_uniqueStorage()._residencyLockPoisoned = newValue}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -517,6 +541,132 @@ struct Dexter_V1_ActionHistoryResponse: Sendable {
   /// Daemon-owned latest-action summary markdown. Kept here so the Swift HUD
   /// does not duplicate Rust's operator-facing action evidence rules.
   var latestActionSummaryMarkdown: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AmbientHistoryRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  /// Defaults to 20; daemon caps oversized requests.
+  var limit: UInt32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AmbientHistoryResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var eventLogPath: String = String()
+
+  /// Newest first
+  var events: [Dexter_V1_AmbientEvent] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AmbientInboxRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  /// Defaults to 5; daemon caps oversized requests.
+  var limit: UInt32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AmbientInboxResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var eventLogPath: String = String()
+
+  var acknowledgementPath: String = String()
+
+  /// Newest first
+  var events: [Dexter_V1_AmbientEvent] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AcknowledgeAmbientEventsRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var eventIds: [String] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AcknowledgeAmbientEventsResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var traceID: String = String()
+
+  var acknowledgementPath: String = String()
+
+  var newlyAcknowledgedCount: UInt32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct Dexter_V1_AmbientEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var eventID: String = String()
+
+  var timestamp: String = String()
+
+  var source: String = String()
+
+  var kind: String = String()
+
+  /// info | warn | critical
+  var severity: String = String()
+
+  var title: String = String()
+
+  var summary: String = String()
+
+  /// new | acknowledged | dismissed
+  var status: String = String()
+
+  var payloadJson: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1204,7 +1354,7 @@ extension Dexter_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".HealthResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0\u{3}operator_context_markdown\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0\u{3}operator_context_markdown\0\u{3}residency_mode\0\u{3}primary_residency_pinned\0\u{3}primary_residency_wired_bytes\0\u{3}residency_lock_poisoned\0")
 
   fileprivate class _StorageClass {
     var _traceID: String = String()
@@ -1228,6 +1378,10 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
     var _browserWorker: String = String()
     var _disk: [Dexter_V1_DiskHealth] = []
     var _operatorContextMarkdown: String = String()
+    var _residencyMode: String = String()
+    var _primaryResidencyPinned: Bool = false
+    var _primaryResidencyWiredBytes: UInt64 = 0
+    var _residencyLockPoisoned: Bool = false
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1259,6 +1413,10 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       _browserWorker = source._browserWorker
       _disk = source._disk
       _operatorContextMarkdown = source._operatorContextMarkdown
+      _residencyMode = source._residencyMode
+      _primaryResidencyPinned = source._primaryResidencyPinned
+      _primaryResidencyWiredBytes = source._primaryResidencyWiredBytes
+      _residencyLockPoisoned = source._residencyLockPoisoned
     }
   }
 
@@ -1298,6 +1456,10 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         case 19: try { try decoder.decodeSingularStringField(value: &_storage._browserWorker) }()
         case 20: try { try decoder.decodeRepeatedMessageField(value: &_storage._disk) }()
         case 21: try { try decoder.decodeSingularStringField(value: &_storage._operatorContextMarkdown) }()
+        case 22: try { try decoder.decodeSingularStringField(value: &_storage._residencyMode) }()
+        case 23: try { try decoder.decodeSingularBoolField(value: &_storage._primaryResidencyPinned) }()
+        case 24: try { try decoder.decodeSingularUInt64Field(value: &_storage._primaryResidencyWiredBytes) }()
+        case 25: try { try decoder.decodeSingularBoolField(value: &_storage._residencyLockPoisoned) }()
         default: break
         }
       }
@@ -1369,6 +1531,18 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       if !_storage._operatorContextMarkdown.isEmpty {
         try visitor.visitSingularStringField(value: _storage._operatorContextMarkdown, fieldNumber: 21)
       }
+      if !_storage._residencyMode.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._residencyMode, fieldNumber: 22)
+      }
+      if _storage._primaryResidencyPinned != false {
+        try visitor.visitSingularBoolField(value: _storage._primaryResidencyPinned, fieldNumber: 23)
+      }
+      if _storage._primaryResidencyWiredBytes != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._primaryResidencyWiredBytes, fieldNumber: 24)
+      }
+      if _storage._residencyLockPoisoned != false {
+        try visitor.visitSingularBoolField(value: _storage._residencyLockPoisoned, fieldNumber: 25)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1399,6 +1573,10 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if _storage._browserWorker != rhs_storage._browserWorker {return false}
         if _storage._disk != rhs_storage._disk {return false}
         if _storage._operatorContextMarkdown != rhs_storage._operatorContextMarkdown {return false}
+        if _storage._residencyMode != rhs_storage._residencyMode {return false}
+        if _storage._primaryResidencyPinned != rhs_storage._primaryResidencyPinned {return false}
+        if _storage._primaryResidencyWiredBytes != rhs_storage._primaryResidencyWiredBytes {return false}
+        if _storage._residencyLockPoisoned != rhs_storage._residencyLockPoisoned {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -1538,6 +1716,306 @@ extension Dexter_V1_ActionHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.auditLogPath != rhs.auditLogPath {return false}
     if lhs.receipts != rhs.receipts {return false}
     if lhs.latestActionSummaryMarkdown != rhs.latestActionSummaryMarkdown {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AmbientHistoryRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AmbientHistoryRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}limit\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.limit) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if self.limit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.limit, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AmbientHistoryRequest, rhs: Dexter_V1_AmbientHistoryRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.limit != rhs.limit {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AmbientHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AmbientHistoryResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}event_log_path\0\u{1}events\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.eventLogPath) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.events) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if !self.eventLogPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.eventLogPath, fieldNumber: 2)
+    }
+    if !self.events.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.events, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AmbientHistoryResponse, rhs: Dexter_V1_AmbientHistoryResponse) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.eventLogPath != rhs.eventLogPath {return false}
+    if lhs.events != rhs.events {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AmbientInboxRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AmbientInboxRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{1}limit\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.limit) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if self.limit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.limit, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AmbientInboxRequest, rhs: Dexter_V1_AmbientInboxRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.limit != rhs.limit {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AmbientInboxResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AmbientInboxResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}event_log_path\0\u{3}acknowledgement_path\0\u{1}events\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.eventLogPath) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.acknowledgementPath) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.events) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if !self.eventLogPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.eventLogPath, fieldNumber: 2)
+    }
+    if !self.acknowledgementPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.acknowledgementPath, fieldNumber: 3)
+    }
+    if !self.events.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.events, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AmbientInboxResponse, rhs: Dexter_V1_AmbientInboxResponse) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.eventLogPath != rhs.eventLogPath {return false}
+    if lhs.acknowledgementPath != rhs.acknowledgementPath {return false}
+    if lhs.events != rhs.events {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AcknowledgeAmbientEventsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AcknowledgeAmbientEventsRequest"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}event_ids\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeRepeatedStringField(value: &self.eventIds) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if !self.eventIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.eventIds, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AcknowledgeAmbientEventsRequest, rhs: Dexter_V1_AcknowledgeAmbientEventsRequest) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.eventIds != rhs.eventIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AcknowledgeAmbientEventsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AcknowledgeAmbientEventsResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}acknowledgement_path\0\u{3}newly_acknowledged_count\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.acknowledgementPath) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.newlyAcknowledgedCount) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.traceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.traceID, fieldNumber: 1)
+    }
+    if !self.acknowledgementPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.acknowledgementPath, fieldNumber: 2)
+    }
+    if self.newlyAcknowledgedCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.newlyAcknowledgedCount, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AcknowledgeAmbientEventsResponse, rhs: Dexter_V1_AcknowledgeAmbientEventsResponse) -> Bool {
+    if lhs.traceID != rhs.traceID {return false}
+    if lhs.acknowledgementPath != rhs.acknowledgementPath {return false}
+    if lhs.newlyAcknowledgedCount != rhs.newlyAcknowledgedCount {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Dexter_V1_AmbientEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AmbientEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{1}timestamp\0\u{1}source\0\u{1}kind\0\u{1}severity\0\u{1}title\0\u{1}summary\0\u{1}status\0\u{3}payload_json\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.eventID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.timestamp) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.source) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.severity) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.summary) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.payloadJson) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.eventID.isEmpty {
+      try visitor.visitSingularStringField(value: self.eventID, fieldNumber: 1)
+    }
+    if !self.timestamp.isEmpty {
+      try visitor.visitSingularStringField(value: self.timestamp, fieldNumber: 2)
+    }
+    if !self.source.isEmpty {
+      try visitor.visitSingularStringField(value: self.source, fieldNumber: 3)
+    }
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 4)
+    }
+    if !self.severity.isEmpty {
+      try visitor.visitSingularStringField(value: self.severity, fieldNumber: 5)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 6)
+    }
+    if !self.summary.isEmpty {
+      try visitor.visitSingularStringField(value: self.summary, fieldNumber: 7)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 8)
+    }
+    if !self.payloadJson.isEmpty {
+      try visitor.visitSingularStringField(value: self.payloadJson, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Dexter_V1_AmbientEvent, rhs: Dexter_V1_AmbientEvent) -> Bool {
+    if lhs.eventID != rhs.eventID {return false}
+    if lhs.timestamp != rhs.timestamp {return false}
+    if lhs.source != rhs.source {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.severity != rhs.severity {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.summary != rhs.summary {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.payloadJson != rhs.payloadJson {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

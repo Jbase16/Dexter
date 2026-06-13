@@ -1,6 +1,7 @@
 mod action;
 mod action_diagnostic;
 mod action_evidence;
+mod ambient;
 mod browser;
 mod config;
 mod constants;
@@ -40,7 +41,10 @@ async fn main() -> Result<()> {
         let args: Vec<String> = std::env::args().collect();
         if let Some(pos) = args.iter().position(|a| a == "--residency-pin-child") {
             let path = args.get(pos + 1).cloned().unwrap_or_default();
-            let secs = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(600);
+            let secs = args
+                .get(pos + 2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600);
             system::residency::run_pin_child(&path, secs);
             return Ok(());
         }

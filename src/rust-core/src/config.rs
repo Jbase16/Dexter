@@ -50,6 +50,9 @@ pub struct DexterConfig {
     /// Global activation hotkey parameters. Phase 18 — pushed to Swift via ConfigSync.
     #[serde(default)]
     pub hotkey: HotkeyConfig,
+    /// Model-weight residency pinning policy (see `system::residency`).
+    #[serde(default)]
+    pub residency: ResidencyConfig,
 }
 
 impl Default for DexterConfig {
@@ -61,8 +64,59 @@ impl Default for DexterConfig {
             inference: InferenceConfig::default(),
             behavior: BehaviorConfig::default(),
             hotkey: HotkeyConfig::default(),
+            residency: ResidencyConfig::default(),
         }
     }
+}
+
+// ── [residency] ───────────────────────────────────────────────────────────────
+
+/// How `system::residency` manages PRIMARY weight residency.
+///
+/// The default is deliberately conservative. Cross-process page-pinning is a
+/// proven OS mechanism, but whether it ELIMINATES the keepalive cold-loads
+/// depends on an unverified fact (does macOS reclaim a loaded model's pages on
+/// idle-under-pressure, or does Ollama unload the model?). Until that
+/// discriminator is run, we pin AND keep the keepalive ping — belt and
+/// suspenders — rather than betting on the pin alone.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidencyMode {
+    /// No pinning. Spawn the legacy keepalive ping (pre-residency behaviour).
+    Off,
+    /// Pin PRIMARY's weights resident AND run the keepalive ping. The safe
+    /// default: the pin is cheap and the ping is a backstop if the pin's
+    /// idle-protection assumption turns out not to hold on this machine.
+    #[default]
+    PinKeepalive,
+    /// Pin PRIMARY and RETIRE the keepalive ping once the pin succeeds. Only
+    /// select this after the idle-pressure discriminator confirms the pin alone
+    /// keeps PRIMARY resident under sustained memory pressure.
+    PinRetireKeepalive,
+}
+
+impl ResidencyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResidencyMode::Off => "off",
+            ResidencyMode::PinKeepalive => "pin_keepalive",
+            ResidencyMode::PinRetireKeepalive => "pin_retire_keepalive",
+        }
+    }
+    /// Whether residency pinning should be attempted at all.
+    pub fn pins(self) -> bool {
+        !matches!(self, ResidencyMode::Off)
+    }
+    /// Whether the keepalive ping should still run after a successful pin.
+    pub fn keepalive_after_pin(self) -> bool {
+        matches!(self, ResidencyMode::PinKeepalive)
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ResidencyConfig {
+    #[serde(default)]
+    pub mode: ResidencyMode,
 }
 
 // ── [core] ────────────────────────────────────────────────────────────────────
@@ -637,6 +691,46 @@ mod tests {
     fn inference_default_url_matches_constant() {
         let cfg = InferenceConfig::default();
         assert_eq!(cfg.ollama_base_url, OLLAMA_BASE_URL);
+    }
+
+    #[test]
+    fn residency_mode_defaults_to_pin_keepalive() {
+        // The safe default: pin AND keep the keepalive ping until the
+        // idle-pressure discriminator proves the pin alone suffices.
+        let cfg = DexterConfig::default();
+        assert_eq!(cfg.residency.mode, ResidencyMode::PinKeepalive);
+        assert!(cfg.residency.mode.pins());
+        assert!(cfg.residency.mode.keepalive_after_pin());
+    }
+
+    #[test]
+    fn residency_mode_parses_all_variants_from_toml() {
+        for (s, expected, pins, keepalive) in [
+            ("off", ResidencyMode::Off, false, false),
+            ("pin_keepalive", ResidencyMode::PinKeepalive, true, true),
+            (
+                "pin_retire_keepalive",
+                ResidencyMode::PinRetireKeepalive,
+                true,
+                false,
+            ),
+        ] {
+            let toml = format!("[residency]\nmode = \"{s}\"\n");
+            let cfg: DexterConfig = toml::from_str(&toml).expect("valid TOML");
+            assert_eq!(cfg.residency.mode, expected, "mode {s}");
+            assert_eq!(cfg.residency.mode.pins(), pins, "pins() for {s}");
+            assert_eq!(
+                cfg.residency.mode.keepalive_after_pin(),
+                keepalive,
+                "keepalive_after_pin() for {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn residency_absent_section_uses_default() {
+        let cfg: DexterConfig = toml::from_str("[models]\nfast = \"x\"\n").expect("valid TOML");
+        assert_eq!(cfg.residency.mode, ResidencyMode::PinKeepalive);
     }
 
     #[test]

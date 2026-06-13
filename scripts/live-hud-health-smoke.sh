@@ -264,9 +264,13 @@ run_assertions() {
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] healthRequest" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Health RPC OK" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] ActionHistory RPC OK" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[DexterClient] AmbientHistory RPC OK" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "Residency:" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "Current Context" || ok=1
     assert_contains_any "$name" "$SWIFT_LOG" "Dexter can:" "No focused app context" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "Latest Action Summary" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "Recent Ambient Events" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "action_succeeded" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "The latest audited action executed successfully." || ok=1
     assert_contains "$name" "$SWIFT_LOG" "Evidence: Succeeded:" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "$HUD_STATUS_TOKEN" || ok=1
@@ -275,6 +279,7 @@ run_assertions() {
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Restart RPC OK target=$RESTART_COMPONENT success=true" || ok=1
     assert_contains "$name" "$CORE_LOG" "Health snapshot requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Action history requested" || ok=1
+    assert_contains "$name" "$CORE_LOG" "Ambient history requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Component restart requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Component restart complete" || ok=1
 

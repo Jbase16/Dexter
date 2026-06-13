@@ -47,6 +47,7 @@ FOCUSED_SLICES = (
         "Runtime health",
         "live-smoke-runtime-health",
         (
+            "live-smoke-residency-proof",
             "live-smoke-startup-readiness",
             "live-smoke-operator-status",
             "live-smoke-hud-health",

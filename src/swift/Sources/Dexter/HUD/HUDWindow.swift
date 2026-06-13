@@ -647,6 +647,11 @@ final class HUDWindow: NSPanel {
         showUtilityMarkdown(markdown, restartTargets: [])
     }
 
+    func showAmbientNotice(_ markdown: String) {
+        HUDSmokeLog.log("showAmbientNotice chars=\(markdown.count)")
+        showUtilityMarkdown(markdown, restartTargets: [])
+    }
+
     func showNewSessionStarting() {
         HUDSmokeLog.log("showNewSessionStarting")
         showUtilityMarkdown("""

@@ -237,6 +237,16 @@ actor DexterClient {
         defaultValue: 600,
         maxValue: 86_400
     )
+    private static let proactiveAmbientInboxInitialDelaySecs = boundedEnvSeconds(
+        "DEXTER_PROACTIVE_AMBIENT_INITIAL_DELAY_SECS",
+        defaultValue: 12,
+        maxValue: 300
+    )
+    private static let proactiveAmbientInboxPollIntervalSecs = boundedEnvSeconds(
+        "DEXTER_PROACTIVE_AMBIENT_POLL_INTERVAL_SECS",
+        defaultValue: 60,
+        maxValue: 86_400
+    )
 
     // AudioPlayer persists across session reconnects — the engine is started once
     // and stays running for the process lifetime. Declared as a `let` constant so
@@ -269,6 +279,7 @@ actor DexterClient {
     private let smokeActionApprovalGate = SmokeActionApprovalGate()
 
     private var proactiveHealthProbeTask: Task<Void, Never>?
+    private var proactiveAmbientInboxTask: Task<Void, Never>?
     private var lastSurfacedHealthComponents = Set<String>()
     private var lastHealthSurfaceAt: Date?
     private var turnRevision: UInt64 = 0
@@ -362,6 +373,7 @@ actor DexterClient {
             // guard in start() makes repeated calls on reconnect a no-op.
             audioPlayer.start()
             scheduleProactiveHealthProbe(window: window)
+            scheduleProactiveAmbientInboxProbe(window: window)
 
             // Phase 18: wire playback-complete callback so Rust knows when TTS audio
             // finishes playing (not just synthesising). Set before the gRPC stream opens
@@ -403,6 +415,8 @@ actor DexterClient {
                 self.currentSessionID  = nil
                 self.proactiveHealthProbeTask?.cancel()
                 self.proactiveHealthProbeTask = nil
+                self.proactiveAmbientInboxTask?.cancel()
+                self.proactiveAmbientInboxTask = nil
             }
 
             // ── EventBridge lifecycle ─────────────────────────────────────────
@@ -878,10 +892,26 @@ actor DexterClient {
                 print("[DexterClient] ActionHistory RPC unavailable for status error=\(error)")
             }
 
+            var ambientHistory: Dexter_V1_AmbientHistoryResponse?
+            var ambientHistoryError: String?
+            do {
+                let history = try await requestAmbientHistory(limit: actionLimit)
+                let firstKind = history.events.first
+                    .map { Self.receiptLine($0.kind, fallback: "ambient event") }
+                    ?? "none"
+                print("[DexterClient] AmbientHistory RPC OK events=\(history.events.count) first=\(firstKind.prefix(80))")
+                ambientHistory = history
+            } catch {
+                ambientHistoryError = "\(error)"
+                print("[DexterClient] AmbientHistory RPC unavailable for status error=\(error)")
+            }
+
             return Self.operatorStatusHUDReport(
                 for: health,
                 actionHistory: actionHistory,
-                actionHistoryError: actionHistoryError
+                actionHistoryError: actionHistoryError,
+                ambientHistory: ambientHistory,
+                ambientHistoryError: ambientHistoryError
             )
         } catch {
             return DexterHealthHUDReport(
@@ -1013,6 +1043,57 @@ actor DexterClient {
         }
     }
 
+    private func requestAmbientHistory(limit: UInt32) async throws -> Dexter_V1_AmbientHistoryResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.ambientHistory(
+                Dexter_V1_AmbientHistoryRequest.with {
+                    $0.traceID = UUID().uuidString
+                    $0.limit = limit
+                }
+            )
+        }
+    }
+
+    private func requestAmbientInbox(limit: UInt32) async throws -> Dexter_V1_AmbientInboxResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.ambientInbox(
+                Dexter_V1_AmbientInboxRequest.with {
+                    $0.traceID = UUID().uuidString
+                    $0.limit = limit
+                }
+            )
+        }
+    }
+
+    private func acknowledgeAmbientEvents(_ eventIDs: [String]) async throws -> Dexter_V1_AcknowledgeAmbientEventsResponse {
+        try await withGRPCClient(
+            transport: .http2NIOPosix(
+                target: .unixDomainSocket(path: Self.socketPath, authority: "localhost"),
+                transportSecurity: .plaintext
+            )
+        ) { client in
+            let stub = Dexter_V1_DexterService.Client(wrapping: client)
+            return try await stub.acknowledgeAmbientEvents(
+                Dexter_V1_AcknowledgeAmbientEventsRequest.with {
+                    $0.traceID = UUID().uuidString
+                    $0.eventIds = eventIDs
+                }
+            )
+        }
+    }
+
     func restartWorkerAndFetchHealthReport(_ target: DexterWorkerRestartTarget) async -> DexterHealthHUDReport {
         do {
             let response = try await requestWorkerRestart(target)
@@ -1117,6 +1198,46 @@ actor DexterClient {
 
         lastHealthSurfaceAt = now
         return true
+    }
+
+    private func scheduleProactiveAmbientInboxProbe(window: FloatingWindow) {
+        proactiveAmbientInboxTask?.cancel()
+        proactiveAmbientInboxTask = Task { [weak self, window] in
+            try? await Task.sleep(for: .seconds(Self.proactiveAmbientInboxInitialDelaySecs))
+            while !Task.isCancelled {
+                await self?.runProactiveAmbientInboxProbe(window: window)
+                try? await Task.sleep(for: .seconds(Self.proactiveAmbientInboxPollIntervalSecs))
+            }
+        }
+    }
+
+    private func runProactiveAmbientInboxProbe(window: FloatingWindow) async {
+        do {
+            let inbox = try await requestAmbientInbox(limit: 3)
+            guard !Task.isCancelled else { return }
+
+            guard !inbox.events.isEmpty else {
+                print("[DexterClient] Proactive ambient inbox silent events=0")
+                return
+            }
+
+            let eventIDs = inbox.events.map(\.eventID).filter { !$0.isEmpty }
+            print("[DexterClient] Proactive ambient inbox surfacing events=\(inbox.events.count)")
+            let markdown = Self.ambientInboxMarkdown(inbox)
+            await MainActor.run {
+                window.hud.showAmbientNotice(markdown)
+            }
+
+            guard !eventIDs.isEmpty else { return }
+            do {
+                let ack = try await acknowledgeAmbientEvents(eventIDs)
+                print("[DexterClient] Ambient inbox acknowledged count=\(ack.newlyAcknowledgedCount)")
+            } catch {
+                print("[DexterClient] Ambient inbox acknowledgement skipped error=\(error)")
+            }
+        } catch {
+            print("[DexterClient] Proactive ambient inbox skipped error=\(error)")
+        }
     }
 
     /// Inject an operator event into the active session stream.
@@ -1274,13 +1395,17 @@ extension DexterClient {
     private static func operatorStatusHUDReport(
         for health: Dexter_V1_HealthResponse,
         actionHistory: Dexter_V1_ActionHistoryResponse?,
-        actionHistoryError: String?
+        actionHistoryError: String?,
+        ambientHistory: Dexter_V1_AmbientHistoryResponse?,
+        ambientHistoryError: String?
     ) -> DexterHealthHUDReport {
         DexterHealthHUDReport(
             markdown: operatorStatusMarkdown(
                 for: health,
                 actionHistory: actionHistory,
-                actionHistoryError: actionHistoryError
+                actionHistoryError: actionHistoryError,
+                ambientHistory: ambientHistory,
+                ambientHistoryError: ambientHistoryError
             ),
             restartTargets: restartTargets(for: health)
         )
@@ -1408,10 +1533,35 @@ extension DexterClient {
         }
     }
 
+    private static func ambientInboxMarkdown(_ response: Dexter_V1_AmbientInboxResponse) -> String {
+        guard !response.events.isEmpty else {
+            return """
+            ### Dexter Notices
+
+            No new ambient notices.
+            """
+        }
+
+        let rows = response.events
+            .map(ambientEventLine)
+            .joined(separator: "\n")
+        let eventPath = receiptLine(response.eventLogPath, fallback: "ambient event path unavailable")
+
+        return """
+        ### Dexter Notices
+
+        \(rows)
+
+        Events: `\(eventPath)`
+        """
+    }
+
     private static func operatorStatusMarkdown(
         for health: Dexter_V1_HealthResponse,
         actionHistory: Dexter_V1_ActionHistoryResponse?,
-        actionHistoryError: String?
+        actionHistoryError: String?,
+        ambientHistory: Dexter_V1_AmbientHistoryResponse?,
+        ambientHistoryError: String?
     ) -> String {
         let status = cleanStatus(health.status)
         let attentionComponents = displayAttentionComponents(for: health)
@@ -1446,6 +1596,7 @@ extension DexterClient {
         lines.append("- Fast: \(modelName(health.fastModel)) - \(modelWarmLabel(health.fastModelWarm, healthStatus: status))")
         lines.append("- Primary: \(modelName(health.primaryModel)) - \(modelWarmLabel(health.primaryModelWarm, healthStatus: status))")
         lines.append("- Embed: \(modelName(health.embedModel)) - \(modelWarmLabel(health.embedModelWarm, healthStatus: status))")
+        lines.append(modelResidencyLine(health))
 
         lines.append("")
         lines.append("Disk")
@@ -1501,6 +1652,25 @@ extension DexterClient {
         }
 
         lines.append("")
+        lines.append("Recent Ambient Events")
+        if let ambientHistory {
+            if ambientHistory.events.isEmpty {
+                lines.append("- No ambient events recorded yet.")
+            } else {
+                for event in ambientHistory.events {
+                    lines.append(ambientEventLine(event))
+                }
+            }
+
+            lines.append("- Events: `\(receiptLine(ambientHistory.eventLogPath, fallback: "ambient event path unavailable"))`")
+        } else {
+            lines.append("- Ambient event history unavailable.")
+            if let ambientHistoryError, !ambientHistoryError.isEmpty {
+                lines.append("- Error: \(receiptLine(ambientHistoryError, fallback: "unknown error"))")
+            }
+        }
+
+        lines.append("")
         lines.append("Paths")
         lines.append("- Config: \(fallback(health.configPath))")
         lines.append("- State: \(fallback(health.stateDir))")
@@ -1508,6 +1678,15 @@ extension DexterClient {
         lines.append("- Ollama: \(fallback(health.ollamaURL))")
 
         return lines.joined(separator: "\n")
+    }
+
+    private static func ambientEventLine(_ event: Dexter_V1_AmbientEvent) -> String {
+        let severity = receiptLine(event.severity, fallback: "info").uppercased()
+        let kind = receiptLine(event.kind, fallback: "ambient_event")
+        let source = receiptLine(event.source, fallback: "ambient")
+        let title = receiptLine(event.title, fallback: "Ambient event")
+        let summary = receiptLine(event.summary, fallback: "No summary returned.")
+        return "- `\(severity)` \(kind) [\(source)]: \(title) - \(summary)"
     }
 
     private static func receiptLine(_ value: String, fallback: String) -> String {
@@ -1547,6 +1726,7 @@ extension DexterClient {
         lines.append("- Fast: \(modelName(health.fastModel)) - \(modelWarmLabel(health.fastModelWarm, healthStatus: status))")
         lines.append("- Primary: \(modelName(health.primaryModel)) - \(modelWarmLabel(health.primaryModelWarm, healthStatus: status))")
         lines.append("- Embed: \(modelName(health.embedModel)) - \(modelWarmLabel(health.embedModelWarm, healthStatus: status))")
+        lines.append(modelResidencyLine(health))
 
         lines.append("")
         lines.append("Workers")
@@ -1684,6 +1864,24 @@ extension DexterClient {
     private static func modelWarmLabel(_ isWarm: Bool, healthStatus: String) -> String {
         if isWarm { return "warm" }
         return healthStatus.lowercased() == "pending" ? "warming" : "not warm"
+    }
+
+    private static func modelResidencyLine(_ health: Dexter_V1_HealthResponse) -> String {
+        let mode = fallback(health.residencyMode)
+        if health.residencyLockPoisoned {
+            return "- Residency: mode \(mode), pin state unavailable"
+        }
+        if mode == "off" {
+            return "- Residency: off, keepalive fallback active"
+        }
+        if health.primaryResidencyPinned {
+            return "- Residency: mode \(mode), PRIMARY pinned (\(formatBytes(health.primaryResidencyWiredBytes)) wired)"
+        }
+        if health.primaryModelWarm {
+            return "- Residency: mode \(mode), PRIMARY warm but not pinned; keepalive fallback active"
+        }
+        let modelState = cleanStatus(health.status).lowercased() == "pending" ? "warming" : "not warm"
+        return "- Residency: mode \(mode), PRIMARY not pinned while \(modelState)"
     }
 
     private static func fallback(_ value: String) -> String {

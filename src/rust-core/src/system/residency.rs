@@ -17,12 +17,13 @@
 //!
 //! On XNU, a file's pages live in a single vnode-pager-backed memory object in
 //! the Unified Buffer Cache, **shared by inode** across every process that maps
-//! the file. Ollama maps the GGUF blob with `use_mmap=true` (its default), and on
-//! Apple Silicon llama.cpp wraps those mmap'd pages *zero-copy* into a Metal
-//! buffer via `newBufferWithBytesNoCopy:` — unified memory means the GPU reads
-//! the same physical frames as the file page cache (there is no separate VRAM
-//! copy). Those frames are pageable and file-backed, which is exactly why macOS
-//! reclaims them under pressure and the next request cold-loads.
+//! the file. When Ollama maps the GGUF blob (which requires forcing
+//! `use_mmap: true` — see the "Hard dependency" note below; Ollama does NOT mmap
+//! by default on this config), llama.cpp on Apple Silicon wraps those mmap'd
+//! pages *zero-copy* into a Metal buffer via `newBufferWithBytesNoCopy:` —
+//! unified memory means the GPU reads the same physical frames as the file page
+//! cache (there is no separate VRAM copy). Those frames are pageable and
+//! file-backed, which is what makes a cross-process pin possible.
 //!
 //! A *separate* process (the Dexter daemon) that `mmap`s the same blob inode and
 //! calls `mlock` wires those shared page-cache frames in physical memory. Because
@@ -288,20 +289,37 @@ impl ResidencyManager {
         match PinnedRegion::map_and_lock(&path) {
             Ok(region) => {
                 let gb = region.len as f64 / 1_073_741_824.0;
-                info!(
-                    model = model_tag,
-                    slot = slot.as_str(),
-                    gb = gb,
-                    path = %path.display(),
-                    "Residency: weights wired resident — keepalive ping no longer needed for this tier"
-                );
-                if let Ok(mut g) = self.inner.lock() {
-                    match slot {
-                        Slot::Primary => g.primary = Some(region),
-                        Slot::Heavy => g.heavy = Some(region),
+                // Store the region under the lock. If the lock is poisoned we must
+                // NOT report success: `region` would drop at the end of this arm
+                // (munlock+munmap), leaving nothing pinned. For a subsystem whose
+                // contract is "the weights are definitely resident", reporting
+                // pinned-when-not-pinned is the single worst failure shape — so we
+                // fail closed and let the caller keep the keepalive fallback.
+                match self.inner.lock() {
+                    Ok(mut g) => {
+                        match slot {
+                            Slot::Primary => g.primary = Some(region),
+                            Slot::Heavy => g.heavy = Some(region),
+                        }
+                        info!(
+                            model = model_tag,
+                            slot = slot.as_str(),
+                            gb = gb,
+                            path = %path.display(),
+                            "Residency: weights wired resident"
+                        );
+                        true
+                    }
+                    Err(_) => {
+                        // region drops here → munlock + munmap. Nothing is pinned.
+                        warn!(
+                            model = model_tag,
+                            slot = slot.as_str(),
+                            "Residency: state mutex poisoned — wired region released, reporting NOT pinned so the keepalive fallback stays armed"
+                        );
+                        false
                     }
                 }
-                true
             }
             Err(e) => {
                 warn!(
@@ -315,6 +333,22 @@ impl ResidencyManager {
             }
         }
     }
+
+    /// Operator-visible residency status for health/doctor surfaces.
+    pub fn status(&self) -> ResidencyStatus {
+        match self.inner.lock() {
+            Ok(g) => ResidencyStatus {
+                primary_pinned: g.primary.is_some(),
+                primary_wired_bytes: g.primary.as_ref().map(|r| r.len).unwrap_or(0),
+                lock_poisoned: false,
+            },
+            Err(_) => ResidencyStatus {
+                primary_pinned: false,
+                primary_wired_bytes: 0,
+                lock_poisoned: true,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -322,6 +356,16 @@ enum Slot {
     Primary,
     #[allow(dead_code)] // reserved with pin_heavy — see note there
     Heavy,
+}
+
+/// Snapshot of residency state for health/doctor reporting.
+#[derive(Debug, Clone, Copy)]
+pub struct ResidencyStatus {
+    pub primary_pinned: bool,
+    pub primary_wired_bytes: usize,
+    /// True if the residency mutex was poisoned — pin state is unknown and the
+    /// keepalive fallback should be considered the source of truth.
+    pub lock_poisoned: bool,
 }
 
 impl Slot {
@@ -396,7 +440,8 @@ pub fn run_proof(model: Option<String>) -> std::io::Result<()> {
 
     // Part B preview: resolve the REAL PRIMARY model blob (the one that suffers
     // the keepalive saga) to show the production resolver targets the right file.
-    let primary_tag = std::env::var("DEXTER_RESIDENCY_PRIMARY").unwrap_or_else(|_| "gemma4:26b".into());
+    let primary_tag =
+        std::env::var("DEXTER_RESIDENCY_PRIMARY").unwrap_or_else(|_| "gemma4:26b".into());
     match mgr.resolve_model_blob(&primary_tag) {
         Some(p) => {
             let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -454,7 +499,11 @@ pub fn run_proof(model: Option<String>) -> std::io::Result<()> {
         let _ = child.kill();
         return Ok(());
     }
-    let child_resident: f64 = first.split_whitespace().nth(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let child_resident: f64 = first
+        .split_whitespace()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
 
     // Measure wired memory now that the CHILD holds the lock.
     let w1 = wired_bytes();
@@ -498,13 +547,19 @@ pub fn run_proof(model: Option<String>) -> std::io::Result<()> {
     let resident_ok = resident >= 0.95;
     if wired_ok && resident_ok {
         println!(
-            "VERDICT: PROVEN. A separate process wired {:.0} MB of {proof_tag}'s weight blob; \
-             this process's independent mapping sees {:.0}% of those pages resident without \
-             faulting them from disk{}. Cross-process pinning works — the keepalive ping is \
-             obsolete for any tier we pin.",
+            "VERDICT: PROVEN (mechanism). A separate process wired {:.0} MB of {proof_tag}'s \
+             weight blob; this process's independent mapping sees {:.0}% of those pages resident \
+             without faulting them from disk{}. Cross-process UBC pinning works. NOTE: whether \
+             this ELIMINATES the keepalive cold-loads depends on the idle-pressure discriminator \
+             — until then the daemon runs pin+keepalive (residency.mode = pin_keepalive), not \
+             pin-alone.",
             mb(delta),
             resident * 100.0,
-            if released_ok { ", and the wire released cleanly on the pinner's exit" } else { "" }
+            if released_ok {
+                ", and the wire released cleanly on the pinner's exit"
+            } else {
+                ""
+            }
         );
     } else {
         println!(
@@ -667,7 +722,9 @@ mod tests {
         std::fs::write(&blob, b"weights").unwrap();
 
         let mgr = ResidencyManager::new(dir.to_path_buf());
-        let resolved = mgr.resolve_model_blob("testmodel:7b").expect("should resolve");
+        let resolved = mgr
+            .resolve_model_blob("testmodel:7b")
+            .expect("should resolve");
         assert_eq!(resolved, blob);
     }
 
@@ -694,7 +751,10 @@ mod tests {
         std::fs::write(&blob, b"w").unwrap();
 
         let mgr = ResidencyManager::new(dir.to_path_buf());
-        assert!(mgr.resolve_model_blob("embed").is_some(), "bare tag must default to :latest");
+        assert!(
+            mgr.resolve_model_blob("embed").is_some(),
+            "bare tag must default to :latest"
+        );
     }
 
     #[test]
@@ -721,5 +781,37 @@ mod tests {
         mgr.unpin_primary();
         assert!(!mgr.is_primary_pinned());
         mgr.unpin_primary(); // double-unpin is a no-op
+    }
+
+    #[test]
+    fn status_reflects_pin_state_and_wired_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let man = dir.join("manifests/registry.ollama.ai/library/m/1b");
+        std::fs::create_dir_all(man.parent().unwrap()).unwrap();
+        std::fs::write(
+            &man,
+            r#"{"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:dd","size":1}]}"#,
+        )
+        .unwrap();
+        let blob = dir.join("blobs/sha256-dd");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        let size = 128 * 1024;
+        std::fs::write(&blob, vec![7u8; size]).unwrap();
+
+        let mgr = ResidencyManager::new(dir.to_path_buf());
+        let before = mgr.status();
+        assert!(!before.primary_pinned);
+        assert_eq!(before.primary_wired_bytes, 0);
+        assert!(!before.lock_poisoned);
+
+        assert!(mgr.pin_primary("m:1b"));
+        let after = mgr.status();
+        assert!(after.primary_pinned);
+        assert_eq!(after.primary_wired_bytes, size);
+        assert!(!after.lock_poisoned);
+
+        mgr.unpin_primary();
+        assert!(!mgr.status().primary_pinned);
     }
 }

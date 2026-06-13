@@ -78,12 +78,17 @@ mod proto {
 
 #[path = "../action_evidence.rs"]
 mod action_evidence;
+#[path = "../ambient.rs"]
+mod ambient;
 #[allow(dead_code)]
 #[path = "../diagnostics.rs"]
 mod diagnostics;
 
 use action_evidence::{
     format_failed_action_evidence_block, format_success_action_evidence_block, ActionEvidence,
+};
+use ambient::{
+    AmbientEvent, AmbientEventStore, AmbientSeverity, AmbientTrigger, AmbientTriggerAction,
 };
 
 use proto::{
@@ -103,6 +108,7 @@ const OLLAMA_PS_PATH: &str = "/api/ps";
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_ACTION_RECEIPT_LIMIT: usize = 10;
 const DEFAULT_OPERATOR_STATUS_ACTION_LIMIT: usize = 5;
+const DEFAULT_OPERATOR_STATUS_AMBIENT_LIMIT: usize = 5;
 const DEFAULT_OPERATOR_CONTEXT_MARKDOWN: &str = "- No focused app context has been observed yet.\n\
     - I can still answer questions, use recent action receipts, and run explicit actions you request.";
 const DOCTOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -142,6 +148,11 @@ struct CliConfig {
     operator_status: bool,
     why_no_action: bool,
     action_query: Option<ActionQuery>,
+    ambient_query: Option<AmbientQuery>,
+    add_trigger: Option<String>,
+    trigger_event_kind: Option<String>,
+    trigger_minimum_severity: AmbientSeverity,
+    trigger_action: AmbientTriggerAction,
     action_limit: usize,
     restart_component: Option<RestartTarget>,
     approval_policy: ApprovalPolicy,
@@ -155,6 +166,14 @@ struct CliConfig {
 enum ActionQuery {
     Last,
     Recent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AmbientQuery {
+    Events,
+    Triggers,
+    Inbox,
+    Acknowledge(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +233,11 @@ fn parse_args() -> Result<CliConfig> {
     let mut operator_status = false;
     let mut why_no_action = false;
     let mut action_query = None;
+    let mut ambient_query = None;
+    let mut add_trigger = None;
+    let mut trigger_event_kind = None;
+    let mut trigger_minimum_severity = AmbientSeverity::Info;
+    let mut trigger_action = AmbientTriggerAction::NotifyOnly;
     let mut action_limit = DEFAULT_ACTION_RECEIPT_LIMIT;
     let mut restart_component = None;
     let mut approval_policy = ApprovalPolicy::Deny;
@@ -241,6 +265,53 @@ fn parse_args() -> Result<CliConfig> {
             "--doctor" => doctor = true,
             "--status" | "--operator-status" => operator_status = true,
             "--why" | "--why-no-action" | "--why-didnt-act" => why_no_action = true,
+            "--events" => set_ambient_query(&mut ambient_query, AmbientQuery::Events)?,
+            "--triggers" => set_ambient_query(&mut ambient_query, AmbientQuery::Triggers)?,
+            "--inbox" | "--notices" => set_ambient_query(&mut ambient_query, AmbientQuery::Inbox)?,
+            "--ack-event" | "--ack-notice" => {
+                let event_id = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--ack-event requires an ambient event id"))?;
+                if event_id.trim().is_empty() {
+                    return Err(anyhow!("--ack-event id must not be empty"));
+                }
+                set_ambient_query(
+                    &mut ambient_query,
+                    AmbientQuery::Acknowledge(event_id.trim().to_string()),
+                )?;
+            }
+            "--add-trigger" => {
+                let name = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--add-trigger requires a trigger name"))?;
+                if name.trim().is_empty() {
+                    return Err(anyhow!("--add-trigger name must not be empty"));
+                }
+                if add_trigger.replace(name).is_some() {
+                    return Err(anyhow!("--add-trigger may only be used once"));
+                }
+            }
+            "--event-kind" => {
+                let kind = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--event-kind requires an event kind"))?;
+                if kind.trim().is_empty() {
+                    return Err(anyhow!("--event-kind must not be empty"));
+                }
+                trigger_event_kind = Some(kind);
+            }
+            "--min-severity" => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--min-severity requires info, warn, or critical"))?;
+                trigger_minimum_severity = parse_ambient_severity(&raw)?;
+            }
+            "--trigger-action" => {
+                let raw = args.next().ok_or_else(|| {
+                    anyhow!("--trigger-action requires notify_only, ask_approval, or start_task")
+                })?;
+                trigger_action = parse_ambient_trigger_action(&raw)?;
+            }
             "--actions" => {
                 let raw_query = args
                     .next()
@@ -350,7 +421,68 @@ fn parse_args() -> Result<CliConfig> {
 
     // If positional args supplied, use those. Otherwise read commands from stdin
     // (one per line). Empty stdin → no inputs → just exit cleanly.
-    let inputs = if action_query.is_some() {
+    let inputs = if add_trigger.is_some() {
+        if doctor {
+            return Err(anyhow!("--add-trigger cannot be combined with --doctor"));
+        }
+        if operator_status {
+            return Err(anyhow!("--add-trigger cannot be combined with --status"));
+        }
+        if why_no_action {
+            return Err(anyhow!("--add-trigger cannot be combined with --why"));
+        }
+        if ambient_query.is_some() {
+            return Err(anyhow!(
+                "--add-trigger cannot be combined with --events/--triggers/--inbox/--ack-event"
+            ));
+        }
+        if action_query.is_some() {
+            return Err(anyhow!("--add-trigger cannot be combined with --actions"));
+        }
+        if restart_component.is_some() {
+            return Err(anyhow!(
+                "--add-trigger cannot be combined with --restart-component"
+            ));
+        }
+        if !positional.is_empty() {
+            return Err(anyhow!(
+                "--add-trigger cannot be combined with input arguments"
+            ));
+        }
+        Vec::new()
+    } else if ambient_query.is_some() {
+        if doctor {
+            return Err(anyhow!(
+                "--events/--triggers/--inbox/--ack-event cannot be combined with --doctor"
+            ));
+        }
+        if operator_status {
+            return Err(anyhow!(
+                "--events/--triggers/--inbox/--ack-event cannot be combined with --status"
+            ));
+        }
+        if why_no_action {
+            return Err(anyhow!(
+                "--events/--triggers/--inbox/--ack-event cannot be combined with --why"
+            ));
+        }
+        if action_query.is_some() {
+            return Err(anyhow!(
+                "--events/--triggers/--inbox/--ack-event cannot be combined with --actions"
+            ));
+        }
+        if restart_component.is_some() {
+            return Err(anyhow!(
+                "--events/--triggers/--inbox/--ack-event cannot be combined with --restart-component"
+            ));
+        }
+        if !positional.is_empty() {
+            return Err(anyhow!(
+                "--events/--triggers/--inbox/--ack-event cannot be combined with input arguments"
+            ));
+        }
+        Vec::new()
+    } else if action_query.is_some() {
         if doctor {
             return Err(anyhow!("--actions cannot be combined with --doctor"));
         }
@@ -476,6 +608,11 @@ fn parse_args() -> Result<CliConfig> {
         operator_status,
         why_no_action,
         action_query,
+        ambient_query,
+        add_trigger,
+        trigger_event_kind,
+        trigger_minimum_severity,
+        trigger_action,
         action_limit,
         restart_component,
         approval_policy,
@@ -505,6 +642,14 @@ fn print_help() {
     eprintln!("                           session stream or generating model output.");
     eprintln!("      --status             Print doctor health plus recent action receipts.");
     eprintln!("      --why                Explain why the latest action did or did not run.");
+    eprintln!("      --events             Print recent ambient events from local state.");
+    eprintln!("      --triggers           Print persisted ambient trigger definitions.");
+    eprintln!("      --inbox              Print unacknowledged ambient trigger notices.");
+    eprintln!("      --ack-event <ID>     Acknowledge an ambient inbox event.");
+    eprintln!("      --add-trigger <NAME> Add an ambient trigger to local state.");
+    eprintln!("      --event-kind <KIND>  Restrict --add-trigger to one event kind.");
+    eprintln!("      --min-severity <S>   Trigger on info, warn, or critical (default: info).");
+    eprintln!("      --trigger-action <A> Trigger action: notify_only, ask_approval, start_task.");
     eprintln!("      --actions <last|recent>");
     eprintln!("                           Print action receipts from the local audit log.");
     eprintln!(
@@ -547,6 +692,11 @@ fn print_help() {
     eprintln!("  dexter-cli --doctor");
     eprintln!("  dexter-cli --status");
     eprintln!("  dexter-cli --why");
+    eprintln!("  dexter-cli --events --limit 20");
+    eprintln!("  dexter-cli --triggers");
+    eprintln!("  dexter-cli --inbox --limit 10");
+    eprintln!("  dexter-cli --ack-event 8f6c8a2e-...");
+    eprintln!("  dexter-cli --add-trigger \"Health warnings\" --event-kind health_status_changed --min-severity warn");
     eprintln!("  dexter-cli --actions last");
     eprintln!("  dexter-cli --actions recent --limit 20");
     eprintln!("  dexter-cli --restart-component tts");
@@ -564,6 +714,37 @@ fn parse_action_query(raw: &str) -> Result<ActionQuery> {
         "recent" => Ok(ActionQuery::Recent),
         other => Err(anyhow!(
             "unknown action receipt query: {other}; expected last or recent"
+        )),
+    }
+}
+
+fn set_ambient_query(slot: &mut Option<AmbientQuery>, query: AmbientQuery) -> Result<()> {
+    if slot.replace(query).is_some() {
+        return Err(anyhow!(
+            "only one of --events, --triggers, --inbox, or --ack-event may be used"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_ambient_severity(raw: &str) -> Result<AmbientSeverity> {
+    match raw.trim().replace('-', "_").to_ascii_lowercase().as_str() {
+        "info" | "new" => Ok(AmbientSeverity::Info),
+        "warn" | "warning" => Ok(AmbientSeverity::Warn),
+        "critical" | "fail" | "failure" | "error" => Ok(AmbientSeverity::Critical),
+        other => Err(anyhow!(
+            "unknown ambient severity: {other}; expected info, warn, or critical"
+        )),
+    }
+}
+
+fn parse_ambient_trigger_action(raw: &str) -> Result<AmbientTriggerAction> {
+    match raw.trim().replace(['-', ' '], "_").to_ascii_lowercase().as_str() {
+        "notify" | "notify_only" => Ok(AmbientTriggerAction::NotifyOnly),
+        "ask" | "ask_approval" | "approval" => Ok(AmbientTriggerAction::AskApproval),
+        "task" | "start_task" => Ok(AmbientTriggerAction::StartTask),
+        other => Err(anyhow!(
+            "unknown ambient trigger action: {other}; expected notify_only, ask_approval, or start_task"
         )),
     }
 }
@@ -770,8 +951,93 @@ async fn run_operator_status(cfg: &CliConfig) -> Result<i32> {
         cfg.action_limit
     };
     let receipts = read_action_receipts(&audit_path, receipt_limit)?;
-    print_operator_status_report(&checks, &audit_path, &receipts, &operator_context_markdown);
+    let ambient_store = AmbientEventStore::new(&state_dir);
+    let ambient_path = ambient_store.events_path();
+    let (ambient_events, ambient_error) =
+        match ambient_store.recent_events(DEFAULT_OPERATOR_STATUS_AMBIENT_LIMIT) {
+            Ok((_, events)) => (events, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+    print_operator_status_report(
+        &checks,
+        &audit_path,
+        &receipts,
+        &ambient_path,
+        &ambient_events,
+        ambient_error.as_deref(),
+        &operator_context_markdown,
+    );
     Ok(doctor_exit_code(&checks))
+}
+
+fn run_ambient_query(cfg: &CliConfig, query: AmbientQuery) -> Result<i32> {
+    let state_dir = load_action_state_dir()?;
+    let store = AmbientEventStore::new(&state_dir);
+    match query {
+        AmbientQuery::Events => {
+            let (path, events) = store.recent_events(cfg.action_limit).with_context(|| {
+                format!("failed to read ambient events in {}", state_dir.display())
+            })?;
+            print_ambient_events(&path, &events);
+        }
+        AmbientQuery::Triggers => {
+            let triggers = store.read_triggers().with_context(|| {
+                format!("failed to read ambient triggers in {}", state_dir.display())
+            })?;
+            print_ambient_triggers(&store.triggers_path(), &triggers);
+        }
+        AmbientQuery::Inbox => {
+            let (path, events) = store
+                .unread_trigger_matches(cfg.action_limit)
+                .with_context(|| {
+                    format!("failed to read ambient inbox in {}", state_dir.display())
+                })?;
+            print_ambient_inbox(&path, &store.acknowledgements_path(), &events);
+        }
+        AmbientQuery::Acknowledge(event_id) => {
+            let (path, added) = store
+                .acknowledge_events(std::slice::from_ref(&event_id))
+                .with_context(|| {
+                    format!(
+                        "failed to acknowledge ambient event in {}",
+                        state_dir.display()
+                    )
+                })?;
+            print_ambient_acknowledgement(&path, &event_id, added);
+        }
+    }
+    Ok(0)
+}
+
+fn run_add_ambient_trigger(cfg: &CliConfig, name: &str) -> Result<i32> {
+    let state_dir = load_action_state_dir()?;
+    let store = AmbientEventStore::new(&state_dir);
+    let mut triggers = store
+        .read_triggers()
+        .with_context(|| format!("failed to read ambient triggers in {}", state_dir.display()))?;
+    let trigger = AmbientTrigger::new(
+        name.trim(),
+        cfg.trigger_event_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+            .map(ToOwned::to_owned),
+        cfg.trigger_minimum_severity,
+        cfg.trigger_action,
+    );
+    triggers.push(trigger.clone());
+    let path = store.write_triggers(&triggers).with_context(|| {
+        format!(
+            "failed to write ambient triggers in {}",
+            state_dir.display()
+        )
+    })?;
+
+    println!("Dexter Ambient Trigger Added");
+    println!("source: {}", path.display());
+    println!();
+    print!("{}", format_ambient_trigger(&trigger));
+    Ok(0)
 }
 
 async fn run_why_no_action(cfg: &CliConfig) -> Result<i32> {
@@ -1351,6 +1617,114 @@ fn print_action_receipts(audit_path: &Path, receipts: &[ActionReceipt]) {
     }
 }
 
+fn print_ambient_events(path: &Path, events: &[AmbientEvent]) {
+    println!("Dexter Ambient Events");
+    println!("source: {}", path.display());
+    println!();
+    if events.is_empty() {
+        println!("No ambient events found.");
+        return;
+    }
+
+    for event in events {
+        println!("{}", format_ambient_event(event));
+    }
+}
+
+fn format_ambient_event(event: &AmbientEvent) -> String {
+    format!(
+        "{time}  {severity}  {kind}\n  id: {id}\n  source: {source} | status: {status}\n  title: {title}\n  summary: {summary}\n",
+        time = event.timestamp,
+        severity = event.severity.as_str().to_ascii_uppercase(),
+        kind = event.kind,
+        id = event.event_id,
+        source = event.source,
+        status = event.status.as_str(),
+        title = one_line(&event.title),
+        summary = one_line(&event.summary),
+    )
+}
+
+fn print_ambient_triggers(path: &Path, triggers: &[AmbientTrigger]) {
+    println!("Dexter Ambient Triggers");
+    println!("source: {}", path.display());
+    println!();
+    if triggers.is_empty() {
+        println!("No ambient triggers configured.");
+        return;
+    }
+
+    for trigger in triggers {
+        println!("{}", format_ambient_trigger(trigger));
+    }
+}
+
+fn print_ambient_inbox(events_path: &Path, acknowledgement_path: &Path, events: &[AmbientEvent]) {
+    print!(
+        "{}",
+        format_ambient_inbox(events_path, acknowledgement_path, events)
+    );
+}
+
+fn print_ambient_acknowledgement(path: &Path, event_id: &str, added: usize) {
+    print!("{}", format_ambient_acknowledgement(path, event_id, added));
+}
+
+fn format_ambient_inbox(
+    events_path: &Path,
+    acknowledgement_path: &Path,
+    events: &[AmbientEvent],
+) -> String {
+    let mut out = String::new();
+    out.push_str("Dexter Ambient Inbox\n");
+    out.push_str(&format!("source: {}\n", events_path.display()));
+    out.push_str(&format!(
+        "acknowledgements: {}\n\n",
+        acknowledgement_path.display()
+    ));
+    if events.is_empty() {
+        out.push_str("No unacknowledged ambient notices.\n");
+        return out;
+    }
+
+    for event in events {
+        out.push_str(&format_ambient_event(event));
+    }
+    out
+}
+
+fn format_ambient_acknowledgement(path: &Path, event_id: &str, added: usize) -> String {
+    let mut out = String::new();
+    out.push_str("Dexter Ambient Acknowledgement\n");
+    out.push_str(&format!("source: {}\n\n", path.display()));
+    out.push_str(&format!("event: {}\n", event_id));
+    if added == 0 {
+        out.push_str("status: already acknowledged\n");
+    } else {
+        out.push_str("status: acknowledged\n");
+    }
+    out
+}
+
+fn format_ambient_trigger(trigger: &AmbientTrigger) -> String {
+    let enabled = if trigger.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let event_kind = trigger.event_kind.as_deref().unwrap_or("any");
+    format!(
+        "{created}  {enabled}  {name}\n  id: {id}\n  event: {event_kind} | minimum severity: {severity} | action: {action}\n",
+        created = trigger.created_at,
+        enabled = enabled.to_ascii_uppercase(),
+        name = one_line(&trigger.name),
+        id = trigger.trigger_id,
+        event_kind = event_kind,
+        severity = trigger.minimum_severity.as_str(),
+        action = trigger.action.as_str(),
+    )
+}
+
 fn format_action_receipt(receipt: &ActionReceipt) -> String {
     let duration = receipt
         .duration_ms
@@ -1791,6 +2165,7 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
         health.embed_model_warm,
         &health.status,
     ));
+    checks.push(model_residency_check(&health));
     checks.push(component_health_check("STT worker", &health.stt_worker));
     checks.push(component_health_check("TTS worker", &health.tts_worker));
     checks.push(component_health_check(
@@ -1870,6 +2245,63 @@ fn model_warm_check(name: &str, model: &str, warm: bool, daemon_status: &str) ->
         DoctorCheck::warn(name, detail)
     } else {
         DoctorCheck::fail(name, detail)
+    }
+}
+
+fn model_residency_check(health: &HealthResponse) -> DoctorCheck {
+    let mode = empty_as_unknown(&health.residency_mode);
+    let normalized_mode = mode.to_ascii_lowercase();
+    let wired = diagnostics::format_bytes_gib(health.primary_residency_wired_bytes);
+    if health.residency_lock_poisoned {
+        return DoctorCheck::warn(
+            "model residency",
+            format!(
+                "mode {mode}; PRIMARY pin state unavailable because residency lock is poisoned"
+            ),
+        );
+    }
+    if mode == "off" {
+        return DoctorCheck::ok(
+            "model residency",
+            "mode off; keepalive fallback is responsible for PRIMARY residency".to_string(),
+        );
+    }
+    if health.primary_residency_pinned {
+        DoctorCheck::ok(
+            "model residency",
+            format!("mode {mode}; PRIMARY pinned ({wired} wired)"),
+        )
+    } else if health.primary_model_warm {
+        match normalized_mode.as_str() {
+            "pin_keepalive" => DoctorCheck::ok(
+                "model residency",
+                format!("mode {mode}; PRIMARY not pinned, keepalive fallback active"),
+            ),
+            "pin_retire_keepalive" => DoctorCheck::warn(
+                "model residency",
+                format!("mode {mode}; PRIMARY warm but not pinned, keepalive has been retired"),
+            ),
+            _ => DoctorCheck::warn(
+                "model residency",
+                format!("mode {mode}; PRIMARY warm but residency policy is not satisfied"),
+            ),
+        }
+    } else {
+        let model_state = if health.status.trim().eq_ignore_ascii_case("pending") {
+            "warming"
+        } else {
+            "not warm"
+        };
+        match normalized_mode.as_str() {
+            "pin_keepalive" => DoctorCheck::ok(
+                "model residency",
+                format!("mode {mode}; PRIMARY not pinned while model is {model_state}; keepalive fallback active"),
+            ),
+            _ => DoctorCheck::warn(
+                "model residency",
+                format!("mode {mode}; PRIMARY not pinned while model is {model_state}"),
+            ),
+        }
     }
 }
 
@@ -2373,11 +2805,22 @@ fn print_operator_status_report(
     checks: &[DoctorCheck],
     audit_path: &Path,
     receipts: &[ActionReceipt],
+    ambient_path: &Path,
+    ambient_events: &[AmbientEvent],
+    ambient_error: Option<&str>,
     operator_context_markdown: &str,
 ) {
     print!(
         "{}",
-        format_operator_status_report(checks, audit_path, receipts, operator_context_markdown)
+        format_operator_status_report(
+            checks,
+            audit_path,
+            receipts,
+            ambient_path,
+            ambient_events,
+            ambient_error,
+            operator_context_markdown,
+        )
     );
 }
 
@@ -2385,6 +2828,9 @@ fn format_operator_status_report(
     checks: &[DoctorCheck],
     audit_path: &Path,
     receipts: &[ActionReceipt],
+    ambient_path: &Path,
+    ambient_events: &[AmbientEvent],
+    ambient_error: Option<&str>,
     operator_context_markdown: &str,
 ) -> String {
     let mut out = String::new();
@@ -2422,6 +2868,19 @@ fn format_operator_status_report(
     } else {
         for receipt in receipts {
             out.push_str(&format_action_receipt(receipt));
+        }
+    }
+
+    out.push('\n');
+    out.push_str("Recent Ambient Events\n");
+    out.push_str(&format!("source: {}\n\n", ambient_path.display()));
+    if let Some(error) = ambient_error {
+        out.push_str(&format!("Ambient event history unavailable: {error}\n"));
+    } else if ambient_events.is_empty() {
+        out.push_str("No ambient events found.\n");
+    } else {
+        for event in ambient_events {
+            out.push_str(&format_ambient_event(event));
         }
     }
 
@@ -2728,6 +3187,16 @@ async fn main() -> Result<()> {
 
     if cfg.operator_status {
         let exit_code = run_operator_status(&cfg).await?;
+        std::process::exit(exit_code);
+    }
+
+    if let Some(query) = cfg.ambient_query.clone() {
+        let exit_code = run_ambient_query(&cfg, query)?;
+        std::process::exit(exit_code);
+    }
+
+    if let Some(name) = cfg.add_trigger.as_deref() {
+        let exit_code = run_add_ambient_trigger(&cfg, name)?;
         std::process::exit(exit_code);
     }
 
@@ -3140,6 +3609,47 @@ mod tests {
     fn parse_action_query_rejects_unknown_query() {
         assert!(parse_action_query("all").is_err());
         assert!(parse_action_query("").is_err());
+    }
+
+    #[test]
+    fn parse_ambient_severity_accepts_operator_spellings() {
+        assert_eq!(
+            parse_ambient_severity("info").unwrap(),
+            AmbientSeverity::Info
+        );
+        assert_eq!(
+            parse_ambient_severity("warning").unwrap(),
+            AmbientSeverity::Warn
+        );
+        assert_eq!(
+            parse_ambient_severity("error").unwrap(),
+            AmbientSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn parse_ambient_trigger_action_accepts_operator_spellings() {
+        assert_eq!(
+            parse_ambient_trigger_action("notify").unwrap(),
+            AmbientTriggerAction::NotifyOnly
+        );
+        assert_eq!(
+            parse_ambient_trigger_action("ask-approval").unwrap(),
+            AmbientTriggerAction::AskApproval
+        );
+        assert_eq!(
+            parse_ambient_trigger_action("start task").unwrap(),
+            AmbientTriggerAction::StartTask
+        );
+    }
+
+    #[test]
+    fn set_ambient_query_rejects_multiple_query_modes() {
+        let mut query = None;
+        set_ambient_query(&mut query, AmbientQuery::Inbox).unwrap();
+        let error = set_ambient_query(&mut query, AmbientQuery::Events)
+            .expect_err("second ambient query should be rejected");
+        assert!(error.to_string().contains("--ack-event"));
     }
 
     #[test]
@@ -3577,6 +4087,52 @@ mod tests {
     }
 
     #[test]
+    fn format_ambient_inbox_includes_ack_path_and_unread_events() {
+        let mut event = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger matched action_failed.",
+            serde_json::json!({"trigger_name": "Dexter action failures"}),
+        );
+        event.event_id = "event-inbox-1".to_string();
+
+        let formatted = format_ambient_inbox(
+            Path::new("/tmp/ambient_events.jsonl"),
+            Path::new("/tmp/ambient_acknowledgements.json"),
+            &[event],
+        );
+
+        assert!(formatted.contains("Dexter Ambient Inbox"));
+        assert!(formatted.contains("source: /tmp/ambient_events.jsonl"));
+        assert!(formatted.contains("acknowledgements: /tmp/ambient_acknowledgements.json"));
+        assert!(formatted.contains("WARN  trigger_matched"));
+        assert!(formatted.contains("id: event-inbox-1"));
+        assert!(formatted.contains("status: new"));
+        assert!(formatted.contains("Dexter action failures"));
+    }
+
+    #[test]
+    fn format_ambient_acknowledgement_reports_added_or_existing() {
+        let added = format_ambient_acknowledgement(
+            Path::new("/tmp/ambient_acknowledgements.json"),
+            "event-1",
+            1,
+        );
+        assert!(added.contains("Dexter Ambient Acknowledgement"));
+        assert!(added.contains("event: event-1"));
+        assert!(added.contains("status: acknowledged"));
+
+        let existing = format_ambient_acknowledgement(
+            Path::new("/tmp/ambient_acknowledgements.json"),
+            "event-1",
+            0,
+        );
+        assert!(existing.contains("status: already acknowledged"));
+    }
+
+    #[test]
     fn format_operator_status_report_includes_health_suggestions_and_receipts() {
         let checks = vec![
             DoctorCheck::ok("daemon ping", "core version 0.1.0"),
@@ -3598,6 +4154,16 @@ mod tests {
             &checks,
             Path::new("/tmp/dexter-audit.jsonl"),
             &receipts,
+            Path::new("/tmp/dexter-ambient-events.jsonl"),
+            &[AmbientEvent::new(
+                "action",
+                "action_failed",
+                AmbientSeverity::Warn,
+                "Action failed",
+                "Run: false failed.",
+                serde_json::json!({"action_id": "act-status-failed"}),
+            )],
+            None,
             "- Focus: iTerm2\n- Dexter can:\n  - explain the latest shell error",
         );
 
@@ -3616,6 +4182,10 @@ mod tests {
         assert!(report.contains("source: /tmp/dexter-audit.jsonl"));
         assert!(report.contains("EXECUTED  shell"));
         assert!(report.contains("target: echo status"));
+        assert!(report.contains("Recent Ambient Events"));
+        assert!(report.contains("source: /tmp/dexter-ambient-events.jsonl"));
+        assert!(report.contains("WARN  action_failed"));
+        assert!(report.contains("Run: false failed."));
         assert!(report.contains("Result: FAIL - fix failed checks before relying on Dexter."));
     }
 
@@ -3659,6 +4229,9 @@ mod tests {
             &[DoctorCheck::ok("daemon ping", "core version 0.1.0")],
             Path::new("/tmp/dexter-audit.jsonl"),
             &[],
+            Path::new("/tmp/dexter-ambient-events.jsonl"),
+            &[],
+            None,
             "",
         );
 
@@ -3667,6 +4240,8 @@ mod tests {
         assert!(report.contains("No action receipts found."));
         assert!(report.contains("Latest Action Summary"));
         assert!(report.contains("No recent action receipt was found."));
+        assert!(report.contains("Recent Ambient Events"));
+        assert!(report.contains("No ambient events found."));
         assert!(report.contains("Result: OK - no failed checks."));
     }
 
@@ -3689,6 +4264,9 @@ mod tests {
             &[DoctorCheck::ok("daemon ping", "core version 0.1.0")],
             Path::new("/tmp/dexter-audit.jsonl"),
             &[receipt],
+            Path::new("/tmp/dexter-ambient-events.jsonl"),
+            &[],
+            Some("ambient store invalid data: bad line"),
             "- Focus: Messages\n- Dexter can:\n  - resolve recipients through Contacts",
         );
 
@@ -3698,6 +4276,8 @@ mod tests {
         assert!(report.contains("raw message_send action was blocked"));
         assert!(report.contains("Target: iMessage to Jason"));
         assert!(report.contains("Next step: Ask again using the recipient's exact Contacts name"));
+        assert!(report
+            .contains("Ambient event history unavailable: ambient store invalid data: bad line"));
     }
 
     #[test]
@@ -3978,6 +4558,70 @@ mod tests {
         );
     }
 
+    fn ready_health_with_residency(mode: &str, pinned: bool, poisoned: bool) -> HealthResponse {
+        HealthResponse {
+            trace_id: "trace".to_string(),
+            core_version: "0.1.0".to_string(),
+            status: "ready".to_string(),
+            degraded_components: Vec::new(),
+            socket: "/tmp/dexter.sock".to_string(),
+            shell_socket: "/tmp/dexter-shell.sock".to_string(),
+            config_path: "/Users/jason/.dexter/config.toml".to_string(),
+            state_dir: "/Users/jason/.dexter/state".to_string(),
+            personality_path: "config/personality/default.yaml".to_string(),
+            ollama_url: "http://localhost:11434".to_string(),
+            fast_model: "qwen3:8b".to_string(),
+            primary_model: "gemma4:26b".to_string(),
+            embed_model: "mxbai-embed-large".to_string(),
+            fast_model_warm: true,
+            primary_model_warm: true,
+            embed_model_warm: true,
+            stt_worker: "ready".to_string(),
+            tts_worker: "ready".to_string(),
+            browser_worker: "ready".to_string(),
+            disk: Vec::new(),
+            operator_context_markdown: String::new(),
+            residency_mode: mode.to_string(),
+            primary_residency_pinned: pinned,
+            primary_residency_wired_bytes: if pinned { 18 * 1024 * 1024 * 1024 } else { 0 },
+            residency_lock_poisoned: poisoned,
+        }
+    }
+
+    #[test]
+    fn model_residency_check_accepts_pin_keepalive_fallback() {
+        let health = ready_health_with_residency("pin_keepalive", false, false);
+        let check = model_residency_check(&health);
+
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.name, "model residency");
+        assert_eq!(
+            check.detail,
+            "mode pin_keepalive; PRIMARY not pinned, keepalive fallback active"
+        );
+    }
+
+    #[test]
+    fn model_residency_check_warns_when_retire_mode_is_not_pinned() {
+        let health = ready_health_with_residency("pin_retire_keepalive", false, false);
+        let check = model_residency_check(&health);
+
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert_eq!(
+            check.detail,
+            "mode pin_retire_keepalive; PRIMARY warm but not pinned, keepalive has been retired"
+        );
+    }
+
+    #[test]
+    fn model_residency_check_warns_when_lock_state_is_unavailable() {
+        let health = ready_health_with_residency("pin_keepalive", false, true);
+        let check = model_residency_check(&health);
+
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("residency lock is poisoned"));
+    }
+
     #[test]
     fn disk_health_check_formats_operator_readable_detail() {
         let check = disk_health_check(DiskHealth {
@@ -4028,6 +4672,10 @@ mod tests {
                 detail: "ok".to_string(),
             }],
             operator_context_markdown: String::new(),
+            residency_mode: "pin_keepalive".to_string(),
+            primary_residency_pinned: true,
+            primary_residency_wired_bytes: 18 * 1024 * 1024 * 1024,
+            residency_lock_poisoned: false,
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Ok);
@@ -4070,6 +4718,10 @@ mod tests {
             browser_worker: "ready".to_string(),
             disk: Vec::new(),
             operator_context_markdown: String::new(),
+            residency_mode: "pin_keepalive".to_string(),
+            primary_residency_pinned: false,
+            primary_residency_wired_bytes: 0,
+            residency_lock_poisoned: false,
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Warn);
@@ -4122,6 +4774,10 @@ mod tests {
             browser_worker: "ready".to_string(),
             disk: Vec::new(),
             operator_context_markdown: String::new(),
+            residency_mode: "pin_keepalive".to_string(),
+            primary_residency_pinned: false,
+            primary_residency_wired_bytes: 0,
+            residency_lock_poisoned: false,
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Fail);
