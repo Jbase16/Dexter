@@ -56,6 +56,7 @@ use std::{
     fs,
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -75,9 +76,15 @@ mod proto {
     tonic::include_proto!("dexter.v1");
 }
 
+#[path = "../action_evidence.rs"]
+mod action_evidence;
 #[allow(dead_code)]
 #[path = "../diagnostics.rs"]
 mod diagnostics;
+
+use action_evidence::{
+    format_failed_action_evidence_block, format_success_action_evidence_block, ActionEvidence,
+};
 
 use proto::{
     client_event, dexter_service_client::DexterServiceClient, server_event, ActionApproval,
@@ -96,6 +103,8 @@ const OLLAMA_PS_PATH: &str = "/api/ps";
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_ACTION_RECEIPT_LIMIT: usize = 10;
 const DEFAULT_OPERATOR_STATUS_ACTION_LIMIT: usize = 5;
+const DEFAULT_OPERATOR_CONTEXT_MARKDOWN: &str = "- No focused app context has been observed yet.\n\
+    - I can still answer questions, use recent action receipts, and run explicit actions you request.";
 const DOCTOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const CLI_STARTUP_IDLE_GRACE: Duration = Duration::from_millis(500);
@@ -107,6 +116,12 @@ const DEFAULT_HEAVY_MODEL: &str = "deepseek-r1:32b";
 const DEFAULT_CODE_MODEL: &str = "deepseek-coder-v2:16b";
 const DEFAULT_VISION_MODEL: &str = "gemma4:26b";
 const DEFAULT_EMBED_MODEL: &str = "mxbai-embed-large";
+const EXPECTED_OLLAMA_MODELS_DIR: &str = "/Users/jason/ollama-models";
+const OLLAMA_APP_LABEL: &str = "com.ollama.ollama";
+const OLLAMA_APP_PROCESS_LABEL_PREFIX: &str = "application.com.electron.ollama.";
+const CUSTOM_OLLAMA_SERVE_LABEL: &str = "com.jason.ollama";
+const CUSTOM_OLLAMA_WARM_LABEL: &str = "com.jason.ollama-warm";
+const HOMEBREW_OLLAMA_LABEL: &str = "homebrew.mxcl.ollama";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApprovalPolicy {
@@ -737,6 +752,8 @@ async fn collect_doctor_checks(cfg: &CliConfig) -> Vec<DoctorCheck> {
         )
         .await,
     );
+    checks.push(check_ollama_launch_agents());
+    checks.push(check_ollama_models_env());
     checks.push(check_ollama_resident_pressure(runtime_config.as_ref()).await);
 
     checks
@@ -744,6 +761,7 @@ async fn collect_doctor_checks(cfg: &CliConfig) -> Vec<DoctorCheck> {
 
 async fn run_operator_status(cfg: &CliConfig) -> Result<i32> {
     let checks = collect_doctor_checks(cfg).await;
+    let operator_context_markdown = fetch_operator_context_markdown(&cfg.socket_path).await;
     let state_dir = load_action_state_dir()?;
     let audit_path = state_dir.join(AUDIT_LOG_FILENAME);
     let receipt_limit = if cfg.action_limit == DEFAULT_ACTION_RECEIPT_LIMIT {
@@ -752,7 +770,7 @@ async fn run_operator_status(cfg: &CliConfig) -> Result<i32> {
         cfg.action_limit
     };
     let receipts = read_action_receipts(&audit_path, receipt_limit)?;
-    print_operator_status_report(&checks, &audit_path, &receipts);
+    print_operator_status_report(&checks, &audit_path, &receipts, &operator_context_markdown);
     Ok(doctor_exit_code(&checks))
 }
 
@@ -915,6 +933,24 @@ struct ActionReceipt {
     duration_ms: Option<u64>,
 }
 
+impl ActionEvidence for ActionReceipt {
+    fn action_outcome(&self) -> &str {
+        &self.status
+    }
+
+    fn action_type(&self) -> &str {
+        &self.action_type
+    }
+
+    fn action_target(&self) -> &str {
+        &self.target
+    }
+
+    fn result_summary(&self) -> &str {
+        &self.result
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CliSessionState {
     session_id: String,
@@ -1017,6 +1053,11 @@ fn analyze_session_for_action_clue(state: CliSessionState) -> Option<SessionActi
         (
             "Dexter refused a message send because the generated send action did not contain a verifiable Contacts recipient.",
             "Retry with the contact name exactly as it appears in Contacts so Rust can resolve the handle.",
+        )
+    } else if lower.contains("contacts lookup failed") {
+        (
+            "Dexter refused a message send because Contacts lookup failed before the recipient could be verified.",
+            "Check Contacts access, then retry with the contact name exactly as it appears in Contacts.",
         )
     } else if lower.contains("couldn't find that imessage recipient handle in contacts") {
         (
@@ -1667,6 +1708,49 @@ async fn check_daemon_health(socket_path: &str) -> Vec<DoctorCheck> {
     }
 }
 
+async fn fetch_operator_context_markdown(socket_path: &str) -> String {
+    let connect_result = tokio::time::timeout(DOCTOR_CONNECT_TIMEOUT, connect(socket_path)).await;
+    let mut client = match connect_result {
+        Err(_) => {
+            return format!(
+                "- Context summary unavailable: timed out connecting to {socket_path}."
+            );
+        }
+        Ok(Err(error)) => {
+            return format!(
+                "- Context summary unavailable: connect failed: {}.",
+                one_line(&format!("{error:#}"))
+            );
+        }
+        Ok(Ok(client)) => client,
+    };
+
+    let health_result = tokio::time::timeout(
+        DOCTOR_REQUEST_TIMEOUT,
+        client.health(HealthRequest {
+            trace_id: Uuid::new_v4().to_string(),
+        }),
+    )
+    .await;
+
+    match health_result {
+        Err(_) => "- Context summary unavailable: health RPC timed out.".to_string(),
+        Ok(Err(status)) => format!(
+            "- Context summary unavailable: health RPC failed: {}.",
+            one_line(&status.to_string())
+        ),
+        Ok(Ok(response)) => {
+            let markdown = response.into_inner().operator_context_markdown;
+            let trimmed = markdown.trim();
+            if trimmed.is_empty() {
+                DEFAULT_OPERATOR_CONTEXT_MARKDOWN.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+    }
+}
+
 fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let degraded = if health.degraded_components.is_empty() {
@@ -1675,11 +1759,16 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
         health.degraded_components.join(",")
     };
     let status = doctor_status_for_daemon_health(&health.status);
+    let component_label = if health.status.trim().eq_ignore_ascii_case("pending") {
+        "pending components"
+    } else {
+        "attention components"
+    };
     checks.push(DoctorCheck {
         status,
         name: "daemon health".to_string(),
         detail: format!(
-            "status {}; attention components {}",
+            "status {}; {component_label} {}",
             empty_as_unknown(&health.status),
             degraded
         ),
@@ -1763,14 +1852,21 @@ fn doctor_status_for_disk_status(status: &str) -> DoctorStatus {
 }
 
 fn model_warm_check(name: &str, model: &str, warm: bool, daemon_status: &str) -> DoctorCheck {
+    let is_pending = daemon_status.trim().eq_ignore_ascii_case("pending");
     let detail = format!(
         "{} {}",
         empty_as_unknown(model),
-        if warm { "warm" } else { "not warm" }
+        if warm {
+            "warm"
+        } else if is_pending {
+            "warming"
+        } else {
+            "not warm"
+        }
     );
     if warm {
         DoctorCheck::ok(name, detail)
-    } else if daemon_status.trim().eq_ignore_ascii_case("pending") {
+    } else if is_pending {
         DoctorCheck::warn(name, detail)
     } else {
         DoctorCheck::fail(name, detail)
@@ -1878,6 +1974,246 @@ async fn check_ollama(base_url: Option<&str>) -> DoctorCheck {
             format!("{base_url} reachable; failed to parse /api/tags JSON: {error}"),
         ),
     }
+}
+
+fn check_ollama_launch_agents() -> DoctorCheck {
+    let uid = match current_user_id() {
+        Ok(uid) => uid,
+        Err(error) => {
+            return DoctorCheck::warn(
+                "ollama launch",
+                format!("could not determine user id for launchd inspection: {error}"),
+            );
+        }
+    };
+    let domain = format!("gui/{uid}");
+
+    let disabled_output = match command_output("launchctl", &["print-disabled", &domain]) {
+        Ok(output) => output,
+        Err(error) => {
+            return DoctorCheck::warn(
+                "ollama launch",
+                format!("could not inspect launchd disabled state: {error}"),
+            );
+        }
+    };
+    let list_output = command_output("launchctl", &["list"]).unwrap_or_default();
+
+    let state = OllamaLaunchAgentState {
+        app_running: launchctl_list_contains_label(&list_output, OLLAMA_APP_LABEL)
+            || launchctl_list_contains_prefix(&list_output, OLLAMA_APP_PROCESS_LABEL_PREFIX),
+        custom_serve_enabled: launchctl_label_enabled(&disabled_output, CUSTOM_OLLAMA_SERVE_LABEL)
+            .unwrap_or_else(|| launch_agent_plist_exists(CUSTOM_OLLAMA_SERVE_LABEL)),
+        custom_serve_loaded: launchctl_list_contains_label(&list_output, CUSTOM_OLLAMA_SERVE_LABEL),
+        warm_helper_enabled: launchctl_label_enabled(&disabled_output, CUSTOM_OLLAMA_WARM_LABEL)
+            .unwrap_or_else(|| launch_agent_plist_exists(CUSTOM_OLLAMA_WARM_LABEL)),
+        warm_helper_loaded: launchctl_list_contains_label(&list_output, CUSTOM_OLLAMA_WARM_LABEL),
+        homebrew_serve_loaded: launchctl_list_contains_label(&list_output, HOMEBREW_OLLAMA_LABEL),
+    };
+
+    ollama_launch_agent_check_from_state(&state)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OllamaLaunchAgentState {
+    app_running: bool,
+    custom_serve_enabled: bool,
+    custom_serve_loaded: bool,
+    warm_helper_enabled: bool,
+    warm_helper_loaded: bool,
+    homebrew_serve_loaded: bool,
+}
+
+fn ollama_launch_agent_check_from_state(state: &OllamaLaunchAgentState) -> DoctorCheck {
+    let mut issues = Vec::new();
+
+    if state.custom_serve_enabled || state.custom_serve_loaded {
+        let loaded_note = if state.custom_serve_loaded {
+            "loaded"
+        } else {
+            "enabled"
+        };
+        issues.push(format!(
+            "{CUSTOM_OLLAMA_SERVE_LABEL} is {loaded_note}; it can race Ollama.app for port 11434"
+        ));
+    }
+
+    if state.warm_helper_enabled || state.warm_helper_loaded {
+        let loaded_note = if state.warm_helper_loaded {
+            "loaded"
+        } else {
+            "enabled"
+        };
+        issues.push(format!(
+            "{CUSTOM_OLLAMA_WARM_LABEL} is {loaded_note}; it can queue model loads during Dexter startup"
+        ));
+    }
+
+    if state.homebrew_serve_loaded {
+        issues.push(format!(
+            "{HOMEBREW_OLLAMA_LABEL} is loaded; Homebrew Ollama can race Ollama.app for port 11434"
+        ));
+    }
+
+    if issues.is_empty() {
+        let owner = if state.app_running {
+            "Ollama.app active"
+        } else {
+            "no conflicting custom launch agents"
+        };
+        return DoctorCheck::ok("ollama launch", owner);
+    }
+
+    let mut detail = issues.join("; ");
+    detail.push_str("; suggested fix: ");
+    detail.push_str(&format!(
+        "launchctl disable gui/$(id -u)/{CUSTOM_OLLAMA_SERVE_LABEL}; "
+    ));
+    detail.push_str(&format!(
+        "launchctl disable gui/$(id -u)/{CUSTOM_OLLAMA_WARM_LABEL}; "
+    ));
+    detail.push_str("restart Ollama and Dexter");
+    DoctorCheck::fail("ollama launch", detail)
+}
+
+fn check_ollama_models_env() -> DoctorCheck {
+    let process_value = std::env::var("OLLAMA_MODELS").ok();
+    let launchctl_value = command_output("launchctl", &["getenv", "OLLAMA_MODELS"]).ok();
+    ollama_models_env_check_from_values(process_value.as_deref(), launchctl_value.as_deref())
+}
+
+fn ollama_models_env_check_from_values(
+    process_value: Option<&str>,
+    launchctl_value: Option<&str>,
+) -> DoctorCheck {
+    let process_value = process_value.and_then(normalize_ollama_models_dir);
+    let launchctl_value = launchctl_value.and_then(normalize_ollama_models_dir);
+
+    let process_ok = process_value
+        .as_deref()
+        .map(|value| value == EXPECTED_OLLAMA_MODELS_DIR)
+        .unwrap_or(false);
+    let launchctl_ok = launchctl_value
+        .as_deref()
+        .map(|value| value == EXPECTED_OLLAMA_MODELS_DIR)
+        .unwrap_or(false);
+
+    if process_ok || launchctl_ok {
+        let source = if launchctl_ok {
+            "launchctl"
+        } else {
+            "process env"
+        };
+        return DoctorCheck::ok(
+            "ollama models dir",
+            format!("{source} OLLAMA_MODELS={EXPECTED_OLLAMA_MODELS_DIR}"),
+        );
+    }
+
+    let process_label = process_value.as_deref().unwrap_or("unset");
+    let launchctl_label = launchctl_value.as_deref().unwrap_or("unset");
+    DoctorCheck::warn(
+        "ollama models dir",
+        format!(
+            "expected OLLAMA_MODELS={EXPECTED_OLLAMA_MODELS_DIR}; process={process_label}; launchctl={launchctl_label}; run `make configure-ollama-models` from /Users/jason/Developer/Dex"
+        ),
+    )
+}
+
+fn normalize_ollama_models_dir(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_trailing_slashes = trimmed.trim_end_matches('/');
+    if without_trailing_slashes.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(without_trailing_slashes.to_string())
+    }
+}
+
+fn current_user_id() -> Result<String> {
+    let output = command_output("id", &["-u"])?;
+    let uid = output.trim();
+    if uid.is_empty() {
+        return Err(anyhow!("id -u returned an empty value"));
+    }
+    Ok(uid.to_string())
+}
+
+fn command_output(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("running {program} {}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(anyhow!("{program} {} failed: {detail}", args.join(" ")));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn launch_agent_plist_exists(label: &str) -> bool {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Users/jason"));
+    home.join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"))
+        .exists()
+}
+
+fn launchctl_label_enabled(output: &str, label: &str) -> Option<bool> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('"') || !trimmed.contains(label) {
+            continue;
+        }
+        let mut parts = trimmed.split("=>");
+        let Some(raw_label) = parts.next() else {
+            continue;
+        };
+        let Some(raw_state) = parts.next() else {
+            continue;
+        };
+        let parsed_label = raw_label.trim().trim_matches('"');
+        if parsed_label != label {
+            continue;
+        }
+        let state = raw_state
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .to_ascii_lowercase();
+        return match state.as_str() {
+            "enabled" => Some(true),
+            "disabled" => Some(false),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn launchctl_list_contains_label(output: &str, label: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_whitespace()
+            .last()
+            .is_some_and(|candidate| candidate == label)
+    })
+}
+
+fn launchctl_list_contains_prefix(output: &str, prefix: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_whitespace()
+            .last()
+            .is_some_and(|candidate| candidate.starts_with(prefix))
+    })
 }
 
 async fn check_ollama_resident_pressure(config: Option<&DoctorRuntimeConfig>) -> DoctorCheck {
@@ -2037,10 +2373,11 @@ fn print_operator_status_report(
     checks: &[DoctorCheck],
     audit_path: &Path,
     receipts: &[ActionReceipt],
+    operator_context_markdown: &str,
 ) {
     print!(
         "{}",
-        format_operator_status_report(checks, audit_path, receipts)
+        format_operator_status_report(checks, audit_path, receipts, operator_context_markdown)
     );
 }
 
@@ -2048,6 +2385,7 @@ fn format_operator_status_report(
     checks: &[DoctorCheck],
     audit_path: &Path,
     receipts: &[ActionReceipt],
+    operator_context_markdown: &str,
 ) -> String {
     let mut out = String::new();
     out.push_str("Dexter Operator Status\n\n");
@@ -2063,6 +2401,20 @@ fn format_operator_status_report(
     }
 
     out.push('\n');
+    out.push_str("Current Context\n");
+    let context = operator_context_markdown.trim();
+    if context.is_empty() {
+        out.push_str(DEFAULT_OPERATOR_CONTEXT_MARKDOWN);
+    } else {
+        out.push_str(context);
+    }
+    out.push('\n');
+
+    out.push('\n');
+    out.push_str("Latest Action Summary\n");
+    out.push_str(&format_latest_action_summary(receipts));
+
+    out.push('\n');
     out.push_str("Recent Actions\n");
     out.push_str(&format!("source: {}\n\n", audit_path.display()));
     if receipts.is_empty() {
@@ -2076,6 +2428,23 @@ fn format_operator_status_report(
     out.push('\n');
     out.push_str(doctor_result_line(checks));
     out.push('\n');
+    out
+}
+
+fn format_latest_action_summary(receipts: &[ActionReceipt]) -> String {
+    let Some(receipt) = receipts.first() else {
+        return "- No recent action receipt was found.\n".to_string();
+    };
+
+    let mut out = String::new();
+    if receipt.status == "executed" {
+        out.push_str(&format_success_action_evidence_block(
+            receipt,
+            "The latest audited action executed successfully.",
+        ));
+    } else {
+        out.push_str(&format_failed_action_evidence_block(receipt));
+    }
     out
 }
 
@@ -2105,16 +2474,16 @@ fn format_why_no_action_report(
         .first()
         .filter(|receipt| receipt.status != "executed")
     {
-        out.push_str(&format!("- {}\n", action_receipt_diagnosis(receipt)));
-        out.push_str(&format!("- Evidence: {}\n", receipt.result));
-        out.push_str(&format!("- Target: {}\n", receipt.target));
+        out.push_str(&format_failed_action_evidence_block(receipt));
     } else if let Some(clue) = session_clue {
         out.push_str(&format!("- {}\n", clue.diagnosis));
         out.push_str(&format!("- Evidence: {}\n", clue.evidence));
         out.push_str(&format!("- Next step: {}\n", clue.operator_next_step));
     } else if let Some(receipt) = receipts.first() {
-        out.push_str("- The most recent audited action executed successfully.\n");
-        out.push_str(&format!("- Evidence: {}\n", receipt.result));
+        out.push_str(&format_success_action_evidence_block(
+            receipt,
+            "The most recent audited action executed successfully.",
+        ));
     } else {
         out.push_str("- No recent action receipt or known refusal clue was found.\n");
         out.push_str("- This usually means the last turn was normal chat, the model never emitted an action, or the session did not persist yet.\n");
@@ -2173,43 +2542,6 @@ fn format_why_no_action_report(
     out
 }
 
-fn action_receipt_diagnosis(receipt: &ActionReceipt) -> String {
-    let status = receipt.status.as_str();
-    let action_type = receipt.action_type.as_str();
-    let result = receipt.result.to_ascii_lowercase();
-
-    if status == "denied" {
-        return "The action reached the approval gate and was denied before execution.".to_string();
-    }
-    if status == "expired" {
-        return "The action reached the approval gate, but approval expired before execution."
-            .to_string();
-    }
-    if status == "abandoned" {
-        return "The action was abandoned before approval, likely because the session ended."
-            .to_string();
-    }
-    if action_type == "message_send" && result.contains("must be resolved by the orchestrator") {
-        return "A raw message_send action was blocked because recipient resolution must happen through Rust-side Contacts lookup.".to_string();
-    }
-    if result.contains("timed out") {
-        return "The external tool or worker timed out before Dexter could complete the action."
-            .to_string();
-    }
-    if action_type == "applescript" {
-        return "AppleScript execution failed after the action was approved or allowed by policy."
-            .to_string();
-    }
-    if action_type == "browser" {
-        return "Browser automation failed after the action was dispatched.".to_string();
-    }
-    if action_type == "shell" {
-        return "The shell command ran but returned a failure.".to_string();
-    }
-
-    "The action reached the engine but did not complete successfully.".to_string()
-}
-
 fn truncate_for_report(value: &str, max_chars: usize) -> String {
     let chars: Vec<char> = value.chars().collect();
     if chars.len() <= max_chars {
@@ -2224,21 +2556,112 @@ fn truncate_for_report(value: &str, max_chars: usize) -> String {
 fn suggested_recovery_commands(checks: &[DoctorCheck]) -> Vec<String> {
     let mut commands = Vec::new();
     for check in checks {
-        if check.status != DoctorStatus::Fail {
+        if check.status == DoctorStatus::Ok {
             continue;
         }
-        let target = match check.name.as_str() {
-            "STT worker" => RestartTarget::Stt,
-            "TTS worker" => RestartTarget::Tts,
-            "browser worker" => RestartTarget::Browser,
-            _ => continue,
-        };
-        let command = format!("dexter-cli --restart-component {}", target.command_arg());
-        if !commands.contains(&command) {
-            commands.push(command);
+
+        match check.name.as_str() {
+            "core socket file" | "daemon ping" | "daemon health" => {
+                if daemon_health_check_is_pending(check) {
+                    continue;
+                }
+                push_recovery_command(
+                    &mut commands,
+                    "cd /Users/jason/Developer/Dex && make open-app",
+                );
+                push_recovery_command(&mut commands, "cd /Users/jason/Developer/Dex && make run");
+            }
+            "ollama models dir" => {
+                push_recovery_command(
+                    &mut commands,
+                    "cd /Users/jason/Developer/Dex && make operator-ready",
+                );
+            }
+            "fast model" | "primary model" | "embed model" => {
+                if model_check_is_pending(check) {
+                    continue;
+                }
+                push_recovery_command(
+                    &mut commands,
+                    "cd /Users/jason/Developer/Dex && make operator-ready",
+                );
+                push_recovery_command(
+                    &mut commands,
+                    "cd /Users/jason/Developer/Dex && make restart",
+                );
+            }
+            "ollama" => {
+                push_recovery_command(&mut commands, "open -a Ollama");
+                push_recovery_command(
+                    &mut commands,
+                    "cd /Users/jason/Developer/Dex && make operator-ready",
+                );
+            }
+            "ollama runners" => {
+                if let Some(command) = extract_backticked_ollama_stop_command(&check.detail) {
+                    push_recovery_command(&mut commands, &command);
+                } else {
+                    push_recovery_command(&mut commands, "ollama ps");
+                }
+            }
+            "STT worker" | "TTS worker" | "browser worker" => {
+                if worker_check_is_pending(check) {
+                    continue;
+                }
+                let target = match check.name.as_str() {
+                    "STT worker" => RestartTarget::Stt,
+                    "TTS worker" => RestartTarget::Tts,
+                    "browser worker" => RestartTarget::Browser,
+                    _ => continue,
+                };
+                let command = format!("dexter-cli --restart-component {}", target.command_arg());
+                push_recovery_command(&mut commands, &command);
+            }
+            _ => {}
         }
     }
     commands
+}
+
+fn worker_check_is_pending(check: &DoctorCheck) -> bool {
+    check.detail.trim().eq_ignore_ascii_case("pending")
+}
+
+fn daemon_health_check_is_pending(check: &DoctorCheck) -> bool {
+    check.name == "daemon health"
+        && check.status == DoctorStatus::Warn
+        && check.detail.contains("status pending")
+}
+
+fn model_check_is_pending(check: &DoctorCheck) -> bool {
+    check
+        .detail
+        .split_whitespace()
+        .last()
+        .is_some_and(|label| label.eq_ignore_ascii_case("warming"))
+}
+
+fn extract_backticked_ollama_stop_command(detail: &str) -> Option<String> {
+    let mut remainder = detail;
+    while let Some(start) = remainder.find('`') {
+        let after_start = &remainder[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            return None;
+        };
+        let candidate = after_start[..end].trim();
+        if candidate.starts_with("ollama stop ") && candidate.len() > "ollama stop ".len() {
+            return Some(candidate.to_string());
+        }
+        remainder = &after_start[end + 1..];
+    }
+    None
+}
+
+fn push_recovery_command(commands: &mut Vec<String>, command: &str) {
+    let command = command.to_string();
+    if !commands.contains(&command) {
+        commands.push(command);
+    }
 }
 
 fn print_recovery_suggestions(commands: &[String]) {
@@ -2882,6 +3305,157 @@ mod tests {
     }
 
     #[test]
+    fn launchctl_label_enabled_parses_enabled_and_disabled_labels() {
+        let output = r#"
+        disabled services = {
+            "com.jason.ollama-warm" => disabled
+            "com.ollama.ollama" => enabled
+            "com.jason.ollama" => disabled
+        }
+        "#;
+
+        assert_eq!(
+            launchctl_label_enabled(output, CUSTOM_OLLAMA_WARM_LABEL),
+            Some(false)
+        );
+        assert_eq!(
+            launchctl_label_enabled(output, OLLAMA_APP_LABEL),
+            Some(true)
+        );
+        assert_eq!(launchctl_label_enabled(output, "com.example.missing"), None);
+    }
+
+    #[test]
+    fn launchctl_list_detects_exact_label_and_prefix() {
+        let output = r#"
+        -	0	com.ollama.ollama
+        5165	0	application.com.electron.ollama.abc
+        -	1	com.jason.ollama
+        "#;
+
+        assert!(launchctl_list_contains_label(
+            output,
+            CUSTOM_OLLAMA_SERVE_LABEL
+        ));
+        assert!(launchctl_list_contains_prefix(
+            output,
+            OLLAMA_APP_PROCESS_LABEL_PREFIX
+        ));
+        assert!(!launchctl_list_contains_label(
+            output,
+            CUSTOM_OLLAMA_WARM_LABEL
+        ));
+    }
+
+    #[test]
+    fn ollama_launch_agent_check_allows_app_only_state() {
+        let state = OllamaLaunchAgentState {
+            app_running: true,
+            custom_serve_enabled: false,
+            custom_serve_loaded: false,
+            warm_helper_enabled: false,
+            warm_helper_loaded: false,
+            homebrew_serve_loaded: false,
+        };
+
+        let check = ollama_launch_agent_check_from_state(&state);
+
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.name, "ollama launch");
+        assert!(check.detail.contains("Ollama.app"));
+    }
+
+    #[test]
+    fn ollama_models_env_check_accepts_expected_launchctl_path() {
+        let check =
+            ollama_models_env_check_from_values(None, Some("/Users/jason/ollama-models/\n"));
+
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.name, "ollama models dir");
+        assert!(check.detail.contains("launchctl"));
+        assert!(check.detail.contains(EXPECTED_OLLAMA_MODELS_DIR));
+    }
+
+    #[test]
+    fn ollama_models_env_check_warns_on_external_runtime_path() {
+        let check = ollama_models_env_check_from_values(
+            Some("/Volumes/BitHappens/ollama-models"),
+            Some("/Volumes/BitHappens/ollama-models"),
+        );
+
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert_eq!(check.name, "ollama models dir");
+        assert!(check.detail.contains(EXPECTED_OLLAMA_MODELS_DIR));
+        assert!(check.detail.contains("/Volumes/BitHappens/ollama-models"));
+        assert!(check.detail.contains("make configure-ollama-models"));
+    }
+
+    #[test]
+    fn ollama_models_env_check_warns_when_unset() {
+        let check = ollama_models_env_check_from_values(None, Some("\n"));
+
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("process=unset"));
+        assert!(check.detail.contains("launchctl=unset"));
+        assert!(check.detail.contains("make configure-ollama-models"));
+    }
+
+    #[test]
+    fn ollama_launch_agent_check_fails_for_custom_serve_conflict() {
+        let state = OllamaLaunchAgentState {
+            app_running: true,
+            custom_serve_enabled: true,
+            custom_serve_loaded: false,
+            warm_helper_enabled: false,
+            warm_helper_loaded: false,
+            homebrew_serve_loaded: false,
+        };
+
+        let check = ollama_launch_agent_check_from_state(&state);
+
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert_eq!(check.name, "ollama launch");
+        assert!(check.detail.contains(CUSTOM_OLLAMA_SERVE_LABEL));
+        assert!(check.detail.contains("port 11434"));
+        assert!(check.detail.contains("launchctl disable"));
+    }
+
+    #[test]
+    fn ollama_launch_agent_check_fails_for_warm_helper_conflict() {
+        let state = OllamaLaunchAgentState {
+            app_running: true,
+            custom_serve_enabled: false,
+            custom_serve_loaded: false,
+            warm_helper_enabled: true,
+            warm_helper_loaded: false,
+            homebrew_serve_loaded: false,
+        };
+
+        let check = ollama_launch_agent_check_from_state(&state);
+
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains(CUSTOM_OLLAMA_WARM_LABEL));
+        assert!(check.detail.contains("queue model loads"));
+    }
+
+    #[test]
+    fn ollama_launch_agent_check_fails_for_homebrew_loaded_conflict() {
+        let state = OllamaLaunchAgentState {
+            app_running: true,
+            custom_serve_enabled: false,
+            custom_serve_loaded: false,
+            warm_helper_enabled: false,
+            warm_helper_loaded: false,
+            homebrew_serve_loaded: true,
+        };
+
+        let check = ollama_launch_agent_check_from_state(&state);
+
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains(HOMEBREW_OLLAMA_LABEL));
+    }
+
+    #[test]
     fn action_receipt_from_audit_formats_shell_success() {
         let receipt = action_receipt_from_audit(AuditEntryOwned {
             timestamp: "2026-05-18T12:00:00Z".to_string(),
@@ -3020,14 +3594,24 @@ mod tests {
             duration_ms: Some(12),
         }];
 
-        let report =
-            format_operator_status_report(&checks, Path::new("/tmp/dexter-audit.jsonl"), &receipts);
+        let report = format_operator_status_report(
+            &checks,
+            Path::new("/tmp/dexter-audit.jsonl"),
+            &receipts,
+            "- Focus: iTerm2\n- Dexter can:\n  - explain the latest shell error",
+        );
 
         assert!(report.contains("Dexter Operator Status"));
         assert!(report.contains("Health"));
         assert!(report.contains("OK   daemon ping        core version 0.1.0"));
         assert!(report.contains("FAIL TTS worker         degraded"));
         assert!(report.contains("Suggested fixes:\n  dexter-cli --restart-component tts\n"));
+        assert!(report.contains("Current Context"));
+        assert!(report.contains("Focus: iTerm2"));
+        assert!(report.contains("explain the latest shell error"));
+        assert!(report.contains("Latest Action Summary"));
+        assert!(report.contains("The latest audited action executed successfully."));
+        assert!(report.contains("Evidence: Succeeded: status"));
         assert!(report.contains("Recent Actions"));
         assert!(report.contains("source: /tmp/dexter-audit.jsonl"));
         assert!(report.contains("EXECUTED  shell"));
@@ -3036,15 +3620,84 @@ mod tests {
     }
 
     #[test]
+    fn recovery_suggestions_include_launch_commands_when_daemon_is_down() {
+        let checks = vec![
+            DoctorCheck::fail("core socket file", "/tmp/dexter.sock missing"),
+            DoctorCheck::fail("daemon ping", "connect failed"),
+            DoctorCheck::fail("daemon health", "connect failed"),
+        ];
+
+        let suggestions = suggested_recovery_commands(&checks);
+
+        assert_eq!(
+            suggestions,
+            vec![
+                "cd /Users/jason/Developer/Dex && make open-app".to_string(),
+                "cd /Users/jason/Developer/Dex && make run".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn recovery_suggestions_include_operator_ready_for_model_env_warnings() {
+        let checks = vec![DoctorCheck::warn(
+            "ollama models dir",
+            "expected OLLAMA_MODELS=/Users/jason/ollama-models",
+        )];
+
+        let suggestions = suggested_recovery_commands(&checks);
+
+        assert_eq!(
+            suggestions,
+            vec!["cd /Users/jason/Developer/Dex && make operator-ready".to_string()]
+        );
+    }
+
+    #[test]
     fn format_operator_status_report_handles_empty_receipts() {
         let report = format_operator_status_report(
             &[DoctorCheck::ok("daemon ping", "core version 0.1.0")],
             Path::new("/tmp/dexter-audit.jsonl"),
             &[],
+            "",
         );
 
+        assert!(report.contains("Current Context"));
+        assert!(report.contains("No focused app context"));
         assert!(report.contains("No action receipts found."));
+        assert!(report.contains("Latest Action Summary"));
+        assert!(report.contains("No recent action receipt was found."));
         assert!(report.contains("Result: OK - no failed checks."));
+    }
+
+    #[test]
+    fn format_operator_status_report_summarizes_failed_latest_action() {
+        let receipt = ActionReceipt {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "act-status-failed".to_string(),
+            action_type: "message_send".to_string(),
+            category: "cautious".to_string(),
+            target: "iMessage to Jason".to_string(),
+            status: "failed".to_string(),
+            approval: "not required".to_string(),
+            result: "Failed: message_send must be resolved by the orchestrator before execution"
+                .to_string(),
+            duration_ms: Some(3),
+        };
+
+        let report = format_operator_status_report(
+            &[DoctorCheck::ok("daemon ping", "core version 0.1.0")],
+            Path::new("/tmp/dexter-audit.jsonl"),
+            &[receipt],
+            "- Focus: Messages\n- Dexter can:\n  - resolve recipients through Contacts",
+        );
+
+        assert!(report.contains("Latest Action Summary"));
+        assert!(report.contains("Current Context"));
+        assert!(report.contains("resolve recipients through Contacts"));
+        assert!(report.contains("raw message_send action was blocked"));
+        assert!(report.contains("Target: iMessage to Jason"));
+        assert!(report.contains("Next step: Ask again using the recipient's exact Contacts name"));
     }
 
     #[test]
@@ -3119,6 +3772,29 @@ mod tests {
     }
 
     #[test]
+    fn analyze_session_for_action_clue_detects_contacts_lookup_failure() {
+        let clue = analyze_session_for_action_clue(CliSessionState {
+            session_id: "session-contacts-lookup-failed".to_string(),
+            session_start: "2026-05-23T00:00:00Z".to_string(),
+            session_end: None,
+            conversation_history: vec![
+                CliHistoryEntry {
+                    role: "user".to_string(),
+                    content: "text Jason Phillips saying smoke".to_string(),
+                },
+                CliHistoryEntry {
+                    role: "assistant".to_string(),
+                    content: "Contacts lookup failed while resolving Jason Phillips, so I didn't send it. Check Contacts access and try again.".to_string(),
+                },
+            ],
+        })
+        .expect("Contacts lookup failure should be recognized");
+
+        assert!(clue.diagnosis.contains("Contacts lookup failed"));
+        assert!(clue.operator_next_step.contains("Check Contacts access"));
+    }
+
+    #[test]
     fn format_why_no_action_report_prefers_failed_action_receipt() {
         let receipt = ActionReceipt {
             timestamp: "2026-05-23T00:00:00Z".to_string(),
@@ -3152,6 +3828,7 @@ mod tests {
 
         assert!(report.contains("Dexter Action Diagnostic"));
         assert!(report.contains("raw message_send action was blocked"));
+        assert!(report.contains("Next step: Ask again using the recipient's exact Contacts name"));
         assert!(report.contains("source: /tmp/audit.jsonl"));
         assert!(report.contains("Latest Session Clue"));
     }
@@ -3192,17 +3869,83 @@ mod tests {
     }
 
     #[test]
-    fn suggested_recovery_commands_ignore_non_workers_and_dedupe() {
+    fn suggested_recovery_commands_include_degraded_workers_and_dedupe() {
         let commands = suggested_recovery_commands(&[
             DoctorCheck::fail("TTS worker", "degraded"),
-            DoctorCheck::warn("browser worker", "pending"),
+            DoctorCheck::warn("browser worker", "degraded"),
             DoctorCheck::fail("primary model", "not warm"),
             DoctorCheck::fail("TTS worker", "degraded"),
         ]);
         assert_eq!(
             commands,
-            vec!["dexter-cli --restart-component tts".to_string()]
+            vec![
+                "dexter-cli --restart-component tts".to_string(),
+                "dexter-cli --restart-component browser".to_string(),
+                "cd /Users/jason/Developer/Dex && make operator-ready".to_string(),
+                "cd /Users/jason/Developer/Dex && make restart".to_string(),
+            ]
         );
+    }
+
+    #[test]
+    fn suggested_recovery_commands_do_not_restart_pending_warmup() {
+        let commands = suggested_recovery_commands(&[
+            DoctorCheck::warn(
+                "daemon health",
+                "status pending; pending components primary_model,stt_worker",
+            ),
+            DoctorCheck::warn("STT worker", "pending"),
+            DoctorCheck::warn("primary model", "gemma4:26b warming"),
+        ]);
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn suggested_recovery_commands_include_model_recovery_after_warmup() {
+        let commands = suggested_recovery_commands(&[DoctorCheck::fail(
+            "primary model",
+            "gemma4:26b not warm",
+        )]);
+        assert_eq!(
+            commands,
+            vec![
+                "cd /Users/jason/Developer/Dex && make operator-ready".to_string(),
+                "cd /Users/jason/Developer/Dex && make restart".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggested_recovery_commands_include_ollama_app_and_operator_ready() {
+        let commands = suggested_recovery_commands(&[DoctorCheck::fail(
+            "ollama",
+            "http://localhost:11434 unreachable",
+        )]);
+        assert_eq!(
+            commands,
+            vec![
+                "open -a Ollama".to_string(),
+                "cd /Users/jason/Developer/Dex && make operator-ready".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggested_recovery_commands_include_unexpected_runner_stop() {
+        let commands = suggested_recovery_commands(&[DoctorCheck::warn(
+            "ollama runners",
+            "unexpected large resident model(s): deepseek-r1:32b (20.0 GiB); run `ollama stop deepseek-r1:32b` if startup or warmup degrades",
+        )]);
+        assert_eq!(commands, vec!["ollama stop deepseek-r1:32b".to_string()]);
+    }
+
+    #[test]
+    fn suggested_recovery_commands_fallback_for_unstructured_runner_warning() {
+        let commands = suggested_recovery_commands(&[DoctorCheck::warn(
+            "ollama runners",
+            "/api/ps payload shape was unexpected",
+        )]);
+        assert_eq!(commands, vec!["ollama ps".to_string()]);
     }
 
     #[test]
@@ -3284,6 +4027,7 @@ mod tests {
                 total_bytes: 100 * 1024 * 1024 * 1024,
                 detail: "ok".to_string(),
             }],
+            operator_context_markdown: String::new(),
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Ok);
@@ -3325,12 +4069,24 @@ mod tests {
             tts_worker: "ready".to_string(),
             browser_worker: "ready".to_string(),
             disk: Vec::new(),
+            operator_context_markdown: String::new(),
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Warn);
+        assert!(checks[0].detail.contains("status pending"));
+        assert!(checks[0]
+            .detail
+            .contains("pending components fast_model,primary_model,stt_worker"));
+        assert!(
+            !checks[0].detail.contains("attention components"),
+            "pending warmup should not be framed as attention"
+        );
         assert!(checks
             .iter()
             .any(|check| check.name == "fast model" && check.status == DoctorStatus::Warn));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "fast model" && check.detail == "qwen3:8b warming"));
         assert!(checks
             .iter()
             .any(|check| check.name == "primary model" && check.status == DoctorStatus::Warn));
@@ -3365,6 +4121,7 @@ mod tests {
             tts_worker: "degraded".to_string(),
             browser_worker: "ready".to_string(),
             disk: Vec::new(),
+            operator_context_markdown: String::new(),
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Fail);

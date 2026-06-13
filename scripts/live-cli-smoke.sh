@@ -1088,6 +1088,7 @@ test_browser_action_path_is_clean() {
     assert_absent "$name" "$offset" "browser actions permanently degraded" || ok=1
     assert_absent "$name" "$offset" "Browser worker failed to start" || ok=1
     assert_absent "$name" "$offset" "Browser worker reached max restart attempts" || ok=1
+    assert_absent "$name" "$offset" "tool handling did not run" || ok=1
 
     local dispatched browser_result
     dispatched="$(count_since "$offset" "Action dispatched to background task")"
@@ -1096,9 +1097,17 @@ test_browser_action_path_is_clean() {
         say "$FAIL" "$name - no browser/action signal appeared in logs"
         ok=1
     fi
+    if grep -Eiq "i (can'?t|cannot|do not|don't) (browse|access the web|access websites)|my browsing is limited|if you (give|have|find) (me )?(a specific )?(url|link|site)" "$out"; then
+        say "$FAIL" "$name - model emitted a browser/tool capability denial"
+        ok=1
+    fi
+    if ! grep -Fq "Example Domain" "$out"; then
+        say "$FAIL" "$name - browser workflow did not return the example.com page title"
+        ok=1
+    fi
 
     rm -f "$out"
-    record "$name" "$ok" "browser request did not hit a degraded/failed path"
+    record "$name" "$ok" "browser request used the tool path and returned the page title"
 }
 
 test_browser_routine_actions_execute_without_approval() {

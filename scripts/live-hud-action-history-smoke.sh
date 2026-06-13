@@ -11,11 +11,13 @@ CORE_LOG="/tmp/dexter-hud-action-history-core-smoke.log"
 SWIFT_LOG="/tmp/dexter-hud-action-history-swift-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 SWIFT_DIR="$ROOT_DIR/src/swift"
 CORE_PID=""
 SWIFT_PID=""
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 
 PASS="PASS"
 FAIL="FAIL"
@@ -53,11 +55,11 @@ PY
 
 cleanup() {
     if [[ -n "$SWIFT_PID" ]]; then
-        kill "$SWIFT_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$SWIFT_PID"
         wait "$SWIFT_PID" >/dev/null 2>&1 || true
     fi
     if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$CORE_PID"
         wait "$CORE_PID" >/dev/null 2>&1 || true
     fi
 }
@@ -111,7 +113,7 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$CORE_LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -120,7 +122,7 @@ start_core_if_requested() {
         waited=$((waited + 1))
     done
 
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$CORE_LOG" || true
     exit 2
 }
@@ -203,6 +205,10 @@ main() {
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] actionHistoryRequest" || ok=1
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[DexterClient] ActionHistory RPC OK" || ok=1
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "$token" || ok=1
+    assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "Latest Action Summary" || ok=1
+    assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "The latest audited action executed successfully." || ok=1
+    assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "Evidence: Succeeded:" || ok=1
+    assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "Recent Receipts" || ok=1
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] showActionHistory" || ok=1
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] showUtilityMarkdown" || ok=1
     assert_contains "Swift HUD action history smoke" "$CORE_LOG" "Action history requested" || ok=1

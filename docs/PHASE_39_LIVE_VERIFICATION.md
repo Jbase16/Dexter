@@ -223,6 +223,60 @@ iMessage and should remain opt-in per run.
 
 ---
 
+## Shared Action Evidence Addendum — 2026-05-27
+
+The daemon `ActionDiagnostic` path and `dexter-cli` offline/operator paths now
+share one action-evidence formatter for failed and successful audited actions.
+This keeps the operator-facing diagnosis, evidence, target, and next-step copy
+from drifting between:
+
+- `dexter-cli --why`;
+- `dexter-cli --status`;
+- the daemon-owned `ActionDiagnostic` RPC used by the Swift HUD Why surface.
+
+Observed helper consolidation results:
+
+| Check | Result | Notes |
+|---|---:|---|
+| `cargo test --bin dexter-core action_evidence` | PASS | Shared evidence helper copy green. |
+| `cargo test --bin dexter-core diagnostic_prefers_failed_receipt` | PASS | Daemon diagnostic prefers failed audit evidence. |
+| `cargo test --bin dexter-cli format_operator_status_report` | PASS | CLI status latest-action summary green. |
+| `cargo test --bin dexter-cli format_why_no_action_report_prefers_failed_action_receipt` | PASS | CLI why-report failed-receipt path green. |
+| `cargo test --bin dexter-cli` | PASS | 48 passed. |
+| `cargo test --bin dexter-core` | PASS | 621 passed, 7 ignored. |
+| `DEXTER_SMOKE_SUMMARY_TARGETS="live-smoke-action-diagnostic live-smoke-operator-status live-smoke-hud-action-diagnostic" make live-smoke-summary` | PASS | 3 focused live smokes passed; summary at `docs/live-smoke-results/live-smoke-20260527_202232.md`. |
+| `make smoke` | PASS | Rust check, Swift build, and 20 Python worker tests green. |
+
+After the focused live smoke and `make smoke`, `/tmp/dexter.sock` was checked
+and no Dexter daemon was left accepting connections.
+
+The Swift HUD status surface was then brought into parity with `dexter-cli
+--status`: it now renders a `Latest Action Summary` before `Recent Actions`.
+That summary is daemon-owned: `ActionHistoryResponse` carries
+`latest_action_summary_markdown`, produced from the same Rust action-evidence
+formatter used by daemon diagnostics. Swift renders that field instead of
+duplicating the success/failure, evidence, target, and next-step rules.
+
+The HUD health smoke seeds a deterministic safe action receipt before opening
+the status surface, so the live test verifies the actual latest-action summary
+rather than relying on stale local audit history.
+
+Observed HUD status parity results:
+
+| Check | Result | Notes |
+|---|---:|---|
+| `bash -n scripts/live-hud-health-smoke.sh` | PASS | HUD health smoke syntax valid. |
+| `make proto` | PASS | Swift proto artifacts regenerated with `latest_action_summary_markdown`. |
+| `cargo test --bin dexter-core latest_action_summary_markdown` | PASS | Daemon-owned latest-action markdown copy green. |
+| `cargo test --bin dexter-core` | PASS | 624 passed, 7 ignored. |
+| `cargo test --bin dexter-cli` | PASS | 48 passed. |
+| `cd src/swift && swift build` | PASS | Swift app build clean aside from existing warnings. |
+| `make live-smoke-hud-health` | PASS | HUD status preview included `Latest Action Summary`, success evidence, and the seeded `HUD_STATUS_...` receipt. |
+| `DEXTER_SMOKE_SUMMARY_TARGETS="live-smoke-operator-status live-smoke-hud-health live-smoke-hud-action-history" make live-smoke-summary` | PASS | 3 focused live smokes passed; summary at `docs/live-smoke-results/live-smoke-20260527_204928.md`. |
+| `make smoke` | PASS | Rust check, Swift build, and 20 Python worker tests green. |
+
+---
+
 ## What This Proves
 
 ### Model routing and Humor Engine
@@ -425,6 +479,24 @@ Full live suite:
 make live-smoke-all
 ```
 
+Full live suite with a markdown receipt:
+
+```bash
+make live-smoke-summary
+```
+
+Smaller multi-target receipt:
+
+```bash
+DEXTER_SMOKE_SUMMARY_TARGETS="live-smoke-action-diagnostic live-smoke-operator-status" make live-smoke-summary
+```
+
+The latest receipt is copied to:
+
+```text
+docs/live-smoke-results/latest.md
+```
+
 ---
 
 ## Next Phase Candidate
@@ -438,7 +510,61 @@ Recommended focus:
 - Operator-facing diagnostic copy for "why didn't Dexter act?" scenarios.
 - Clearer local logs for action refusal causes, Contacts resolution failures,
   worker degradation, and off-host refusal.
-- Optional smoke summary artifact written to a local file after live suites.
+- Smoke summary artifacts after live suites.
+
+The summary artifact item is implemented by `make live-smoke-summary`. It wraps
+the existing live-smoke target sequence, captures per-target logs under
+`docs/live-smoke-results/logs/<timestamp>/`, and writes both a timestamped
+markdown receipt and `docs/live-smoke-results/latest.md`.
+
+The operator-facing diagnostic copy item is partially implemented for audited
+action failures. `Action Diagnostic` now includes a concrete `Next step` line
+for failed, denied, expired, abandoned, timed-out, shell, browser,
+AppleScript, and raw `message_send` receipts. Session-only refusal clues already
+had next-step copy; audited receipts now have the same operator shape.
+
+The audited-receipt cause and next-step copy now lives in
+`src/rust-core/src/action_evidence.rs`. The daemon `ActionDiagnostic` path and
+the `dexter-cli --why` offline fallback both call the same helper, so operator
+copy cannot silently diverge between HUD and Terminal diagnostics.
+
+`make live-smoke-summary` was run for the full live suite on 2026-05-27 and
+passed:
+
+```text
+Result: PASS
+Passed: 16
+Failed: 0
+Duration: 14m 37s
+Receipt: docs/live-smoke-results/live-smoke-20260527_163303.md
+```
+
+The receipt-backed checkpoint covered recovery, degraded-mode diagnostics,
+external failures, operator status, action diagnostics, natural-language CLI,
+deterministic action matrix, receipts, approval lifecycle, HUD lifecycle, HUD
+health, HUD action history, HUD action diagnostics, HUD approval, action
+cancellation, and barge-in.
+
+After extracting shared action-evidence copy, a focused receipt-backed pass also
+passed:
+
+```text
+Result: PASS
+Passed: 3
+Failed: 0
+Receipt: docs/live-smoke-results/live-smoke-20260527_165126.md
+```
+
+That focused pass covered CLI action diagnostics, operator status, and the real
+Swift HUD action-diagnostic surface.
+
+`dexter-cli --status` now includes a `Latest Action Summary` section before the
+raw recent-action list. For successful actions it reports the target and
+success evidence; for failed, denied, expired, abandoned, timed-out, shell,
+browser, AppleScript, or raw `message_send` receipts it uses the shared
+`action_evidence` cause and next-step wording. `make live-smoke-operator-status`
+was updated to verify the summary section, and the CLI unit suite covers
+successful, failed, and empty status reports.
 
 The policy gate and primary live workflows are now covered well enough to move
 from "can this path survive?" to "can the operator understand what happened?"

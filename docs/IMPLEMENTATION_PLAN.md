@@ -502,6 +502,10 @@ bootstrap without clarifying questions.
 - 36GB unified memory, Apple Silicon
 - Ollama with Metal acceleration
 - Models are NOT all loaded simultaneously — Ollama loads on demand, unloads after idle
+- Ollama storage is intentionally split: `/Volumes/BitHappens/ollama-models`
+  remains the full external model library, while `/Users/jason/ollama-models`
+  is the active runtime store selected by `OLLAMA_MODELS` for Dexter's warm
+  local model set.
 
 ### 3.2 Model Selection
 

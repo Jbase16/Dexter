@@ -78,13 +78,9 @@ fn expand_home_path(path: &PathBuf) -> PathBuf {
 ///   (1) Expand leading `~` / `~/...` to `$HOME`.
 ///   (2) Lexically collapse `.` and `..` components without touching the
 ///       filesystem (equivalent to `os.path.normpath`).
-///
-/// Does NOT canonicalize symlinks — that requires the path to exist, and the
-/// classifier runs BEFORE the file is written. A determined attack via symlink
-/// (e.g. `~/link` pointing at `/etc/hosts`) still bypasses the prefix check.
-/// That's a smaller surface than the `..` bypass and is out of scope for this
-/// helper; future hardening could add a "canonicalize nearest existing parent"
-/// step.
+///   (3) Canonicalize the nearest existing parent, then re-append any missing
+///       suffix. This resolves symlinked parents before policy classification
+///       without requiring the final target file to exist.
 pub(crate) fn normalize_for_policy(path: &std::path::Path) -> PathBuf {
     use std::path::Component;
     let expanded = expand_home_path(&path.to_path_buf());
@@ -98,7 +94,44 @@ pub(crate) fn normalize_for_policy(path: &std::path::Path) -> PathBuf {
             other => out.push(other.as_os_str()),
         }
     }
-    out
+    canonicalize_nearest_existing_parent(&out)
+}
+
+fn canonicalize_nearest_existing_parent(path: &std::path::Path) -> PathBuf {
+    let mut probe = path.to_path_buf();
+    let mut suffix = Vec::new();
+
+    loop {
+        if probe.as_os_str().is_empty() {
+            if let Ok(mut resolved) = std::env::current_dir() {
+                for part in suffix.iter().rev() {
+                    resolved.push(part);
+                }
+                return resolved;
+            }
+            return path.to_path_buf();
+        }
+
+        if probe.exists() {
+            match std::fs::canonicalize(&probe) {
+                Ok(mut resolved) => {
+                    for part in suffix.iter().rev() {
+                        resolved.push(part);
+                    }
+                    return resolved;
+                }
+                Err(_) => return path.to_path_buf(),
+            }
+        }
+
+        let Some(name) = probe.file_name() else {
+            return path.to_path_buf();
+        };
+        suffix.push(PathBuf::from(name.to_os_string()));
+        if !probe.pop() {
+            return path.to_path_buf();
+        }
+    }
 }
 
 // ── macOS command normaliser ──────────────────────────────────────────────────
@@ -653,10 +686,19 @@ mod tests {
 
     // ── Phase 38 / Codex finding [3]: normalize_for_policy unit coverage ─────
 
+    fn is_system_hosts_path(path: &PathBuf) -> bool {
+        let s = path.to_string_lossy();
+        s == "/etc/hosts" || s == "/private/etc/hosts"
+    }
+
     #[test]
     fn normalize_for_policy_collapses_dotdot() {
         let normalized = normalize_for_policy(std::path::Path::new("/Users/jason/../../etc/hosts"));
-        assert_eq!(normalized, PathBuf::from("/etc/hosts"));
+        assert!(
+            is_system_hosts_path(&normalized),
+            "dotdot path must normalize to the real system hosts path, got {}",
+            normalized.display()
+        );
     }
 
     #[test]
@@ -684,10 +726,25 @@ mod tests {
     fn normalize_for_policy_tilde_and_dotdot_combine() {
         // The exact attack: ~/../../etc/hosts. Normalize must collapse both.
         let normalized = normalize_for_policy(std::path::Path::new("~/../../etc/hosts"));
-        let s = normalized.to_string_lossy().to_string();
         assert!(
-            s.ends_with("/etc/hosts") || s == "/etc/hosts",
-            "tilde + dotdot must normalize to a system path so policy can flag it, got {s}"
+            is_system_hosts_path(&normalized),
+            "tilde + dotdot must normalize to a system path so policy can flag it, got {}",
+            normalized.display()
+        );
+    }
+
+    #[test]
+    fn normalize_for_policy_resolves_symlinked_parent() {
+        let tmp = tempdir().unwrap();
+        let link = tmp.path().join("looks-local");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+
+        let normalized = normalize_for_policy(&link.join("hosts"));
+
+        assert!(
+            is_system_hosts_path(&normalized),
+            "symlinked parent must resolve before policy classification, got {}",
+            normalized.display()
         );
     }
 }

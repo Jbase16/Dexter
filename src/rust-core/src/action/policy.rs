@@ -160,6 +160,15 @@ const APPLESCRIPT_DESTRUCTIVE_PHRASES: &[&str] = &[
 ///
 /// These are system-owned directories where writing without intent would be
 /// genuinely dangerous. `/tmp` and user home directories are CAUTIOUS, not listed here.
+const NON_SYSTEM_WRITABLE_PATH_PREFIXES: &[&str] = &[
+    "/tmp/",
+    "/private/tmp/",
+    "/var/tmp/",
+    "/private/var/tmp/",
+    "/var/folders/",
+    "/private/var/folders/",
+];
+
 const SYSTEM_PATH_PREFIXES: &[&str] = &[
     "/etc/",
     "/usr/",
@@ -589,6 +598,16 @@ impl PolicyEngine {
     fn is_system_path(path: &str) -> bool {
         let normalized = crate::action::executor::normalize_for_policy(Path::new(path));
         let path_str = normalized.to_string_lossy();
+        Self::normalized_path_is_system(&path_str)
+    }
+
+    fn normalized_path_is_system(path_str: &str) -> bool {
+        if NON_SYSTEM_WRITABLE_PATH_PREFIXES
+            .iter()
+            .any(|p| path_str.starts_with(p))
+        {
+            return false;
+        }
         SYSTEM_PATH_PREFIXES.iter().any(|p| path_str.starts_with(p))
     }
 
@@ -717,7 +736,7 @@ impl PolicyEngine {
         // normalizer is used by `execute_file_write` in `action::executor`.
         let normalized = crate::action::executor::normalize_for_policy(path);
         let path_str = normalized.to_string_lossy();
-        if SYSTEM_PATH_PREFIXES.iter().any(|p| path_str.starts_with(p)) {
+        if Self::normalized_path_is_system(&path_str) {
             ActionCategory::Destructive
         } else {
             ActionCategory::Cautious
@@ -901,6 +920,20 @@ mod tests {
             PolicyEngine::classify(&file_write("/tmp/dexter-output.txt")),
             ActionCategory::Cautious
         );
+    }
+
+    #[test]
+    fn classify_file_write_macos_tempdir_is_cautious() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = ActionSpec::FileWrite {
+            path: tmp.path().join("dexter-output.txt"),
+            content: "data".to_string(),
+            create_dirs: false,
+            rationale: None,
+            category_override: None,
+        };
+
+        assert_eq!(PolicyEngine::classify(&spec), ActionCategory::Cautious);
     }
 
     #[test]
@@ -1258,6 +1291,20 @@ mod tests {
     }
 
     #[test]
+    fn classify_shell_tee_symlinked_parent_to_system_is_destructive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("looks-local");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let target = link.join("dexter-output");
+        let target = target.to_string_lossy().to_string();
+
+        assert_eq!(
+            PolicyEngine::classify(&shell(&["tee", &target])),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
     fn classify_shell_curl_simple_get_is_cautious() {
         assert_eq!(
             PolicyEngine::classify(&shell(&["curl", "https://example.com"])),
@@ -1287,6 +1334,34 @@ mod tests {
                 "/etc/dexter",
                 "https://example.com"
             ])),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_shell_curl_symlinked_output_parent_to_system_is_destructive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("looks-local");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let target = link.join("dexter-output");
+        let target = target.to_string_lossy().to_string();
+
+        assert_eq!(
+            PolicyEngine::classify(&shell(&["curl", "-o", &target, "https://example.com"])),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_shell_find_fprint_symlinked_parent_to_system_is_destructive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("looks-local");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let target = link.join("dexter-find-output");
+        let target = target.to_string_lossy().to_string();
+
+        assert_eq!(
+            PolicyEngine::classify(&shell(&["find", ".", "-fprint", &target])),
             ActionCategory::Destructive
         );
     }
@@ -1492,6 +1567,23 @@ mod tests {
             PolicyEngine::classify(&file_write("/Users/jason/projects/foo/../bar/file.txt")),
             ActionCategory::Cautious
         );
+    }
+
+    #[test]
+    fn classify_file_write_symlinked_parent_to_system_is_destructive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("looks-local");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+
+        let spec = ActionSpec::FileWrite {
+            path: link.join("hosts"),
+            content: "data".to_string(),
+            create_dirs: false,
+            rationale: None,
+            category_override: None,
+        };
+
+        assert_eq!(PolicyEngine::classify(&spec), ActionCategory::Destructive);
     }
 
     #[test]

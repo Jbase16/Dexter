@@ -169,8 +169,22 @@ make setup-python
 # Regenerate proto artifacts (after proto changes only)
 make proto
 
-# Run (starts release Rust core + Swift UI, waits for socket before launching Swift)
+# Run (starts release Rust core + Swift UI, waits for doctor-ready health before launching Swift)
 make run
+
+# Prepare this Mac for Dexter after model-storage or launcher changes
+make operator-ready
+
+# Install/open the Dock-launchable wrapper. The wrapper opens Terminal with live logs.
+make install-app
+make open-app
+
+# Operator diagnostics for a running daemon
+make doctor
+make status
+
+# Build dexter-cli and write one local markdown bundle for launch/model/process debugging
+make diagnostic-bundle
 
 # Tests (offline, no Ollama required)
 cd src/rust-core && cargo test --bin dexter-core
@@ -179,9 +193,30 @@ cd src/rust-core && cargo test --bin dexter-core
 cd src/rust-core && cargo build --release
 ```
 
+`make operator-ready` stops stale Dexter processes and sockets, configures the
+local Ollama hot model store, verifies the configured model tags are visible,
+builds the Rust/Swift launch artifacts, and installs `~/Applications/Dexter.app`.
+
 `make run` refuses to start if another Dexter core already owns `/tmp/dexter.sock`.
 Stop the existing core/UI first so the Swift UI and `dexter-cli` talk to the same
 freshly built daemon.
+
+The Dock wrapper is documented in `docs/DEXTER_OPERATOR_CONTROLS.md`. `make run`
+waits for the socket and then doctor-clean daemon health before launching Swift.
+If startup health is queried during warmup, FAST/PRIMARY/EMBED rows should say
+`warming`. After warmup completes, non-warm active models are a real health
+issue.
+
+Operator controls are covered by `make live-smoke-hud-new-session`,
+`make live-smoke-hud-lifecycle`, `make live-smoke-process-control`, and
+`make live-smoke-stale-swift-stop`, `make live-smoke-operator-ready`,
+`make live-smoke-diagnostic-bundle`, and `make live-smoke-dock-launcher`, which
+exercise the actual New Session, Restart, Quit, external Stop, stale SwiftPM
+cleanup, consolidated readiness, diagnostic capture, and Dock launcher paths.
+
+Startup gating is covered by `make live-smoke-startup-readiness`, which verifies
+the socket appears first, then `make wait-for-ready` waits for doctor-clean
+worker/model health before the Swift UI is allowed to launch.
 
 **Dev tool** — `dexter-cli` sends typed input to the running daemon without the Swift UI:
 

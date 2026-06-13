@@ -1072,6 +1072,11 @@ actor DexterClient {
     }
 
     private func handleProactiveHealth(_ health: Dexter_V1_HealthResponse, window: FloatingWindow) async {
+        if Self.isPendingStartupHealth(health) {
+            print("[DexterClient] Proactive health probe silent status=pending degraded=\(health.degradedComponents.joined(separator: ","))")
+            return
+        }
+
         let components = Self.healthSurfaceComponents(for: health)
         guard !components.isEmpty else {
             lastSurfacedHealthComponents = []
@@ -1087,7 +1092,7 @@ actor DexterClient {
 
         let report = Self.healthHUDReport(
             for: health,
-            notice: "Startup health check found components that need attention."
+            notice: "Dexter health check found components that need attention."
         )
         print("[DexterClient] Proactive health probe surfacing degraded=\(components.joined(separator: ","))")
         await MainActor.run {
@@ -1124,6 +1129,27 @@ actor DexterClient {
     func setTtsMuted(_ muted: Bool) {
         ttsGate.muted = muted
         print("[DexterClient] TTS \(muted ? "muted" : "unmuted")")
+    }
+
+    /// Close the active gRPC session stream so the existing reconnect loop opens
+    /// a fresh session with a new session ID and empty live conversation context.
+    ///
+    /// This deliberately does not restart the Rust core, workers, or Ollama models.
+    /// It is the operator-facing "new conversation" control, not a recovery action.
+    func startNewSession() {
+        print("[DexterClient] New session requested")
+        audioPlayer.stop()
+        proactiveHealthProbeTask?.cancel()
+        proactiveHealthProbeTask = nil
+        turnRevision &+= 1
+        currentOperatorText = ""
+        currentResponseText = ""
+        actionReceiptRevision = nil
+
+        let continuation = eventContinuation
+        eventContinuation = nil
+        currentSessionID = nil
+        continuation?.finish()
     }
 
     /// Send typed text from the HUD input field into the inference pipeline.
@@ -1228,6 +1254,10 @@ extension DexterClient {
         Could not reach the Rust core at \(socketPath).
 
         \(reason)
+
+        Recovery: choose Restart Dexter from the HUD or Dexter menu.
+
+        Terminal fallback: run `cd /Users/jason/Developer/Dex && make open-app` or `cd /Users/jason/Developer/Dex && make run`.
         """
     }
 
@@ -1306,9 +1336,13 @@ extension DexterClient {
 
     private static func actionHistoryMarkdown(_ response: Dexter_V1_ActionHistoryResponse) -> String {
         let auditPath = receiptLine(response.auditLogPath, fallback: "audit path unavailable")
+        let latestSummary = latestActionSummaryLines(from: response, actionHistoryError: nil).joined(separator: "\n")
         guard !response.receipts.isEmpty else {
             return """
             ### Recent Actions
+
+            Latest Action Summary
+            \(latestSummary)
 
             No actions recorded yet.
 
@@ -1328,10 +1362,37 @@ extension DexterClient {
         return """
         ### Recent Actions
 
+        Latest Action Summary
+        \(latestSummary)
+
+        Recent Receipts
         \(rows)
 
         Audit: `\(auditPath)`
         """
+    }
+
+    private static func latestActionSummaryLines(
+        from actionHistory: Dexter_V1_ActionHistoryResponse?,
+        actionHistoryError: String?
+    ) -> [String] {
+        guard let actionHistory else {
+            var lines = ["- Action history unavailable."]
+            if let actionHistoryError, !actionHistoryError.isEmpty {
+                lines.append("- Error: \(receiptLine(actionHistoryError, fallback: "unknown error"))")
+            }
+            return lines
+        }
+
+        let markdown = actionHistory.latestActionSummaryMarkdown
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !markdown.isEmpty else {
+            return ["- No recent action receipt was found."]
+        }
+
+        return markdown
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
     }
 
     private static func actionReceiptOutcome(_ receipt: Dexter_V1_ActionReceipt) -> String {
@@ -1353,6 +1414,7 @@ extension DexterClient {
         actionHistoryError: String?
     ) -> String {
         let status = cleanStatus(health.status)
+        let attentionComponents = displayAttentionComponents(for: health)
         let restartableTargets = restartTargets(for: health)
         var lines: [String] = [
             "### Dexter Status",
@@ -1360,14 +1422,18 @@ extension DexterClient {
             "Status: \(status)"
         ]
 
-        if !health.degradedComponents.isEmpty {
-            lines.append("Attention: \(health.degradedComponents.joined(separator: ", "))")
+        if let notice = pendingWarmupNotice(forStatus: status) {
+            lines.append("Notice: \(notice)")
         }
 
-        if !restartableTargets.isEmpty {
-            let names = restartableTargets.map(\.displayName).joined(separator: ", ")
-            lines.append("Recovery: use the restart buttons below for \(names).")
+        if !attentionComponents.isEmpty {
+            lines.append("Attention: \(attentionComponents.joined(separator: ", "))")
         }
+
+        lines.append(contentsOf: recoveryGuidanceLines(
+            for: health,
+            restartableTargets: restartableTargets
+        ))
 
         lines.append("")
         lines.append("Workers")
@@ -1377,9 +1443,9 @@ extension DexterClient {
 
         lines.append("")
         lines.append("Models")
-        lines.append("- Fast: \(modelName(health.fastModel)) - \(warmLabel(health.fastModelWarm))")
-        lines.append("- Primary: \(modelName(health.primaryModel)) - \(warmLabel(health.primaryModelWarm))")
-        lines.append("- Embed: \(modelName(health.embedModel)) - \(warmLabel(health.embedModelWarm))")
+        lines.append("- Fast: \(modelName(health.fastModel)) - \(modelWarmLabel(health.fastModelWarm, healthStatus: status))")
+        lines.append("- Primary: \(modelName(health.primaryModel)) - \(modelWarmLabel(health.primaryModelWarm, healthStatus: status))")
+        lines.append("- Embed: \(modelName(health.embedModel)) - \(modelWarmLabel(health.embedModelWarm, healthStatus: status))")
 
         lines.append("")
         lines.append("Disk")
@@ -1390,6 +1456,25 @@ extension DexterClient {
                 lines.append(diskLine(disk))
             }
         }
+
+        lines.append("")
+        lines.append("Current Context")
+        let contextMarkdown = health.operatorContextMarkdown
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if contextMarkdown.isEmpty {
+            lines.append("- No focused app context has been observed yet.")
+        } else {
+            lines.append(contentsOf: contextMarkdown
+                .split(whereSeparator: \.isNewline)
+                .map(String.init))
+        }
+
+        lines.append("")
+        lines.append("Latest Action Summary")
+        lines.append(contentsOf: latestActionSummaryLines(
+            from: actionHistory,
+            actionHistoryError: actionHistoryError
+        ))
 
         lines.append("")
         lines.append("Recent Actions")
@@ -1435,25 +1520,33 @@ extension DexterClient {
 
     private static func healthMarkdown(for health: Dexter_V1_HealthResponse, notice: String?) -> String {
         let status = cleanStatus(health.status)
+        let effectiveNotice = notice ?? pendingWarmupNotice(forStatus: status)
+        let attentionComponents = displayAttentionComponents(for: health)
+        let restartableTargets = restartTargets(for: health)
         var lines: [String] = [
             "### Dexter Health",
             "",
             "Status: \(status)"
         ]
 
-        if let notice, !notice.isEmpty {
-            lines.append("Notice: \(notice)")
+        if let effectiveNotice, !effectiveNotice.isEmpty {
+            lines.append("Notice: \(effectiveNotice)")
         }
 
-        if !health.degradedComponents.isEmpty {
-            lines.append("Attention: \(health.degradedComponents.joined(separator: ", "))")
+        if !attentionComponents.isEmpty {
+            lines.append("Attention: \(attentionComponents.joined(separator: ", "))")
         }
+
+        lines.append(contentsOf: recoveryGuidanceLines(
+            for: health,
+            restartableTargets: restartableTargets
+        ))
 
         lines.append("")
         lines.append("Models")
-        lines.append("- Fast: \(modelName(health.fastModel)) - \(warmLabel(health.fastModelWarm))")
-        lines.append("- Primary: \(modelName(health.primaryModel)) - \(warmLabel(health.primaryModelWarm))")
-        lines.append("- Embed: \(modelName(health.embedModel)) - \(warmLabel(health.embedModelWarm))")
+        lines.append("- Fast: \(modelName(health.fastModel)) - \(modelWarmLabel(health.fastModelWarm, healthStatus: status))")
+        lines.append("- Primary: \(modelName(health.primaryModel)) - \(modelWarmLabel(health.primaryModelWarm, healthStatus: status))")
+        lines.append("- Embed: \(modelName(health.embedModel)) - \(modelWarmLabel(health.embedModelWarm, healthStatus: status))")
 
         lines.append("")
         lines.append("Workers")
@@ -1481,6 +1574,35 @@ extension DexterClient {
         return lines.joined(separator: "\n")
     }
 
+    private static func recoveryGuidanceLines(
+        for health: Dexter_V1_HealthResponse,
+        restartableTargets: [DexterWorkerRestartTarget]
+    ) -> [String] {
+        if isPendingStartupHealth(health) {
+            return []
+        }
+
+        var lines: [String] = []
+        if !restartableTargets.isEmpty {
+            let names = restartableTargets.map(\.displayName).joined(separator: ", ")
+            lines.append("Recovery: use the restart buttons below for \(names).")
+        }
+
+        if hasNonWarmRequiredModel(health) {
+            lines.append("Recovery: run `make operator-ready`, then restart Dexter from the app menu or with `make restart`.")
+        }
+
+        if lines.isEmpty && !displayAttentionComponents(for: health).isEmpty {
+            lines.append("Recovery: run `make diagnostic-bundle` for a local launch/model/process report.")
+        }
+
+        return lines
+    }
+
+    private static func hasNonWarmRequiredModel(_ health: Dexter_V1_HealthResponse) -> Bool {
+        !health.fastModelWarm || !health.primaryModelWarm || !health.embedModelWarm
+    }
+
     private static func restartTargets(for health: Dexter_V1_HealthResponse) -> [DexterWorkerRestartTarget] {
         var targets: [DexterWorkerRestartTarget] = []
         if isRestartableWorkerStatus(health.sttWorker) {
@@ -1496,6 +1618,9 @@ extension DexterClient {
     }
 
     private static func shouldRetryProactiveHealth(_ health: Dexter_V1_HealthResponse) -> Bool {
+        if isPendingStartupHealth(health) {
+            return true
+        }
         guard !healthSurfaceComponents(for: health).isEmpty else { return false }
         if cleanStatus(health.sttWorker).lowercased() == "pending" {
             return true
@@ -1510,6 +1635,10 @@ extension DexterClient {
         }
     }
 
+    private static func isPendingStartupHealth(_ health: Dexter_V1_HealthResponse) -> Bool {
+        cleanStatus(health.status).lowercased() == "pending"
+    }
+
     private static func healthSurfaceComponents(for health: Dexter_V1_HealthResponse) -> [String] {
         if health.degradedComponents.isEmpty {
             return []
@@ -1518,6 +1647,20 @@ extension DexterClient {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .sorted()
+    }
+
+    private static func displayAttentionComponents(for health: Dexter_V1_HealthResponse) -> [String] {
+        if isPendingStartupHealth(health) {
+            return []
+        }
+        return healthSurfaceComponents(for: health)
+    }
+
+    private static func pendingWarmupNotice(forStatus status: String) -> String? {
+        guard status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "pending" else {
+            return nil
+        }
+        return "Startup warmup is still in progress. Models or workers marked warming are not failures yet."
     }
 
     private static func isRestartableWorkerStatus(_ value: String) -> Bool {
@@ -1538,8 +1681,9 @@ extension DexterClient {
         fallback(value)
     }
 
-    private static func warmLabel(_ isWarm: Bool) -> String {
-        isWarm ? "warm" : "not warm"
+    private static func modelWarmLabel(_ isWarm: Bool, healthStatus: String) -> String {
+        if isWarm { return "warm" }
+        return healthStatus.lowercased() == "pending" ? "warming" : "not warm"
     }
 
     private static func fallback(_ value: String) -> String {

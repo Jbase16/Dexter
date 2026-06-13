@@ -2,6 +2,11 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+extension Notification.Name {
+    static let dexterHotkeyRepositionChanged = Notification.Name("com.dexter.hotkeyRepositionChanged")
+    static let dexterPlacementCommand = Notification.Name("com.dexter.placementCommand")
+}
+
 // ── AX C callback ─────────────────────────────────────────────────────────────
 //
 // AXObserver callbacks must be plain C functions — they cannot be Swift closures.
@@ -39,21 +44,32 @@ private func axFocusCallback(
 // the focused app). Returns the event unchanged for all other keypresses.
 private func hotkeyTapCallback(
     _:      CGEventTapProxy,
-    _:      CGEventType,
+    type:   CGEventType,
     event:  CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     guard let refcon else { return Unmanaged.passRetained(event) }
-    // Ignore key-repeat events — macOS fires repeated keyDown at ~12 Hz while
-    // a key is held. We only want the initial press, not the flood of repeats.
-    guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else {
-        return nil  // consume the repeat silently
-    }
     let bridge = Unmanaged<EventBridge>.fromOpaque(refcon).takeUnretainedValue()
-    if bridge.isHotkeyEvent(event) {
-        bridge.handleHotkeyActivated()
-        return nil   // consume: do not forward to focused app
+
+    switch type {
+    case .keyDown:
+        if bridge.isHotkeyEvent(event) {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                bridge.handleHotkeyActivated()
+            }
+            return nil   // consume repeats too, but do not re-send activation
+        }
+    case .keyUp:
+        if bridge.isHotkeyReleaseEvent(event) {
+            bridge.handleHotkeyReleased()
+            return nil
+        }
+    case .flagsChanged:
+        bridge.handleFlagsChanged(event)
+    default:
+        break
     }
+
     return Unmanaged.passRetained(event)
 }
 
@@ -65,7 +81,7 @@ private func hotkeyTapCallback(
 /// - `NSWorkspace` app activation / deactivation  (app focus lifecycle)
 /// - `DistributedNotificationCenter` screen lock / unlock  (loginwindow broadcasts)
 /// - `AXObserver` focused element changes within the frontmost app  (AX element context)
-/// - `CGEventTap` global keyDown events for the activation hotkey (Ctrl+Shift+Space)
+/// - `CGEventTap` global key events for voice activation and Dexter placement
 ///
 /// **Threading contract**: All state is accessed exclusively from the main thread.
 /// - NSWorkspace observers are registered with `operationQueue: .main`.
@@ -136,6 +152,12 @@ final class EventBridge: @unchecked Sendable {
     private var hotkeyRequiresShift:  Bool  = true
     private var hotkeyRequiresCmd:    Bool  = false
     private var hotkeyRequiresOption: Bool  = false
+    private var hotkeyIsHeld:         Bool  = false
+
+    // Dexter placement key: right Option. This is intentionally separate from
+    // the voice hotkey so moving Dexter never competes with push-to-talk.
+    private let placementKeyCode: Int64 = 61
+    private var placementKeyIsHeld: Bool = false
 
     // ── Init ──────────────────────────────────────────────────────────────────
 
@@ -389,7 +411,7 @@ final class EventBridge: @unchecked Sendable {
 
     // ── Global hotkey tap ─────────────────────────────────────────────────────
 
-    /// Register a CGEventTap to listen for the global activation hotkey (Ctrl+Shift+Space).
+    /// Register a CGEventTap to listen for the global activation hotkey and placement key.
     ///
     /// Requires Accessibility permission (kTCCServiceAccessibility) — already checked at
     /// startup. If CGEventTapCreate fails (permission revoked, sandbox restriction, etc.),
@@ -399,7 +421,10 @@ final class EventBridge: @unchecked Sendable {
     /// the focused application. `hotkeyTapCallback` returns nil for the hotkey chord to
     /// consume it; all other events are passed through unchanged.
     private func startHotkeyTap() {
-        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let eventMask =
+            CGEventMask(1 << CGEventType.keyDown.rawValue) |
+            CGEventMask(1 << CGEventType.keyUp.rawValue) |
+            CGEventMask(1 << CGEventType.flagsChanged.rawValue)
         let bridge    = Unmanaged.passUnretained(self).toOpaque()
 
         guard let tap = CGEvent.tapCreate(
@@ -446,12 +471,38 @@ final class EventBridge: @unchecked Sendable {
     /// Called from `hotkeyTapCallback` on the main run loop.
     func isHotkeyEvent(_ event: CGEvent) -> Bool {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags   = event.flags
-        return keyCode == hotkeyKeyCode
-            && flags.contains(.maskControl)   == hotkeyRequiresCtrl
+        return keyCode == hotkeyKeyCode && hotkeyModifierRequirementsMet(event.flags)
+    }
+
+    func isHotkeyReleaseEvent(_ event: CGEvent) -> Bool {
+        hotkeyIsHeld && event.getIntegerValueField(.keyboardEventKeycode) == hotkeyKeyCode
+    }
+
+    private func hotkeyModifierRequirementsMet(_ flags: CGEventFlags) -> Bool {
+        flags.contains(.maskControl)   == hotkeyRequiresCtrl
             && flags.contains(.maskShift)     == hotkeyRequiresShift
             && flags.contains(.maskCommand)   == hotkeyRequiresCmd
             && flags.contains(.maskAlternate) == hotkeyRequiresOption
+    }
+
+    func handleModifierStateChanged(_ flags: CGEventFlags) {
+        guard hotkeyIsHeld else { return }
+        if !hotkeyModifierRequirementsMet(flags) {
+            handleHotkeyReleased()
+        }
+    }
+
+    func handleFlagsChanged(_ event: CGEvent) {
+        handleModifierStateChanged(event.flags)
+
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        guard keyCode == placementKeyCode else { return }
+
+        let pressed = event.flags.contains(.maskAlternate)
+        guard pressed != placementKeyIsHeld else { return }
+
+        placementKeyIsHeld = pressed
+        postHotkeyRepositionChanged(active: pressed)
     }
 
     /// Update hotkey detection parameters from a `ConfigSync` proto message.
@@ -460,6 +511,13 @@ final class EventBridge: @unchecked Sendable {
     /// arrives. `isHotkeyEvent(_:)` is also called on the main thread (via the
     /// CGEventTap run loop source), so there is no data race on the stored properties.
     func updateHotkeyConfig(_ config: Dexter_V1_HotkeyConfig) {
+        if hotkeyIsHeld {
+            handleHotkeyReleased()
+        }
+        if placementKeyIsHeld {
+            placementKeyIsHeld = false
+            postHotkeyRepositionChanged(active: false)
+        }
         hotkeyKeyCode        = Int64(config.keyCode)
         hotkeyRequiresCtrl   = config.ctrl
         hotkeyRequiresShift  = config.shift
@@ -471,7 +529,23 @@ final class EventBridge: @unchecked Sendable {
     /// Send a HOTKEY_ACTIVATED SystemEvent to the Rust orchestrator.
     /// Called from `hotkeyTapCallback` on the main run loop.
     func handleHotkeyActivated() {
+        if !hotkeyIsHeld {
+            hotkeyIsHeld = true
+        }
         sendSystemEvent(.hotkeyActivated)
+    }
+
+    func handleHotkeyReleased() {
+        guard hotkeyIsHeld else { return }
+        hotkeyIsHeld = false
+    }
+
+    private func postHotkeyRepositionChanged(active: Bool) {
+        NotificationCenter.default.post(
+            name: .dexterHotkeyRepositionChanged,
+            object: self,
+            userInfo: ["active": active]
+        )
     }
 
     // ── AX element query ──────────────────────────────────────────────────────

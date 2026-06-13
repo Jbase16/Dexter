@@ -68,6 +68,12 @@ message HealthResponse {
   string browser_worker = 19;  // ready | degraded | pending
 
   repeated DiskHealth disk = 20;
+
+  // Daemon-owned operator workflow summary derived from the latest observed
+  // focused app/context snapshot. This surfaces what Dexter can do from the
+  // current context without asking the model or duplicating context logic in
+  // Swift.
+  string operator_context_markdown = 21;
 }
 
 message DiskHealth {
@@ -90,6 +96,10 @@ message ActionHistoryResponse {
   string trace_id        = 1;
   string audit_log_path  = 2;
   repeated ActionReceipt receipts = 3;  // Newest first
+
+  // Daemon-owned latest-action summary markdown. Kept here so the Swift HUD
+  // does not duplicate Rust's operator-facing action evidence rules.
+  string latest_action_summary_markdown = 4;
 }
 
 message ActionDiagnosticRequest {

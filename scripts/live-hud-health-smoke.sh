@@ -15,7 +15,9 @@ SWIFT_LOG="/tmp/dexter-hud-health-swift-smoke.log"
 SILENT_SWIFT_LOG="/tmp/dexter-hud-health-silent-swift-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
+CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 SWIFT_DIR="$ROOT_DIR/src/swift"
 CORE_PID=""
 SWIFT_PID=""
@@ -35,6 +37,15 @@ say() {
     printf '[%s] %s\n' "$1" "$2"
 }
 
+json_string() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+print(json.dumps(sys.argv[1]))
+PY
+}
+
 socket_accepts() {
     python3 - "$SOCKET" <<'PY' >/dev/null 2>&1
 import socket
@@ -49,7 +60,7 @@ PY
 
 cleanup() {
     if [[ -n "$SWIFT_PID" ]]; then
-        kill "$SWIFT_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$SWIFT_PID"
         wait "$SWIFT_PID" >/dev/null 2>&1 || true
     fi
     stop_core_if_owned >/dev/null 2>&1 || true
@@ -63,14 +74,19 @@ stop_core_if_owned() {
 
     local pid="$CORE_PID"
     CORE_PID=""
-    kill "$pid" >/dev/null 2>&1 || true
+    stop_process_tree "$pid"
     wait "$pid" >/dev/null 2>&1 || true
 }
 
 require_bins() {
     if [[ ! -x "$CORE_BIN" ]]; then
         say "$FAIL" "missing core binary: $CORE_BIN"
-        say "$INFO" "build it with: cd src/rust-core && cargo build --release --bin dexter-core"
+        say "$INFO" "build it with: cd src/rust-core && cargo build --release --bin dexter-core --bin dexter-cli"
+        exit 2
+    fi
+    if [[ ! -x "$CLI_BIN" ]]; then
+        say "$FAIL" "missing CLI binary: $CLI_BIN"
+        say "$INFO" "build it with: cd src/rust-core && cargo build --release --bin dexter-cli"
         exit 2
     fi
 }
@@ -124,6 +140,13 @@ start_core_if_requested() {
     exit 2
 }
 
+create_audit_entry() {
+    local token="$1"
+    local action_json
+    action_json='{"type":"shell","args":["echo",'$(json_string "$token" )'],"rationale":"hud status smoke safe"}'
+    "$CLI_BIN" --quiet --idle-timeout 180 --action-json "$action_json" >/tmp/dexter-hud-health-cli-smoke.log 2>&1
+}
+
 start_swift_smoke() {
     : > "$SWIFT_LOG"
     say "$INFO" "starting Swift HUD health smoke; log: $SWIFT_LOG"
@@ -147,6 +170,7 @@ run_swift_silent_ready_smoke() {
         cd "$SWIFT_DIR" || exit 2
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_IDLE_ONLY=1 \
+        DEXTER_HUD_SMOKE_KEEP_CORE_ON_EXIT=1 \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS=1 \
         DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 \
         DEXTER_PROACTIVE_HEALTH_INITIAL_DELAY_SECS=2 \
@@ -200,6 +224,20 @@ assert_contains() {
     return 0
 }
 
+assert_contains_any() {
+    local label="$1"
+    local file="$2"
+    shift 2
+    local pattern
+    for pattern in "$@"; do
+        if grep -Fq "$pattern" "$file"; then
+            return 0
+        fi
+    done
+    say "$FAIL" "$label - missing all expected patterns: $*"
+    return 1
+}
+
 assert_absent() {
     local label="$1"
     local file="$2"
@@ -226,6 +264,12 @@ run_assertions() {
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] healthRequest" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Health RPC OK" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] ActionHistory RPC OK" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "Current Context" || ok=1
+    assert_contains_any "$name" "$SWIFT_LOG" "Dexter can:" "No focused app context" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "Latest Action Summary" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "The latest audited action executed successfully." || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "Evidence: Succeeded:" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "$HUD_STATUS_TOKEN" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showUtilityMarkdown" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] restartRequest target=$RESTART_COMPONENT" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Restart RPC OK target=$RESTART_COMPONENT success=true" || ok=1
@@ -272,6 +316,16 @@ main() {
     require_bins
     start_core_if_requested
     run_swift_silent_ready_smoke || exit 1
+
+    local stamp
+    stamp="$(date +%s)-$$"
+    HUD_STATUS_TOKEN="HUD_STATUS_$stamp"
+    if ! create_audit_entry "$HUD_STATUS_TOKEN"; then
+        say "$FAIL" "Swift HUD health smoke - failed to create status audit entry"
+        cat /tmp/dexter-hud-health-cli-smoke.log || true
+        exit 1
+    fi
+
     start_swift_smoke
     run_assertions || exit 1
     assert_owned_core_stops_cleanly || exit 1

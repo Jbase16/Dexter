@@ -142,7 +142,11 @@ pub const PRIMARY_MODEL_KEEP_ALIVE: &str = "30m";
 /// page reclamation can evict hot model weights under pressure (Swift UI, browser
 /// workers, clipboard churn) even though Ollama still considers the model "loaded".
 /// Next request does a warm-start from disk rather than a cold-load, but disk
-/// re-read on USB-SSD (BitHappens) is the 20+ second penalty we see.
+/// re-read used to happen from the external BitHappens model library and could
+/// cost 20+ seconds. Dexter now keeps its active Ollama runtime set on local
+/// NVMe (`/Users/jason/ollama-models`) while retaining the larger external
+/// library on BitHappens; the keepalive still matters because macOS can reclaim
+/// mmap'd pages even when the backing store is faster.
 ///
 /// Fix: a cheap background request (`num_predict: 1`) every 60 seconds re-touches
 /// the weight pages, pulling them back into resident memory and resetting macOS's

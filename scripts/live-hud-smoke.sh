@@ -17,11 +17,18 @@ CORE_LOG="/tmp/dexter-hud-core-smoke.log"
 SWIFT_LOG="/tmp/dexter-hud-swift-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 SWIFT_DIR="$ROOT_DIR/src/swift"
 CORE_PID=""
 SWIFT_PID=""
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 SMOKE_TEXT="${DEXTER_HUD_SMOKE_TEXT:-what is 2 plus 2}"
+SMOKE_NEW_SESSION="${DEXTER_HUD_SMOKE_NEW_SESSION:-0}"
+SMOKE_LIFECYCLE_CONFIRMATION="${DEXTER_HUD_SMOKE_LIFECYCLE_CONFIRMATION:-}"
+SMOKE_LIFECYCLE_ACTION="${DEXTER_HUD_SMOKE_LIFECYCLE_ACTION:-}"
+SMOKE_PLACEMENT_SEQUENCE="${DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE:-}"
+RESTART_SENTINEL="/tmp/dexter-hud-restart-sentinel"
 
 PASS="PASS"
 FAIL="FAIL"
@@ -50,11 +57,11 @@ PY
 
 cleanup() {
     if [[ -n "$SWIFT_PID" ]]; then
-        kill "$SWIFT_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$SWIFT_PID"
         wait "$SWIFT_PID" >/dev/null 2>&1 || true
     fi
     if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$CORE_PID"
         wait "$CORE_PID" >/dev/null 2>&1 || true
     fi
 }
@@ -103,7 +110,7 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$CORE_LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -112,18 +119,24 @@ start_core_if_requested() {
         waited=$((waited + 1))
     done
 
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$CORE_LOG" || true
     exit 2
 }
 
 start_swift_smoke() {
     : > "$SWIFT_LOG"
+    rm -f "$RESTART_SENTINEL"
     say "$INFO" "starting Swift HUD smoke; log: $SWIFT_LOG"
     (
         cd "$SWIFT_DIR" || exit 2
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_TEXT="$SMOKE_TEXT" \
+        DEXTER_HUD_SMOKE_NEW_SESSION="$SMOKE_NEW_SESSION" \
+        DEXTER_HUD_SMOKE_LIFECYCLE_CONFIRMATION="$SMOKE_LIFECYCLE_CONFIRMATION" \
+        DEXTER_HUD_SMOKE_LIFECYCLE_ACTION="$SMOKE_LIFECYCLE_ACTION" \
+        DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE="$SMOKE_PLACEMENT_SEQUENCE" \
+        DEXTER_PROCESS_CONTROL_RESTART_SENTINEL="$RESTART_SENTINEL" \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-3}" \
         DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-18}" \
             swift run
@@ -244,7 +257,204 @@ PY
     return 0
 }
 
-run_assertions() {
+is_truthy() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+run_new_session_assertions() {
+    local ok=0
+    local name="Swift HUD new-session smoke"
+
+    wait_for_pattern "[HUDSmoke] newSessionRequest" 60 || {
+        say "$FAIL" "$name - smoke hook did not request a new session within 60s"
+        tail -120 "$SWIFT_LOG" || true
+        return 1
+    }
+
+    wait_for_count "[DexterClient] Ping OK" 2 30 || {
+        say "$FAIL" "$name - Swift client did not reconnect after new-session request"
+        tail -160 "$SWIFT_LOG" || true
+        return 1
+    }
+
+    assert_log_contains "$name" "[HUDSmoke] enabled" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] newSessionRequest" || ok=1
+    assert_log_contains "$name" "[DexterClient] New session requested" || ok=1
+    assert_log_count_at_least "$name" "[DexterClient] Ping OK" 2 || ok=1
+    assert_log_absent "$name" "Fatal error" || ok=1
+
+    if [[ "$START_CORE" -eq 1 ]]; then
+        local session_open_count
+        session_open_count=$(grep -F "Session opened" "$CORE_LOG" 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$session_open_count" -lt 2 ]]; then
+            say "$FAIL" "$name - expected >= 2 core session opens, saw $session_open_count"
+            tail -120 "$CORE_LOG" || true
+            ok=1
+        fi
+    fi
+
+    if [[ "$ok" -eq 0 ]]; then
+        say "$PASS" "$name passed"
+        return 0
+    fi
+
+    tail -120 "$SWIFT_LOG" || true
+    return 1
+}
+
+run_lifecycle_confirmation_assertions() {
+    local ok=0
+    local name="Swift HUD lifecycle confirmation smoke"
+    local action
+    action="$(printf '%s' "$SMOKE_LIFECYCLE_CONFIRMATION" | tr '[:upper:]' '[:lower:]')"
+
+    wait_for_pattern "[HUDSmoke] lifecycleConfirmationRequest action=$action" 60 || {
+        say "$FAIL" "$name - smoke hook did not request lifecycle confirmation within 60s"
+        tail -120 "$SWIFT_LOG" || true
+        return 1
+    }
+
+    case "$action" in
+        restart)
+            assert_log_contains "$name" "[HUDSmoke] showDexterRestarting" || ok=1
+            assert_log_contains "$name" "### Dexter Restart" || ok=1
+            assert_log_contains "$name" "Restarting Dexter..." || ok=1
+            ;;
+        quit)
+            assert_log_contains "$name" "[HUDSmoke] showDexterQuitting" || ok=1
+            assert_log_contains "$name" "### Dexter Quit" || ok=1
+            assert_log_contains "$name" "Shutting Dexter down..." || ok=1
+            ;;
+        new_session|new-session|newsession|session)
+            assert_log_contains "$name" "[HUDSmoke] showNewSessionStarting" || ok=1
+            assert_log_contains "$name" "### Dexter Session" || ok=1
+            assert_log_contains "$name" "Starting a fresh session..." || ok=1
+            ;;
+        *)
+            say "$FAIL" "$name - unsupported lifecycle confirmation action: $SMOKE_LIFECYCLE_CONFIRMATION"
+            ok=1
+            ;;
+    esac
+
+    assert_log_absent "$name" "Fatal error" || ok=1
+    if [[ "$ok" -eq 0 ]]; then
+        say "$PASS" "$name passed"
+        return 0
+    fi
+
+    tail -120 "$SWIFT_LOG" || true
+    return 1
+}
+
+run_lifecycle_action_assertions() {
+    local ok=0
+    local name="Swift HUD lifecycle action smoke"
+    local action
+    action="$(printf '%s' "$SMOKE_LIFECYCLE_ACTION" | tr '[:upper:]' '[:lower:]')"
+
+    wait_for_pattern "[HUDSmoke] lifecycleActionRequest action=$action" 60 || {
+        say "$FAIL" "$name - smoke hook did not request lifecycle action within 60s"
+        tail -140 "$SWIFT_LOG" || true
+        return 1
+    }
+
+    wait "$SWIFT_PID" >/dev/null 2>&1 || true
+    SWIFT_PID=""
+
+    case "$action" in
+        restart)
+            assert_log_contains "$name" "[HUDSmoke] showDexterRestarting" || ok=1
+            assert_log_contains "$name" "[DexterProcessControl] restart sentinel wrote" || ok=1
+            if [[ ! -s "$RESTART_SENTINEL" ]]; then
+                say "$FAIL" "$name - restart sentinel was not written"
+                ok=1
+            fi
+            ;;
+        quit)
+            assert_log_contains "$name" "[HUDSmoke] showDexterQuitting" || ok=1
+            ;;
+        new_session|new-session|newsession|session)
+            assert_log_contains "$name" "[HUDSmoke] showNewSessionStarting" || ok=1
+            assert_log_count_at_least "$name" "[DexterClient] Ping OK" 2 || ok=1
+            ;;
+        *)
+            say "$FAIL" "$name - unsupported lifecycle action: $SMOKE_LIFECYCLE_ACTION"
+            ok=1
+            ;;
+    esac
+
+    assert_log_absent "$name" "Fatal error" || ok=1
+
+    if [[ "$action" == "restart" || "$action" == "quit" ]]; then
+        sleep 1
+        if socket_accepts; then
+            say "$FAIL" "$name - daemon still accepts connections after $action"
+            ok=1
+        fi
+        if [[ -e "$SOCKET" || -e "/tmp/dexter-shell.sock" ]]; then
+            say "$FAIL" "$name - daemon left socket files after $action"
+            ls -l "$SOCKET" /tmp/dexter-shell.sock 2>/dev/null || true
+            ok=1
+        fi
+    fi
+
+    if [[ "$ok" -eq 0 ]]; then
+        say "$PASS" "$name passed"
+        return 0
+    fi
+
+    tail -140 "$SWIFT_LOG" || true
+    tail -120 "$CORE_LOG" || true
+    return 1
+}
+
+run_placement_assertions() {
+    local ok=0
+    local name="Swift HUD placement smoke"
+
+    wait_for_pattern "[HUDSmoke] placement initial" 60 || {
+        say "$FAIL" "$name - placement smoke did not start within 60s"
+        tail -140 "$SWIFT_LOG" || true
+        return 1
+    }
+
+    wait_for_pattern "[HUDSmoke] placement final" 20 || {
+        say "$FAIL" "$name - placement smoke did not finish within 20s"
+        tail -140 "$SWIFT_LOG" || true
+        return 1
+    }
+
+    assert_log_contains "$name" "[HUDSmoke] placement after-snap" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement after-start" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement synthetic-nodrag expectedDx=32.0 expectedDy=18.0 actualDx=0.0 actualDy=0.0 moved=false" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement synthetic-drag expectedDx=32.0 expectedDy=18.0 actualDx=32.0 actualDy=18.0 moved=true" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement after-synthetic-nodrag:32:18" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement after-synthetic-drag:32:18" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement after-stop" || ok=1
+    assert_log_contains "$name" "size=136x136" || ok=1
+    assert_log_contains "$name" "cornerHit=false" || ok=1
+    assert_log_contains "$name" "topCenterHit=false" || ok=1
+    assert_log_contains "$name" "bottomCenterHit=false" || ok=1
+    assert_log_contains "$name" "leftCenterHit=false" || ok=1
+    assert_log_contains "$name" "rightCenterHit=false" || ok=1
+    assert_log_contains "$name" "centerHit=true" || ok=1
+    assert_log_contains "$name" "movableByBackground=false" || ok=1
+    assert_log_contains "$name" "ignoresMouse=false" || ok=1
+    assert_log_absent "$name" "Fatal error" || ok=1
+
+    if [[ "$ok" -eq 0 ]]; then
+        say "$PASS" "$name passed"
+        return 0
+    fi
+
+    tail -140 "$SWIFT_LOG" || true
+    return 1
+}
+
+run_typed_turn_assertions() {
     local ok=0
     local name="Swift HUD smoke"
     local completion_baseline=0
@@ -300,7 +510,17 @@ main() {
     require_bins
     start_core_if_requested
     start_swift_smoke
-    run_assertions
+    if [[ -n "$SMOKE_PLACEMENT_SEQUENCE" ]]; then
+        run_placement_assertions
+    elif [[ -n "$SMOKE_LIFECYCLE_ACTION" ]]; then
+        run_lifecycle_action_assertions
+    elif [[ -n "$SMOKE_LIFECYCLE_CONFIRMATION" ]]; then
+        run_lifecycle_confirmation_assertions
+    elif is_truthy "$SMOKE_NEW_SESSION"; then
+        run_new_session_assertions
+    else
+        run_typed_turn_assertions
+    fi
 }
 
 main "$@"

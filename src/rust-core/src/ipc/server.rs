@@ -19,8 +19,12 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    action::{audit::recent_action_receipts, ActionResult},
+    action::{
+        audit::{recent_action_receipts, ActionAuditReceipt},
+        ActionResult,
+    },
     action_diagnostic::{build_action_diagnostic, ActionDiagnosticInput},
+    action_evidence::{format_failed_action_evidence_block, format_success_action_evidence_block},
     config::{resolve_config_path, DexterConfig},
     constants::{
         BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, SHELL_SOCKET_PATH, VOICE_PYTHON_EXE,
@@ -85,6 +89,21 @@ fn action_diagnostic_health_warnings(health: &HealthResponse) -> Vec<String> {
         warnings.push(format!("Health status: {}", health.status));
     }
     warnings
+}
+
+fn latest_action_summary_markdown(receipts: &[ActionAuditReceipt]) -> String {
+    let Some(receipt) = receipts.first() else {
+        return "- No recent action receipt was found.\n".to_string();
+    };
+
+    if receipt.outcome == "executed" {
+        format_success_action_evidence_block(
+            receipt,
+            "The latest audited action executed successfully.",
+        )
+    } else {
+        format_failed_action_evidence_block(receipt)
+    }
 }
 
 // ── Startup health summary ───────────────────────────────────────────────────
@@ -257,6 +276,7 @@ impl StartupHealthSnapshot {
             tts_worker: self.tts_worker.as_str().to_string(),
             browser_worker: self.browser_worker.as_str().to_string(),
             disk: self.disk.into_iter().map(disk_health_proto).collect(),
+            operator_context_markdown: String::new(),
         }
     }
 }
@@ -659,7 +679,9 @@ impl CoreService {
         let config_path = resolve_config_path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|e| format!("unresolved: {e}"));
-        snapshot.into_health_response(trace_id, &self.cfg, config_path)
+        let mut health = snapshot.into_health_response(trace_id, &self.cfg, config_path);
+        health.operator_context_markdown = self.shared.operator_context_markdown();
+        health
     }
 
     async fn restart_stt_now(&self) -> bool {
@@ -754,6 +776,7 @@ impl DexterService for CoreService {
                 Status::internal(format!("action history unavailable: {e}"))
             })?;
         let receipt_count = receipts.len();
+        let latest_action_summary_markdown = latest_action_summary_markdown(&receipts);
         let receipts = receipts
             .into_iter()
             .map(|receipt| ActionReceipt {
@@ -779,6 +802,7 @@ impl DexterService for CoreService {
             trace_id,
             audit_log_path: audit_log_path.display().to_string(),
             receipts,
+            latest_action_summary_markdown,
         }))
     }
 
@@ -1437,11 +1461,12 @@ fn event_kind(event: &proto::client_event::Event) -> &'static str {
 
 #[cfg(test)]
 mod startup_health_tests {
+    use crate::action::audit::ActionAuditReceipt;
     use crate::diagnostics::{DiskHealthSnapshot, DiskStatus};
 
     use super::{
-        stt_startup_status, worker_startup_status, ComponentStartupStatus, DexterConfig,
-        StartupHealthSnapshot,
+        latest_action_summary_markdown, stt_startup_status, worker_startup_status,
+        ComponentStartupStatus, DexterConfig, StartupHealthSnapshot,
     };
     use std::sync::atomic::AtomicBool;
 
@@ -1631,6 +1656,53 @@ mod startup_health_tests {
         assert_eq!(response.embed_model, "embed");
         assert_eq!(response.browser_worker, "degraded");
         assert_eq!(response.config_path, "/Users/jason/.dexter/config.toml");
+    }
+
+    #[test]
+    fn latest_action_summary_markdown_formats_success_receipt() {
+        let receipts = vec![ActionAuditReceipt {
+            action_id: "act-1".to_string(),
+            action_type: "shell".to_string(),
+            category: "safe".to_string(),
+            description: "Run: echo hi".to_string(),
+            outcome: "executed".to_string(),
+            summary: "Succeeded: hi".to_string(),
+        }];
+
+        let markdown = latest_action_summary_markdown(&receipts);
+
+        assert!(markdown.contains("The latest audited action executed successfully."));
+        assert!(markdown.contains("Evidence: Succeeded: hi"));
+        assert!(markdown.contains("Target: Run: echo hi"));
+    }
+
+    #[test]
+    fn latest_action_summary_markdown_formats_failed_receipt() {
+        let receipts = vec![ActionAuditReceipt {
+            action_id: "act-2".to_string(),
+            action_type: "message_send".to_string(),
+            category: "cautious".to_string(),
+            description: "Send iMessage to: Jason".to_string(),
+            outcome: "failed".to_string(),
+            summary:
+                "Failed: message_send actions must be resolved by the orchestrator before execution"
+                    .to_string(),
+        }];
+
+        let markdown = latest_action_summary_markdown(&receipts);
+
+        assert!(markdown.contains("raw message_send action was blocked"));
+        assert!(markdown.contains("Evidence: Failed: message_send actions"));
+        assert!(markdown.contains("Target: Send iMessage to: Jason"));
+        assert!(markdown.contains("Next step: Ask again using the recipient's exact Contacts name"));
+    }
+
+    #[test]
+    fn latest_action_summary_markdown_handles_empty_history() {
+        assert_eq!(
+            latest_action_summary_markdown(&[]),
+            "- No recent action receipt was found.\n"
+        );
     }
 }
 

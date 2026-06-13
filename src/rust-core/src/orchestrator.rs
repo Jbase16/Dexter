@@ -30,6 +30,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -51,7 +52,7 @@ use crate::{
         PREFILL_DEBOUNCE_SECS, PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE,
         RETRIEVAL_ACKNOWLEDGMENT, SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
     },
-    context_observer::ContextObserver,
+    context_observer::{ContextObserver, ContextSnapshot},
     inference::{
         engine::{GenerationRequest, InferenceEngine},
         error::InferenceError,
@@ -471,6 +472,12 @@ pub struct SharedDaemonState {
     pub embed_model_warm: Arc<AtomicBool>,
     pub startup_warmup_complete: Arc<AtomicBool>,
     pub startup_greeting_sent: Arc<AtomicBool>,
+    pub operator_context_snapshot: Arc<StdMutex<Option<ContextSnapshot>>>,
+    /// Cross-process weight-residency pinner. Wires PRIMARY's GGUF page-cache
+    /// pages resident so macOS cannot reclaim them — replacing the reactive
+    /// keepalive ping (see `system::residency` + `PRIMARY_KEEPALIVE_PING_INTERVAL_SECS`).
+    /// Daemon-lifetime and Arc-internal, so every session clone shares one set of pins.
+    pub residency: crate::system::residency::ResidencyManager,
 }
 
 impl SharedDaemonState {
@@ -490,6 +497,35 @@ impl SharedDaemonState {
             embed_model_warm: Arc::new(AtomicBool::new(false)),
             startup_warmup_complete: Arc::new(AtomicBool::new(false)),
             startup_greeting_sent: Arc::new(AtomicBool::new(false)),
+            operator_context_snapshot: Arc::new(StdMutex::new(None)),
+            residency: crate::system::residency::ResidencyManager::from_env(),
+        }
+    }
+
+    pub fn record_operator_context(&self, snapshot: &ContextSnapshot) {
+        match self.operator_context_snapshot.lock() {
+            Ok(mut guard) => {
+                *guard = Some(snapshot.clone());
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Operator context snapshot lock poisoned — context status not updated"
+                );
+            }
+        }
+    }
+
+    pub fn operator_context_markdown(&self) -> String {
+        match self.operator_context_snapshot.lock() {
+            Ok(guard) => crate::operator_context::format_operator_context_markdown(guard.as_ref()),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Operator context snapshot lock poisoned — returning fallback context status"
+                );
+                crate::operator_context::format_operator_context_markdown(None)
+            }
         }
     }
 
@@ -558,18 +594,39 @@ impl SharedDaemonState {
         // Step 5: PRIMARY model (await). Routed-PRIMARY queries depend on this.
         warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
 
-        // Step 6: PRIMARY keepalive task. Long-lived; runs for the daemon's
-        // lifetime. Re-touches PRIMARY's mmap'd pages every
-        // PRIMARY_KEEPALIVE_PING_INTERVAL_SECS to prevent macOS page reclamation.
-        // Only spawned after PRIMARY is actually warm — the task gates on the
-        // atomic flag, so spawning it earlier would just no-op until then, but
-        // the order is clearer this way.
+        // Step 6: PRIMARY residency. Two strategies, best-first:
+        //
+        //   (a) Wire PRIMARY's GGUF weight pages resident via `system::residency`
+        //       — a one-time mlock of the page-cache pages Ollama maps, exploiting
+        //       XNU's per-inode Unified Buffer Cache so a Dexter-side pin keeps
+        //       the pages resident for Ollama's mapping too. Deterministic; no GPU
+        //       cost; no race. This RETIRES the keepalive ping.
+        //
+        //   (b) If the pin fails (blob unresolved, wire limit hit), fall back to
+        //       the reactive keepalive ping that re-faults the weights every
+        //       PRIMARY_KEEPALIVE_PING_INTERVAL_SECS.
+        //
+        // The pin is the structural fix the keepalive comment history asked for
+        // ("the real fix is mlock-ing Ollama's weight pages") — done from outside
+        // Ollama, so no upstream patch is required.
         if self.primary_model_warm.load(Ordering::SeqCst) {
-            CoreOrchestrator::spawn_primary_keepalive_task(
-                engine.clone(),
-                cfg.models.primary.clone(),
-                self.primary_model_warm.clone(),
-            );
+            let pinned = self.residency.pin_primary(&cfg.models.primary);
+            if pinned {
+                info!(
+                    model = %cfg.models.primary,
+                    "PRIMARY weights pinned resident — keepalive ping retired for this run"
+                );
+            } else {
+                warn!(
+                    model = %cfg.models.primary,
+                    "PRIMARY residency pin unavailable — falling back to keepalive ping"
+                );
+                CoreOrchestrator::spawn_primary_keepalive_task(
+                    engine.clone(),
+                    cfg.models.primary.clone(),
+                    self.primary_model_warm.clone(),
+                );
+            }
         }
 
         self.startup_warmup_complete.store(true, Ordering::SeqCst);
@@ -679,6 +736,7 @@ pub struct CoreOrchestrator {
     model_config: ModelConfig,
     session_mgr: SessionStateManager,
     context_observer: ContextObserver, // Phase 7 — machine context aggregator
+    shared: SharedDaemonState,         // Daemon-lifetime shared status/context state
     action_engine: ActionEngine,       // Phase 8 — system action execution
     retrieval: RetrievalPipeline,      // Phase 9 — semantic memory + web grounding
     voice: VoiceCoordinator,           // Phase 10 — TTS worker lifecycle
@@ -925,6 +983,7 @@ impl CoreOrchestrator {
             model_config: cfg.models.clone(),
             session_mgr,
             context_observer: ContextObserver::new(),
+            shared: shared.clone(),
             // Phase 38c: ActionEngine receives the shared BrowserCoordinator clone
             // so this session uses the daemon-lifetime chromium subprocess instead
             // of spawning its own.
@@ -1289,7 +1348,9 @@ impl CoreOrchestrator {
                 error = %result.error,
                 "iMessage recipient integrity — Contacts validation AppleScript failed"
             );
-            return Ok(ContactsRecipientValidation::NotFound);
+            return Ok(ContactsRecipientValidation::LookupFailed {
+                error: result.error,
+            });
         }
 
         let parsed = parse_contacts_recipient_validation_output(&result.output);
@@ -1331,7 +1392,9 @@ impl CoreOrchestrator {
                 error = %result.error,
                 "Structured iMessage send — Contacts name resolution AppleScript failed"
             );
-            return Ok(ContactsNameResolution::NotFound);
+            return Ok(ContactsNameResolution::LookupFailed {
+                error: result.error,
+            });
         }
 
         let parsed = parse_contacts_name_resolution_output(&result.output);
@@ -1526,6 +1589,7 @@ impl CoreOrchestrator {
         let heavy_name = self.model_config.heavy.clone();
         let primary_name = self.model_config.primary.clone();
         let warm_flag = self.primary_model_warm.clone();
+        let residency = self.shared.residency.clone();
         let session_id = self.session_id.clone();
         // Clone twice: one moves into the spawned task; one stays in this scope
         // for the trailing `info!` after spawn.
@@ -1609,11 +1673,22 @@ impl CoreOrchestrator {
                 Ok(mut rx) => {
                     while rx.recv().await.is_some() {}
                     warm_flag.store(true, Ordering::SeqCst);
-                    info!(
-                        session = %session_id,
-                        model   = %primary_name,
-                        "PRIMARY model warm"
-                    );
+                    // Residency: re-wire PRIMARY now that it is warm again and
+                    // HEAVY has been evicted. Restores the deterministic-residency
+                    // invariant the keepalive ping used to chase.
+                    if residency.pin_primary(&primary_name) {
+                        info!(
+                            session = %session_id,
+                            model   = %primary_name,
+                            "PRIMARY model warm — weights re-pinned resident"
+                        );
+                    } else {
+                        info!(
+                            session = %session_id,
+                            model   = %primary_name,
+                            "PRIMARY model warm (residency re-pin unavailable)"
+                        );
+                    }
                 }
                 Err(e) => warn!(
                     session = %session_id,
@@ -1956,15 +2031,11 @@ impl CoreOrchestrator {
                 ActionSpec::MessageSend {
                     recipient,
                     body,
-                    rationale,
-                } => Some((
-                    recipient.trim().to_string(),
-                    body.clone(),
-                    rationale.clone(),
-                )),
+                    rationale: _,
+                } => Some((recipient.trim().to_string(), body.clone())),
                 _ => None,
             };
-            if let Some((requested_recipient, message_body, rationale)) = structured_message_send {
+            if let Some((requested_recipient, message_body)) = structured_message_send {
                 if requested_recipient.is_empty() {
                     warn!(
                         session = %self.session_id,
@@ -2009,10 +2080,10 @@ impl CoreOrchestrator {
                             );
                             spec = ActionSpec::AppleScript {
                                 script: new_script,
-                                rationale: Some(rationale.clone().unwrap_or_else(|| {
+                                rationale: Some(
                                     "Structured self-send via configured operator_self_handle"
-                                        .to_string()
-                                })),
+                                        .to_string(),
+                                ),
                             };
                             message_send_resolved_by_core = true;
                         }
@@ -2058,11 +2129,9 @@ impl CoreOrchestrator {
                             );
                             spec = ActionSpec::AppleScript {
                                 script: new_script,
-                                rationale: Some(rationale.clone().unwrap_or_else(|| {
-                                    format!(
-                                        "Structured iMessage send to {contact_name}, resolved through Contacts"
-                                    )
-                                })),
+                                rationale: Some(format!(
+                                    "Structured iMessage send to {contact_name}, resolved through Contacts"
+                                )),
                             };
                             message_send_resolved_by_core = true;
                         }
@@ -2116,6 +2185,24 @@ impl CoreOrchestrator {
                             );
                             let reply = format!(
                                 "I couldn't find {requested_recipient} in Contacts, so I didn't send it."
+                            );
+                            self.send_text(&reply, true, &trace_id).await?;
+                            self.context.push_assistant(&reply);
+                            self.session_mgr.push_turn("assistant", &reply);
+                            self.send_state(EntityState::Idle, &trace_id).await?;
+                            return Ok(());
+                        }
+                        ContactsNameResolution::LookupFailed { error } => {
+                            warn!(
+                                session = %self.session_id,
+                                requested_recipient = %requested_recipient,
+                                error = %error,
+                                agentic_depth = result.agentic_depth,
+                                "Structured iMessage send — Contacts lookup failed; refusing send"
+                            );
+                            let reply = format!(
+                                "Contacts lookup failed while resolving {requested_recipient}, so I didn't send it. \
+                                 Check Contacts access and try again."
                             );
                             self.send_text(&reply, true, &trace_id).await?;
                             self.context.push_assistant(&reply);
@@ -2323,6 +2410,24 @@ impl CoreOrchestrator {
                         let reply = "I couldn't find that iMessage recipient handle in Contacts, \
                                      so I didn't send it. Add or correct the contact in Contacts.app, \
                                      then ask again with the contact name.";
+                        self.send_text(reply, true, &trace_id).await?;
+                        self.context.push_assistant(reply);
+                        self.session_mgr.push_turn("assistant", reply);
+                        self.send_state(EntityState::Idle, &trace_id).await?;
+                        return Ok(());
+                    }
+                    ContactsRecipientValidation::LookupFailed { error } => {
+                        warn!(
+                            session = %self.session_id,
+                            handle  = %recipient_handle,
+                            requested_recipient = %requested_recipient,
+                            error = %error,
+                            query   = %content,
+                            agentic_depth = result.agentic_depth,
+                            "iMessage recipient integrity — Contacts lookup failed; refusing unverified send"
+                        );
+                        let reply = "Contacts lookup failed while verifying that recipient, \
+                                     so I didn't send it. Check Contacts access and try again.";
                         self.send_text(reply, true, &trace_id).await?;
                         self.context.push_assistant(reply);
                         self.session_mgr.push_turn("assistant", reply);
@@ -2591,6 +2696,8 @@ impl CoreOrchestrator {
     ) {
         self.context_observer
             .update_shell_command(command.clone(), cwd.clone(), exit_code);
+        self.shared
+            .record_operator_context(self.context_observer.snapshot());
         info!(
             session   = %self.session_id,
             command   = %command,
@@ -3413,6 +3520,17 @@ impl CoreOrchestrator {
                     model    = %primary_name,
                     "HEAVY routed — unloading PRIMARY to free VRAM"
                 );
+                // Residency: unwire PRIMARY's pages BEFORE asking Ollama to unload.
+                // If PRIMARY is pinned (18 GB wired), HEAVY (19 GB) cannot load until
+                // those pages are reclaimable. This unpin is load-bearing, not polish.
+                if self.shared.residency.is_primary_pinned() {
+                    self.shared.residency.unpin_primary();
+                    info!(
+                        session  = %self.session_id,
+                        trace_id = %trace_id,
+                        "PRIMARY weights unpinned (munlock) — pages now reclaimable for HEAVY load"
+                    );
+                }
                 match self.engine.unload_model(&primary_name).await {
                     Ok(()) => {
                         self.primary_model_warm.store(false, Ordering::SeqCst);
@@ -4049,6 +4167,8 @@ impl CoreOrchestrator {
             Ok(SystemEventType::AppFocused) => {
                 let changed = self.context_observer.update_from_app_focused(&sys.payload);
                 if changed {
+                    self.shared
+                        .record_operator_context(self.context_observer.snapshot());
                     info!(
                         session = %self.session_id,
                         app     = ?self.context_observer.snapshot().app_name,
@@ -4101,7 +4221,10 @@ impl CoreOrchestrator {
                 info!(session = %self.session_id, "App unfocused");
             }
             Ok(SystemEventType::ScreenLocked) => {
-                self.context_observer.set_screen_locked(true);
+                if self.context_observer.set_screen_locked(true) {
+                    self.shared
+                        .record_operator_context(self.context_observer.snapshot());
+                }
                 info!(session = %self.session_id, "Screen locked — context observation paused");
             }
             Ok(SystemEventType::AxElementChanged) => {
@@ -4109,6 +4232,8 @@ impl CoreOrchestrator {
                     .context_observer
                     .update_from_element_changed(&sys.payload);
                 if changed {
+                    self.shared
+                        .record_operator_context(self.context_observer.snapshot());
                     info!(
                         session = %self.session_id,
                         element = ?self.context_observer.snapshot().focused_element,
@@ -4123,7 +4248,10 @@ impl CoreOrchestrator {
                 }
             }
             Ok(SystemEventType::ScreenUnlocked) => {
-                self.context_observer.set_screen_locked(false);
+                if self.context_observer.set_screen_locked(false) {
+                    self.shared
+                        .record_operator_context(self.context_observer.snapshot());
+                }
                 info!(session = %self.session_id, "Screen unlocked — context observation resumed");
             }
             Ok(SystemEventType::ClipboardChanged) => {
@@ -4133,6 +4261,8 @@ impl CoreOrchestrator {
                     .context_observer
                     .update_from_clipboard_changed(&sys.payload);
                 if changed {
+                    self.shared
+                        .record_operator_context(self.context_observer.snapshot());
                     info!(
                         session    = %self.session_id,
                         char_count = self.context_observer.snapshot()
@@ -8154,6 +8284,7 @@ pub(crate) fn extract_messages_body(script: &str) -> Option<String> {
 pub(crate) enum ContactsRecipientValidation {
     Matched { contact_name: String },
     HandleFoundNameMismatch { contact_name: String },
+    LookupFailed { error: String },
     NotFound,
 }
 
@@ -8168,6 +8299,9 @@ pub(crate) enum ContactsNameResolution {
     },
     NoReachableHandle {
         contact_name: String,
+    },
+    LookupFailed {
+        error: String,
     },
     NotFound,
 }

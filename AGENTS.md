@@ -25,7 +25,10 @@ access**, not a toy assistant.
 - **IPC**: gRPC over Unix domain socket at `/tmp/dexter.sock`. Proto in
   `src/shared/proto/dexter.proto`. Both sides regenerate from this; the
   `Makefile` `proto` target drives it.
-- **Inference**: local Ollama on a USB SSD (`/Volumes/BitHappens`). Four
+- **Inference**: local Ollama. The full model library is retained on the
+  external SSD (`/Volumes/BitHappens/ollama-models`), while the active Dexter
+  runtime model set is mirrored on local NVMe (`/Users/jason/ollama-models`) and
+  selected with `OLLAMA_MODELS` to reduce cold-load/page-fault penalties. Four
   model tiers — FAST / PRIMARY / HEAVY / CODE — plus EMBED. Routing logic
   in `src/rust-core/src/inference/router.rs`; selection is auditable and
   unit-tested.
@@ -50,8 +53,13 @@ access**, not a toy assistant.
 - **Always-warm VRAM budget**: FAST + PRIMARY + EMBED ≈ 24 GB of 36 GB.
   HEAVY/CODE swap on demand via `unload_after=true` and
   `pending_primary_rewarm`. Do not propose "load all models always."
-- **Storage**: Ollama models live on `/Volumes/BitHappens`. `/Volumes/ByteMe`
-  also exists but is **not used** by Dexter.
+- **Storage**: Ollama has a two-location setup by design. The full external
+  library lives at `/Volumes/BitHappens/ollama-models`; Dexter's active warm
+  runtime set lives locally at `/Users/jason/ollama-models`, and launchd/shell
+  should set `OLLAMA_MODELS=/Users/jason/ollama-models`. This is intentional:
+  local NVMe reduces PRIMARY/EMBED cold-load and mmap page-fault latency while
+  BitHappens remains the larger external model archive. `/Volumes/ByteMe` also
+  exists but is **not used** by Dexter for Ollama.
 - **No JS/TS/Node anywhere.** No `package.json`, no `pnpm`, no Tauri/Electron.
   Swift renders the UI.
 - **Persistent worker pre-warming** (STT, FAST/PRIMARY model warmups before

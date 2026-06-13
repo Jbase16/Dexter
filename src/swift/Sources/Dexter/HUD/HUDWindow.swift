@@ -72,6 +72,50 @@ private enum HUDSmokeLog {
         guard enabled else { return }
         print("[HUDSmoke] \(message)")
     }
+
+    static func logMarkdownPreview(_ markdown: String) {
+        guard enabled else { return }
+        let preview = markdown
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        print("[HUDSmoke] markdownPreview \(preview.prefix(3000))")
+    }
+}
+
+private final class HUDIconButton: NSButton {
+    private var trackingAreaRef: NSTrackingArea?
+    private var restAlpha: CGFloat = 0.45
+    private var hoverAlpha: CGFloat = 0.9
+
+    func setChrome(restAlpha: CGFloat, hoverAlpha: CGFloat = 0.9) {
+        self.restAlpha = restAlpha
+        self.hoverAlpha = hoverAlpha
+        alphaValue = restAlpha
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        alphaValue = hoverAlpha
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        alphaValue = restAlpha
+    }
 }
 
 // MARK: - HUDWindow
@@ -118,6 +162,15 @@ final class HUDWindow: NSPanel {
     /// Set by App.swift. Called when the operator asks to restart a degraded worker.
     var onHealthRestartRequest: ((DexterWorkerRestartTarget) -> Void)?
 
+    /// Set by App.swift. Called when the operator wants a full Dexter restart.
+    var onDexterRestartRequest: (() -> Void)?
+
+    /// Set by App.swift. Called when the operator wants a fresh conversation session.
+    var onDexterNewSessionRequest: (() -> Void)?
+
+    /// Set by App.swift. Called when the operator wants to quit Dexter.
+    var onDexterQuitRequest: (() -> Void)?
+
     // MARK: - Subviews
 
     private let textArea:   HUDTextView
@@ -146,6 +199,12 @@ final class HUDWindow: NSPanel {
 
     // Why button — explains the most recent action/refusal from local evidence.
     private let actionDiagnosticButton: NSButton
+
+    // Full app controls — visible in the HUD so the operator does not need
+    // Terminal or the macOS app menu to restart/quit Dexter.
+    private let dexterNewSessionButton: NSButton
+    private let dexterRestartButton: NSButton
+    private let dexterQuitButton: NSButton
 
     // Mute button — toggles TTS on/off.
     private let muteButton: NSButton
@@ -206,7 +265,8 @@ final class HUDWindow: NSPanel {
         // History view positioned above the base window height (invisible until expanded).
         let historyRect = NSRect(x: 0, y: C.height, width: C.width, height: C.historyHeight)
 
-        // Toggle button: top-right corner of the window. autoresizingMask tracks top-right.
+        // Top controls are split into two groups so the HUD stays scannable:
+        // session/app controls on the left, diagnostic/history controls on the right.
         let btnX = C.width - C.toggleButtonSize - C.inputPadding
         let btnY = C.height - C.toggleButtonSize - C.inputPadding
         let toggleRect = NSRect(x: btnX, y: btnY, width: C.toggleButtonSize, height: C.toggleButtonSize)
@@ -224,6 +284,24 @@ final class HUDWindow: NSPanel {
         )
         let actionDiagnosticRect = NSRect(
             x: actionHistoryRect.minX - C.toggleButtonSize - C.muteButtonGap,
+            y: btnY,
+            width: C.toggleButtonSize,
+            height: C.toggleButtonSize
+        )
+        let dexterNewSessionRect = NSRect(
+            x: C.inputPadding,
+            y: btnY,
+            width: C.toggleButtonSize,
+            height: C.toggleButtonSize
+        )
+        let dexterRestartRect = NSRect(
+            x: dexterNewSessionRect.maxX + C.muteButtonGap,
+            y: btnY,
+            width: C.toggleButtonSize,
+            height: C.toggleButtonSize
+        )
+        let dexterQuitRect = NSRect(
+            x: dexterRestartRect.maxX + C.muteButtonGap,
             y: btnY,
             width: C.toggleButtonSize,
             height: C.toggleButtonSize
@@ -251,10 +329,13 @@ final class HUDWindow: NSPanel {
         restartTTSButton = NSButton(frame: .zero)
         restartBrowserButton = NSButton(frame: .zero)
         historyView  = HUDHistoryView(frame: historyRect)
-        healthButton = NSButton(frame: healthRect)
-        actionHistoryButton = NSButton(frame: actionHistoryRect)
-        actionDiagnosticButton = NSButton(frame: actionDiagnosticRect)
-        toggleButton = NSButton(frame: toggleRect)
+        healthButton = HUDIconButton(frame: healthRect)
+        actionHistoryButton = HUDIconButton(frame: actionHistoryRect)
+        actionDiagnosticButton = HUDIconButton(frame: actionDiagnosticRect)
+        dexterNewSessionButton = HUDIconButton(frame: dexterNewSessionRect)
+        dexterRestartButton = HUDIconButton(frame: dexterRestartRect)
+        dexterQuitButton = HUDIconButton(frame: dexterQuitRect)
+        toggleButton = HUDIconButton(frame: toggleRect)
         muteButton   = NSButton(frame: muteRect)
 
         super.init(
@@ -270,6 +351,7 @@ final class HUDWindow: NSPanel {
         hasShadow          = true
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         alphaValue         = 0   // hidden until first response
+        ignoresMouseEvents = true
 
         buildContent(inputRect: inputRect)
 
@@ -342,69 +424,85 @@ final class HUDWindow: NSPanel {
         historyDivider = histDiv
 
         // Toggle button — subdued clock icon in the top-right corner.
-        // autoresizingMask [.minXMargin, .minYMargin]: left and bottom margins are flexible,
-        // so the button stays pinned to the top-right corner as the window grows upward.
-        if let clockImage = NSImage(systemSymbolName: "clock", accessibilityDescription: "Toggle history") {
-            toggleButton.image        = clockImage
-            toggleButton.imageScaling = .scaleProportionallyDown
-        } else {
-            toggleButton.title = "◎"   // fallback glyph if SF Symbol unavailable
-        }
-        toggleButton.bezelStyle       = .inline
-        toggleButton.isBordered       = false
-        toggleButton.alphaValue       = 0.4   // subdued when history is hidden
-        toggleButton.autoresizingMask = [.minXMargin, .minYMargin]
-        toggleButton.target           = self
-        toggleButton.action           = #selector(toggleHistory)
+        configureTopIconButton(
+            toggleButton,
+            symbolName: "clock",
+            fallbackTitle: "◎",
+            accessibilityDescription: "Toggle history",
+            toolTip: "Toggle history",
+            action: #selector(toggleHistory),
+            alpha: 0.4
+        )
         effect.addSubview(toggleButton)
 
         // Status button — quiet operator diagnostics surface, left of history.
-        if let healthImage = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Show Dexter status") {
-            healthButton.image        = healthImage
-            healthButton.imageScaling = .scaleProportionallyDown
-        } else {
-            healthButton.title = "S"
-        }
-        healthButton.bezelStyle       = .inline
-        healthButton.isBordered       = false
-        healthButton.alphaValue       = 0.45
-        healthButton.autoresizingMask = [.minXMargin, .minYMargin]
-        healthButton.target           = self
-        healthButton.action           = #selector(requestHealth)
-        healthButton.toolTip          = "Show Dexter status"
+        configureTopIconButton(
+            healthButton,
+            symbolName: "waveform.path.ecg",
+            fallbackTitle: "S",
+            accessibilityDescription: "Show Dexter status",
+            toolTip: "Show Dexter status",
+            action: #selector(requestHealth)
+        )
         effect.addSubview(healthButton)
 
         // Recent actions button — compact audit receipts, left of health.
-        if let actionsImage = NSImage(systemSymbolName: "list.bullet.rectangle", accessibilityDescription: "Show recent actions") {
-            actionHistoryButton.image        = actionsImage
-            actionHistoryButton.imageScaling = .scaleProportionallyDown
-        } else {
-            actionHistoryButton.title = "A"
-        }
-        actionHistoryButton.bezelStyle       = .inline
-        actionHistoryButton.isBordered       = false
-        actionHistoryButton.alphaValue       = 0.45
-        actionHistoryButton.autoresizingMask = [.minXMargin, .minYMargin]
-        actionHistoryButton.target           = self
-        actionHistoryButton.action           = #selector(requestActionHistory)
-        actionHistoryButton.toolTip          = "Show recent actions"
+        configureTopIconButton(
+            actionHistoryButton,
+            symbolName: "list.bullet.rectangle",
+            fallbackTitle: "A",
+            accessibilityDescription: "Show recent actions",
+            toolTip: "Show recent actions",
+            action: #selector(requestActionHistory)
+        )
         effect.addSubview(actionHistoryButton)
 
         // Why button — explains the last action/refusal from local evidence, left of actions.
-        if let whyImage = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "Explain latest action") {
-            actionDiagnosticButton.image        = whyImage
-            actionDiagnosticButton.imageScaling = .scaleProportionallyDown
-        } else {
-            actionDiagnosticButton.title = "?"
-        }
-        actionDiagnosticButton.bezelStyle       = .inline
-        actionDiagnosticButton.isBordered       = false
-        actionDiagnosticButton.alphaValue       = 0.45
-        actionDiagnosticButton.autoresizingMask = [.minXMargin, .minYMargin]
-        actionDiagnosticButton.target           = self
-        actionDiagnosticButton.action           = #selector(requestActionDiagnostic)
-        actionDiagnosticButton.toolTip          = "Explain latest action"
+        configureTopIconButton(
+            actionDiagnosticButton,
+            symbolName: "questionmark.circle",
+            fallbackTitle: "?",
+            accessibilityDescription: "Explain latest action",
+            toolTip: "Explain latest action",
+            action: #selector(requestActionDiagnostic)
+        )
         effect.addSubview(actionDiagnosticButton)
+
+        // New session — fresh conversation context without restarting core/workers.
+        configureTopIconButton(
+            dexterNewSessionButton,
+            symbolName: "plus.circle",
+            fallbackTitle: "+",
+            accessibilityDescription: "New Session",
+            toolTip: "New Session",
+            action: #selector(requestDexterNewSession),
+            autoresizingMask: [.maxXMargin, .minYMargin]
+        )
+        effect.addSubview(dexterNewSessionButton)
+
+        // Restart Dexter — full app/core restart through the launcher path.
+        configureTopIconButton(
+            dexterRestartButton,
+            symbolName: "arrow.clockwise",
+            fallbackTitle: "R",
+            accessibilityDescription: "Restart Dexter",
+            toolTip: "Restart Dexter",
+            action: #selector(requestDexterRestart),
+            autoresizingMask: [.maxXMargin, .minYMargin]
+        )
+        effect.addSubview(dexterRestartButton)
+
+        // Quit Dexter — cleanly terminates the Swift UI and Rust core.
+        configureTopIconButton(
+            dexterQuitButton,
+            symbolName: "power",
+            fallbackTitle: "Q",
+            accessibilityDescription: "Quit Dexter",
+            toolTip: "Quit Dexter",
+            action: #selector(requestDexterQuit),
+            autoresizingMask: [.maxXMargin, .minYMargin]
+        )
+        effect.addSubview(dexterQuitButton)
 
         // Mute button — stays at bottom-right of input bar as window grows upward.
         muteButton.bezelStyle       = .inline
@@ -440,6 +538,38 @@ final class HUDWindow: NSPanel {
         }
     }
 
+    private func configureTopIconButton(
+        _ button: NSButton,
+        symbolName: String,
+        fallbackTitle: String,
+        accessibilityDescription: String,
+        toolTip: String,
+        action: Selector,
+        alpha: CGFloat = 0.45,
+        autoresizingMask: NSView.AutoresizingMask = [.minXMargin, .minYMargin]
+    ) {
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription) {
+            image.isTemplate = true
+            button.image = image
+            button.imageScaling = .scaleProportionallyDown
+            button.title = ""
+        } else {
+            button.title = fallbackTitle
+            button.font = .systemFont(ofSize: 12, weight: .medium)
+        }
+        button.bezelStyle = .inline
+        button.isBordered = false
+        if let iconButton = button as? HUDIconButton {
+            iconButton.setChrome(restAlpha: alpha)
+        } else {
+            button.alphaValue = alpha
+        }
+        button.autoresizingMask = autoresizingMask
+        button.target = self
+        button.action = action
+        button.toolTip = toolTip
+    }
+
     @objc private func requestHealth() {
         cancelDismiss()
         onHealthRequest?()
@@ -453,6 +583,21 @@ final class HUDWindow: NSPanel {
     @objc private func requestActionDiagnostic() {
         cancelDismiss()
         onActionDiagnosticRequest?()
+    }
+
+    @objc private func requestDexterRestart() {
+        cancelDismiss()
+        onDexterRestartRequest?()
+    }
+
+    @objc private func requestDexterNewSession() {
+        cancelDismiss()
+        onDexterNewSessionRequest?()
+    }
+
+    @objc private func requestDexterQuit() {
+        cancelDismiss()
+        onDexterQuitRequest?()
     }
 
     func showHealthLoading() {
@@ -502,6 +647,33 @@ final class HUDWindow: NSPanel {
         showUtilityMarkdown(markdown, restartTargets: [])
     }
 
+    func showNewSessionStarting() {
+        HUDSmokeLog.log("showNewSessionStarting")
+        showUtilityMarkdown("""
+        ### Dexter Session
+
+        Starting a fresh session...
+        """, restartTargets: [])
+    }
+
+    func showDexterRestarting() {
+        HUDSmokeLog.log("showDexterRestarting")
+        showUtilityMarkdown("""
+        ### Dexter Restart
+
+        Restarting Dexter...
+        """, restartTargets: [])
+    }
+
+    func showDexterQuitting() {
+        HUDSmokeLog.log("showDexterQuitting")
+        showUtilityMarkdown("""
+        ### Dexter Quit
+
+        Shutting Dexter down...
+        """, restartTargets: [])
+    }
+
     func showHealthRestarting(_ target: DexterWorkerRestartTarget) {
         showUtilityMarkdown("""
         ### Dexter Health
@@ -523,6 +695,32 @@ final class HUDWindow: NSPanel {
     func performActionDiagnosticRequestForSmoke() {
         HUDSmokeLog.log("actionDiagnosticRequest")
         requestActionDiagnostic()
+    }
+
+    func performNewSessionRequestForSmoke() {
+        HUDSmokeLog.log("newSessionRequest")
+        requestDexterNewSession()
+    }
+
+    func performLifecycleConfirmationForSmoke(_ action: String) {
+        let normalized = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        HUDSmokeLog.log("lifecycleConfirmationRequest action=\(normalized)")
+        switch normalized {
+        case "restart":
+            showDexterRestarting()
+        case "quit":
+            showDexterQuitting()
+        case "new_session", "new-session", "newsession", "session":
+            showNewSessionStarting()
+        default:
+            showUtilityMarkdown("""
+            ### Dexter Lifecycle
+
+            Unknown lifecycle smoke action: \(normalized)
+            """, restartTargets: [])
+        }
     }
 
     func performHealthRestartForSmoke(_ target: DexterWorkerRestartTarget) {
@@ -549,6 +747,7 @@ final class HUDWindow: NSPanel {
 
     private func showUtilityMarkdown(_ markdown: String, restartTargets: [DexterWorkerRestartTarget]) {
         HUDSmokeLog.log("showUtilityMarkdown chars=\(markdown.count)")
+        HUDSmokeLog.logMarkdownPreview(markdown)
         cancelDismiss()
         pendingTurnOperatorText = ""
         showingUtilityDocument = true
@@ -607,7 +806,11 @@ final class HUDWindow: NSPanel {
         }
 
         historyView.isHidden    = !historyVisible
-        toggleButton.alphaValue = historyVisible ? 1.0 : 0.4
+        if let iconButton = toggleButton as? HUDIconButton {
+            iconButton.setChrome(restAlpha: historyVisible ? 1.0 : 0.4, hoverAlpha: 1.0)
+        } else {
+            toggleButton.alphaValue = historyVisible ? 1.0 : 0.4
+        }
 
         // Show/hide the divider between the history panel and the current exchange area.
         historyDivider?.isHidden = !historyVisible
@@ -766,6 +969,7 @@ final class HUDWindow: NSPanel {
     }
 
     private func show() {
+        ignoresMouseEvents = false
         guard alphaValue < 0.5 else { return }   // already visible — no-op
         HUDSmokeLog.log("show")
         orderFrontRegardless()
@@ -777,13 +981,17 @@ final class HUDWindow: NSPanel {
 
     private func hide() {
         HUDSmokeLog.log("hide")
+        ignoresMouseEvents = true
         NSAnimationContext.runAnimationGroup { [weak self] ctx in
             ctx.duration = C.fadeDuration
             self?.animator().alphaValue = 0
         } completionHandler: { [weak self] in
             // completionHandler is nonisolated; dispatch to MainActor to call
             // the MainActor-isolated orderOut(_:).
-            DispatchQueue.main.async { self?.orderOut(nil) }
+            DispatchQueue.main.async {
+                self?.orderOut(nil)
+                self?.ignoresMouseEvents = true
+            }
         }
     }
 

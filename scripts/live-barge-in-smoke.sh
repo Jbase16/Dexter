@@ -18,10 +18,12 @@ CORE_LOG="/tmp/dexter-barge-core-smoke.log"
 SWIFT_LOG="/tmp/dexter-barge-swift-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 SWIFT_DIR="$ROOT_DIR/src/swift"
 CORE_PID=""
 SWIFT_PID=""
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 SMOKE_TEXT="${DEXTER_BARGE_SMOKE_TEXT:-Tell me a long calm story in exactly twelve short sentences about debugging a tiny spaceship made from spare keyboard parts. Keep speaking until all twelve sentences are done.}"
 
 PASS="PASS"
@@ -51,11 +53,11 @@ PY
 
 cleanup() {
     if [[ -n "$SWIFT_PID" ]]; then
-        kill "$SWIFT_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$SWIFT_PID"
         wait "$SWIFT_PID" >/dev/null 2>&1 || true
     fi
     if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$CORE_PID"
         wait "$CORE_PID" >/dev/null 2>&1 || true
     fi
 }
@@ -104,7 +106,7 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$CORE_LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -113,7 +115,7 @@ start_core_if_requested() {
         waited=$((waited + 1))
     done
 
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$CORE_LOG" || true
     exit 2
 }

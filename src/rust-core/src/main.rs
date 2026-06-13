@@ -1,5 +1,6 @@
 mod action;
 mod action_diagnostic;
+mod action_evidence;
 mod browser;
 mod config;
 mod constants;
@@ -10,6 +11,7 @@ mod inference;
 mod ipc;
 mod logging;
 mod memory;
+mod operator_context;
 mod orchestrator;
 mod personality;
 mod proactive;
@@ -27,6 +29,28 @@ use session::SessionStateManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ── Residency proof / pinner roles ────────────────────────────────────────
+    //
+    // Handled before anything else so they run as lightweight, self-contained
+    // processes (no gRPC, no Ollama dependency). These exercise the production
+    // `system::residency` module:
+    //   --prove-residency [model]      run the cross-process pinning proof and exit
+    //   --residency-pin-child <p> <s>  (hidden) pin a blob and hold it for the proof
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(pos) = args.iter().position(|a| a == "--residency-pin-child") {
+            let path = args.get(pos + 1).cloned().unwrap_or_default();
+            let secs = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(600);
+            system::residency::run_pin_child(&path, secs);
+            return Ok(());
+        }
+        if let Some(pos) = args.iter().position(|a| a == "--prove-residency") {
+            let model = args.get(pos + 1).filter(|s| !s.starts_with('-')).cloned();
+            system::residency::run_proof(model)?;
+            return Ok(());
+        }
+    }
+
     // Initialize logging with defaults before loading config.
     //
     // This solves the config-logging bootstrap problem: config.rs uses `tracing::error!`

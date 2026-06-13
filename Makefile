@@ -18,11 +18,16 @@ PROTOC_GEN_GRPC_SWIFT := $(shell find /opt/homebrew/Cellar/protoc-gen-grpc-swift
 # 90 seconds accommodates a cold release cargo build on first run.
 
 SOCKET_PATH         := /tmp/dexter.sock
+SHELL_SOCKET_PATH   := /tmp/dexter-shell.sock
 SOCKET_TIMEOUT_SECS := 90
+READY_TIMEOUT_SECS  := 300
+RUN_PID_FILE        := /tmp/dexter-make-run.pid
+OLLAMA_MODELS      ?= /Users/jason/ollama-models
+export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core run test test-inference test-e2e cli doctor status why actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-recovery live-smoke-degraded-mode live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-all smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -142,6 +147,60 @@ restart-tts: cli
 restart-browser: cli
 	$(RUST_CORE_DIR)/target/release/dexter-cli --restart-component browser
 
+## live-smoke-startup-readiness: verify make run gates Swift launch on doctor-ready health
+##
+## Starts a fresh release core without Swift, verifies the socket gate, waits for
+## doctor-clean daemon health through `make wait-for-ready`, then confirms the
+## owned daemon exits without stale sockets.
+live-smoke-startup-readiness: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-startup-readiness-smoke.sh
+
+## live-smoke-process-control: verify external make stop terminates a normal make run tree
+##
+## Starts the normal `make run` process tree, waits until Swift launch starts,
+## then runs `make stop` from outside the tree and verifies the parent run loop
+## exits and the daemon socket is gone.
+live-smoke-process-control: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-process-control-smoke.sh
+
+## live-smoke-stop-report: verify make stop prints labeled process evidence
+live-smoke-stop-report: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-stop-report-smoke.sh
+
+## live-smoke-run-loop-lifecycle: verify UI quit/restart exit the normal make run tree
+live-smoke-run-loop-lifecycle: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-run-loop-lifecycle-smoke.sh
+
+## live-smoke-stale-swift-stop: verify make stop kills stale repo-owned SwiftPM app processes
+live-smoke-stale-swift-stop: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-stale-swift-stop-smoke.sh
+
+## live-smoke-operator-ready: verify consolidated operator prep command and installed launcher
+live-smoke-operator-ready: ensure-core-not-running
+	bash scripts/live-operator-ready-smoke.sh
+
+## live-smoke-diagnostic-bundle: verify diagnostic bundle generation from any cwd
+live-smoke-diagnostic-bundle:
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-cli
+	bash scripts/live-diagnostic-bundle-smoke.sh
+
+## live-smoke-acceptance-status: verify acceptance status parsing from saved receipts
+live-smoke-acceptance-status:
+	bash scripts/live-acceptance-status-smoke.sh
+
+## live-smoke-dock-launcher: validate the Dock app wrapper without opening Terminal
+##
+## Installs Dexter.app into a temporary directory, validates bundle metadata,
+## verifies launcher shell syntax, and confirms the Terminal-backed command
+## reasserts the model store before `make stop && make run`.
+live-smoke-dock-launcher:
+	bash scripts/live-dock-launcher-smoke.sh
+
 ## live-smoke-recovery: run automated worker recovery smoke (starts Rust core, no Swift UI)
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
@@ -255,6 +314,27 @@ live-smoke-hud: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-smoke.sh --start-core
 
+## live-smoke-hud-new-session: verify the Swift HUD can start a fresh daemon session
+live-smoke-hud-new-session: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	DEXTER_HUD_SMOKE_NEW_SESSION=1 DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
+
+## live-smoke-hud-lifecycle: run actual Swift HUD restart/quit lifecycle regression
+live-smoke-hud-lifecycle: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	DEXTER_HUD_SMOKE_LIFECYCLE_ACTION=restart DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
+	DEXTER_HUD_SMOKE_LIFECYCLE_ACTION=quit DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
+
+## live-smoke-hud-placement: verify placement commands and transparent click-through invariants
+live-smoke-hud-placement: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE="snap,start,synthetic-nodrag:32:18,synthetic-drag:32:18,stop" DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
+
+## live-smoke-placement-command: verify external dexter-place.sh notifications reach Swift
+live-smoke-placement-command: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	bash scripts/live-placement-command-smoke.sh
+
 ## live-smoke-hud-health: run Swift HUD status + worker restart regression
 ##
 ## Builds release-mode dexter-core, starts it with logs at
@@ -263,8 +343,13 @@ live-smoke-hud: ensure-core-not-running
 ## browser worker via RestartComponent, and asserts post-restart health returns
 ## to the HUD.
 live-smoke-hud-health: ensure-core-not-running
-	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-hud-health-smoke.sh --start-core
+
+## live-smoke-hud-unavailable-health: verify HUD recovery copy when Rust core is down
+live-smoke-hud-unavailable-health: ensure-core-not-running
+	cd $(SWIFT_DIR) && swift build
+	bash scripts/live-hud-unavailable-health-smoke.sh
 
 ## live-smoke-hud-action-history: run Swift HUD recent-actions regression
 ##
@@ -321,6 +406,14 @@ live-smoke-barge-in: ensure-core-not-running
 ## than sharing one daemon so a leaked worker/socket in one smoke fails the next
 ## target instead of being hidden by shared process state.
 live-smoke-all:
+	$(MAKE) live-smoke-startup-readiness
+	$(MAKE) live-smoke-process-control
+	$(MAKE) live-smoke-stop-report
+	$(MAKE) live-smoke-run-loop-lifecycle
+	$(MAKE) live-smoke-stale-swift-stop
+	$(MAKE) live-smoke-operator-ready
+	$(MAKE) live-smoke-diagnostic-bundle
+	$(MAKE) live-smoke-dock-launcher
 	$(MAKE) live-smoke-recovery
 	$(MAKE) live-smoke-degraded-mode
 	$(MAKE) live-smoke-external-failures
@@ -331,12 +424,100 @@ live-smoke-all:
 	$(MAKE) live-smoke-action-receipts
 	$(MAKE) live-smoke-approval-lifecycle
 	$(MAKE) live-smoke-hud
+	$(MAKE) live-smoke-hud-new-session
+	$(MAKE) live-smoke-hud-lifecycle
+	$(MAKE) live-smoke-hud-placement
+	$(MAKE) live-smoke-placement-command
 	$(MAKE) live-smoke-hud-health
+	$(MAKE) live-smoke-hud-unavailable-health
 	$(MAKE) live-smoke-hud-action-history
 	$(MAKE) live-smoke-hud-action-diagnostic
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel
 	$(MAKE) live-smoke-barge-in
+
+## live-smoke-summary: run live smokes and write a markdown receipt
+##
+## By default this runs the same target sequence as live-smoke-all, but captures
+## each target's terminal output under docs/live-smoke-results/logs/<timestamp>/
+## and writes docs/live-smoke-results/latest.md. To run a smaller pass:
+##
+##   DEXTER_SMOKE_SUMMARY_TARGETS="live-smoke-action-diagnostic live-smoke-operator-status" make live-smoke-summary
+live-smoke-summary:
+	bash scripts/live-smoke-summary.sh
+
+## live-smoke-operator-controls: run the focused Dock/lifecycle/placement acceptance slice
+##
+## This is the fastest high-signal check for the operator-facing controls that
+## should make Dexter feel like a normal app: installed launcher metadata,
+## external stop/restart behavior, UI quit/restart, stale Swift cleanup, and
+## placement click-through plus external placement command delivery.
+live-smoke-operator-controls:
+	bash scripts/live-smoke-summary.sh \
+		live-smoke-dock-launcher \
+		live-smoke-process-control \
+		live-smoke-stop-report \
+		live-smoke-run-loop-lifecycle \
+		live-smoke-stale-swift-stop \
+		live-smoke-hud-lifecycle \
+		live-smoke-hud-placement \
+		live-smoke-placement-command
+
+## live-smoke-runtime-health: run the focused startup/status/HUD-health acceptance slice
+##
+## Verifies startup readiness, CLI operator status, HUD health with worker
+## recovery, and HUD recovery guidance when the Rust core is unreachable.
+live-smoke-runtime-health:
+	bash scripts/live-smoke-summary.sh \
+		live-smoke-startup-readiness \
+		live-smoke-operator-status \
+		live-smoke-hud-health \
+		live-smoke-hud-unavailable-health
+
+## live-smoke-action-safety: run the focused action policy/receipt/HUD acceptance slice
+##
+## Verifies action policy gates, external failure handling, local action
+## diagnostics, audit receipts, approval lifecycle, HUD action history/Why,
+## visible HUD approval denial, and long-lived subprocess cancellation.
+live-smoke-action-safety:
+	bash scripts/live-smoke-summary.sh \
+		live-smoke-external-failures \
+		live-smoke-action-diagnostic \
+		live-smoke-action-matrix \
+		live-smoke-action-receipts \
+		live-smoke-approval-lifecycle \
+		live-smoke-hud-action-history \
+		live-smoke-hud-action-diagnostic \
+		live-smoke-hud-approval \
+		live-smoke-action-cancel
+
+## live-smoke-acceptance: run the combined operator/runtime/action acceptance battery
+##
+## Produces one receipt covering the three focused acceptance slices without the
+## extra experimental, opt-in, or broad full-suite targets.
+live-smoke-acceptance:
+	bash scripts/live-smoke-summary.sh \
+		live-smoke-dock-launcher \
+		live-smoke-process-control \
+		live-smoke-stop-report \
+		live-smoke-run-loop-lifecycle \
+		live-smoke-stale-swift-stop \
+		live-smoke-hud-lifecycle \
+		live-smoke-hud-placement \
+		live-smoke-placement-command \
+		live-smoke-startup-readiness \
+		live-smoke-operator-status \
+		live-smoke-hud-health \
+		live-smoke-hud-unavailable-health \
+		live-smoke-external-failures \
+		live-smoke-action-diagnostic \
+		live-smoke-action-matrix \
+		live-smoke-action-receipts \
+		live-smoke-approval-lifecycle \
+		live-smoke-hud-action-history \
+		live-smoke-hud-action-diagnostic \
+		live-smoke-hud-approval \
+		live-smoke-action-cancel
 
 ## run-swift: start the Swift UI shell (requires run-core already running)
 run-swift:
@@ -352,14 +533,14 @@ run-swift:
 ## A stale socket file from a previous crash is correctly distinguished: connect_ex
 ## returns ECONNREFUSED (111) for a dead socket, 0 for a live one.
 ##
-## Exits 0 when the core is ready, exits 1 with a clear error after timeout.
+## Exits 0 when the socket is accepting connections, exits 1 with a clear error after timeout.
 ## The timeout accommodates a cold `cargo build` on first run (~30s on Apple Silicon).
 wait-for-core:
-	@echo "==> Waiting for Rust core at $(SOCKET_PATH) (timeout: $(SOCKET_TIMEOUT_SECS)s)..."
+	@echo "==> Waiting for Rust core socket at $(SOCKET_PATH) (timeout: $(SOCKET_TIMEOUT_SECS)s)..."
 	@elapsed=0; \
 	while [ $$elapsed -lt $(SOCKET_TIMEOUT_SECS) ]; do \
 		if python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(1); sys.exit(0 if s.connect_ex('$(SOCKET_PATH)')==0 else 1)" 2>/dev/null; then \
-			echo "==> Core ready after $${elapsed}s"; \
+			echo "==> Core socket accepting connections after $${elapsed}s"; \
 			exit 0; \
 		fi; \
 		sleep 1; \
@@ -370,14 +551,81 @@ wait-for-core:
 	kill 0; \
 	exit 1
 
-## run: start both processes (requires Ollama to be running for inference). Swift shell waits for the core socket to accept
-##      connections before launching — no fixed sleep, no silent race condition.
+## wait-for-ready: block until daemon health is ready, models/workers are warm, and doctor has no warnings.
+wait-for-ready:
+	@echo "==> Waiting for Dexter health readiness (timeout: $(READY_TIMEOUT_SECS)s)..."
+	@cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-cli >/dev/null
+	@elapsed=0; \
+	while [ $$elapsed -lt $(READY_TIMEOUT_SECS) ]; do \
+		$(RUST_CORE_DIR)/target/release/dexter-cli --doctor >/tmp/dexter-wait-ready.out 2>&1 || true; \
+		if grep -Fq "OK   daemon health      status ready" /tmp/dexter-wait-ready.out && grep -Fq "Result: OK - no failed checks." /tmp/dexter-wait-ready.out; then \
+			echo "==> Dexter health ready after $${elapsed}s"; \
+			exit 0; \
+		fi; \
+		sleep 2; \
+		elapsed=$$((elapsed + 2)); \
+	done; \
+	echo "ERROR: Dexter health did not become ready within $(READY_TIMEOUT_SECS)s."; \
+	echo "       Last doctor report:"; \
+	cat /tmp/dexter-wait-ready.out 2>/dev/null || true; \
+	kill 0; \
+	exit 1
+
+## run: start both processes (requires Ollama to be running for inference). Swift waits for
+##      the core socket and then doctor-clean daemon readiness before launching.
 ##      Ctrl-C kills both processes.
 run: ensure-core-not-running
-	@trap 'kill 0' INT; \
-	$(MAKE) run-core & \
-	$(MAKE) wait-for-core && $(MAKE) run-swift & \
+	@core_pid=""; ui_pid=""; \
+	echo $$$$ > $(RUN_PID_FILE); \
+	cleanup() { \
+		rm -f $(RUN_PID_FILE); \
+		if [ -n "$$ui_pid" ]; then kill "$$ui_pid" >/dev/null 2>&1 || true; fi; \
+		if [ -n "$$core_pid" ]; then kill "$$core_pid" >/dev/null 2>&1 || true; fi; \
+		wait "$$ui_pid" >/dev/null 2>&1 || true; \
+		wait "$$core_pid" >/dev/null 2>&1 || true; \
+	}; \
+	trap cleanup INT TERM EXIT; \
+	$(MAKE) run-core & core_pid=$$!; \
+	($(MAKE) wait-for-core && $(MAKE) wait-for-ready && $(MAKE) run-swift) & ui_pid=$$!; \
 	wait
+
+## stop: terminate any running Dexter UI/core processes and remove stale sockets
+stop:
+	@bash scripts/stop-dexter.sh
+
+## restart: stop Dexter, then start the normal terminal-backed run loop
+restart: stop run
+
+## operator-ready: clean stale state, configure models, install app, and build launch artifacts
+operator-ready:
+	@bash scripts/operator-ready.sh
+
+## ready: alias for operator-ready
+ready: operator-ready
+
+## acceptance-status: print latest focused live-smoke acceptance evidence
+acceptance-status:
+	@bash scripts/acceptance-status.sh
+
+## acceptance-status-strict: fail if focused acceptance evidence is missing
+acceptance-status-strict:
+	@DEXTER_ACCEPTANCE_STRICT=1 bash scripts/acceptance-status.sh
+
+## diagnostic-bundle: build dexter-cli and write one local launch/model/process diagnostic markdown report
+diagnostic-bundle: cli
+	@bash scripts/diagnostic-bundle.sh
+
+## install-app: install a Dock-launchable Dexter.app wrapper in ~/Applications
+install-app:
+	@bash scripts/install-dexter-app.sh
+
+## open-app: install and open the Dock-launchable Dexter.app wrapper
+open-app: install-app
+	@open "$$HOME/Applications/Dexter.app"
+
+## configure-ollama-models: set launchctl OLLAMA_MODELS to Dexter's local runtime store
+configure-ollama-models:
+	@bash scripts/configure-ollama-models-env.sh
 
 ## clean: remove socket file and build artifacts
 ##
@@ -386,7 +634,7 @@ run: ensure-core-not-running
 ## protoc + plugins to be installed. Deleting them here would break `swift build`
 ## on any machine that doesn't have protoc installed.
 clean:
-	rm -f $(SOCKET_PATH)
+	rm -f $(SOCKET_PATH) $(SHELL_SOCKET_PATH)
 	cd $(RUST_CORE_DIR) && cargo clean
 
 ## setup-python: Install Python worker dependencies (kokoro, faster-whisper, playwright)

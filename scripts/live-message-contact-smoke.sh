@@ -240,7 +240,7 @@ run_known_contact_smoke() {
     local contact="$DEXTER_SMOKE_CONTACT_NAME"
     local body="${DEXTER_SMOKE_MESSAGE_BODY:-Dexter known-contact smoke test $(date -u +%Y%m%dT%H%M%SZ). Do not reply.}"
     local prompt="send a text to ${contact} saying ${body}"
-    local offset out ok cli_flag
+    local offset out actions_out ok cli_flag
 
     if [[ "$APPROVAL_MODE" == "approve" ]]; then
         name="known-contact message_send resolves and auto-approves"
@@ -252,6 +252,7 @@ run_known_contact_smoke() {
 
     offset="$(log_bytes)"
     out="$(mktemp -t dexter-message-contact.XXXXXX)"
+    actions_out="$(mktemp -t dexter-message-contact-actions.XXXXXX)"
     ok=0
 
     say "$INFO" "testing Contacts-backed message_send for: $contact (mode: $APPROVAL_MODE)"
@@ -320,15 +321,34 @@ run_known_contact_smoke() {
             say "$FAIL" "$name - completion appeared despite auto-deny"
             ok=1
         fi
+
+        if ! "$CLI_BIN" --actions last > "$actions_out" 2>&1; then
+            say "$FAIL" "$name - could not inspect latest action receipt"
+            ok=1
+        elif ! grep -Fq "DENIED" "$actions_out"; then
+            say "$FAIL" "$name - latest action receipt did not show denial"
+            ok=1
+        elif ! grep -Fq "target: Structured iMessage send to" "$actions_out"; then
+            say "$FAIL" "$name - latest action receipt did not show resolved Contacts-backed send target"
+            ok=1
+        elif ! grep -Fq "resolved through Contacts" "$actions_out"; then
+            say "$FAIL" "$name - latest action receipt did not preserve Contacts-resolution rationale"
+            ok=1
+        elif ! grep -Fq "result: Denied before execution." "$actions_out"; then
+            say "$FAIL" "$name - latest action receipt did not show denied-before-execution result"
+            ok=1
+        fi
     fi
 
     if [[ "$ok" -ne 0 ]]; then
         show_failure_context "$out"
-        rm -f "$out"
+        say "$INFO" "latest action receipt:"
+        cat "$actions_out" || true
+        rm -f "$out" "$actions_out"
         return 1
     fi
 
-    rm -f "$out"
+    rm -f "$out" "$actions_out"
     if [[ "$APPROVAL_MODE" == "approve" ]]; then
         say "$PASS" "$name - Contacts resolution reached approval and send completed"
     else

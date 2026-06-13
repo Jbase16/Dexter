@@ -378,6 +378,24 @@ struct OllamaOptions {
     /// reproduced post-hoc by re-running with the same seed.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u32>,
+    /// Force Ollama/llama.cpp to memory-map the GGUF weights instead of reading
+    /// them into anonymous buffers.
+    ///
+    /// THIS IS LOAD-BEARING FOR `system::residency`. Empirically, Ollama launches
+    /// `llama-server` with `--no-mmap` by default on this Apple-Silicon full-GPU
+    /// config — verified live via `ps`/`vmmap` on the running runner. With
+    /// `--no-mmap`, weights live in anonymous memory private to the runner, which
+    /// a cross-process `mlock` cannot reach, so the residency pin would be inert.
+    /// Sending `use_mmap: true` makes the runner map the blob as a SHARED
+    /// (`SM=SHM`) file mapping — inode-keyed UBC pages — which the residency
+    /// pinner can then wire resident from outside Ollama. Confirmed: with this
+    /// flag, `vmmap` shows the runner mapping the exact blob path Dexter resolves.
+    ///
+    /// On Apple Silicon the mmap'd pages are wrapped zero-copy into the Metal
+    /// buffer (`newBufferWithBytesNoCopy`), so there is no inference-speed cost —
+    /// the GPU reads the same unified-memory frames either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    use_mmap: Option<bool>,
 }
 
 /// Intermediate streaming chunk from /api/chat.
@@ -623,6 +641,10 @@ impl InferenceEngine {
                 num_predict: req.num_predict,
                 num_ctx: req.num_ctx_override,
                 seed: Some(request_seed),
+                // Always request mmap so the weights load as a shared file
+                // mapping the residency pinner can wire resident. See the
+                // OllamaOptions.use_mmap doc for why this is load-bearing.
+                use_mmap: Some(true),
             }),
             keep_alive,
             think: false, // disable qwen3 hidden reasoning chain
@@ -1163,6 +1185,27 @@ impl InferenceEngine {
 mod tests {
     use super::*;
     use crate::config::InferenceConfig;
+
+    /// Contract guard: the serialized generation options MUST carry
+    /// `use_mmap: true`. Without it Ollama launches `llama-server --no-mmap`,
+    /// weights load into anonymous memory, and `system::residency`'s
+    /// cross-process pin becomes inert. This test fails loudly if the flag is
+    /// ever dropped from the options builder.
+    #[test]
+    fn generation_options_request_mmap() {
+        let opts = OllamaOptions {
+            temperature: None,
+            num_predict: None,
+            num_ctx: None,
+            seed: Some(1),
+            use_mmap: Some(true),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(
+            json.contains("\"use_mmap\":true"),
+            "options must request mmap so weights are pinnable, got: {json}"
+        );
+    }
 
     fn test_config() -> InferenceConfig {
         InferenceConfig {

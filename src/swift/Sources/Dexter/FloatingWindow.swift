@@ -1,5 +1,17 @@
 import AppKit
 
+private enum FloatingWindowSmokeLog {
+    static let enabled: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static func log(_ message: String) {
+        guard enabled else { return }
+        print("[HUDSmoke] \(message)")
+    }
+}
+
 /// The always-present floating window that hosts Dexter's visual presence.
 ///
 /// Uses NSPanel over NSWindow because NSPanel supports the .nonactivatingPanel
@@ -20,25 +32,27 @@ final class FloatingWindow: NSPanel {
     // off-screen on the next launch.
     private static let frameDefaultsKey = "com.dexter.windowFrame"
     private static let saveDebounceMs   = 250
+    private static let entityWindowSize = NSSize(width: 136, height: 136)
     private var saveDebounceItem: DispatchWorkItem?
 
     private(set) var animatedEntity: AnimatedEntity!
     private(set) var hud: HUDWindow!
 
-    // MARK: - Multi-monitor tracking
+    // MARK: - Hotkey repositioning
 
     // The screen Dexter is currently associated with. Updated on every manual drag
-    // (windowDidMove) and at the start of flyToScreen so the follow-timer doesn't
-    // re-trigger a flight that is already in progress or has just completed.
+    // and hotkey-reposition tick so ensureOnScreen and persistence remain anchored
+    // to the operator's last intentional placement.
     private var lastTrackedScreen: NSScreen?
 
-    // Set to true during flyToScreen's animation so windowDidMove doesn't
-    // overwrite lastTrackedScreen mid-flight with the wrong intermediate screen.
-    private var isAnimatingFlight: Bool = false
-
-    // Polls NSEvent.mouseLocation; fires flyToScreen when the cursor crosses
-    // to a different display. Retained for the process lifetime.
-    private var screenFollowTimer: Timer?
+    // While the placement key is held, Dexter can be snapped to and dragged from
+    // the current mouse location. This preserves the old "bring Dexter with me"
+    // workflow, but only during an intentional placement gesture.
+    private var hotkeyRepositionTimer: Timer?
+    private var lastHotkeyMouseLocation: NSPoint?
+    private var hotkeyRepositionActive = false
+    private var hotkeyRepositionObserver: NSObjectProtocol?
+    private var placementCommandObserver: NSObjectProtocol?
 
     init() {
         // Load last-known frame from UserDefaults; fall back to the default position
@@ -66,11 +80,38 @@ final class FloatingWindow: NSPanel {
         // Seed the tracked screen from the initial window position.
         lastTrackedScreen = self.screen
 
-        // Poll mouse position every 400 ms. Crossing to a new display triggers
-        // a smooth flight to the upper-right corner of that display.
-        // 400 ms is responsive without hammering the event system.
-        screenFollowTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) {
-            [weak self] _ in self?.checkScreenAndFollow()
+        // No passive screen-follow timer. Dexter now moves between displays only
+        // during an intentional hotkey-held reposition gesture.
+        hotkeyRepositionObserver = NotificationCenter.default.addObserver(
+            forName: .dexterHotkeyRepositionChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let active = notification.userInfo?["active"] as? Bool ?? false
+            MainActor.assumeIsolated {
+                self?.setHotkeyRepositionActive(active)
+            }
+        }
+
+        placementCommandObserver = DistributedNotificationCenter.default().addObserver(
+            forName: .dexterPlacementCommand,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let command = (notification.userInfo?["command"] as? String ?? "snap")
+            MainActor.assumeIsolated {
+                self?.handlePlacementCommand(command)
+            }
+        }
+    }
+
+    @MainActor deinit {
+        hotkeyRepositionTimer?.invalidate()
+        if let hotkeyRepositionObserver {
+            NotificationCenter.default.removeObserver(hotkeyRepositionObserver)
+        }
+        if let placementCommandObserver {
+            DistributedNotificationCenter.default().removeObserver(placementCommandObserver)
         }
     }
 
@@ -84,45 +125,220 @@ final class FloatingWindow: NSPanel {
         }
     }
 
-    // MARK: - Multi-monitor follow
+    // MARK: - Hotkey repositioning
 
-    private func checkScreenAndFollow() {
-        guard !isAnimatingFlight else { return }
-        let mouse = NSEvent.mouseLocation
-        guard let target = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) else { return }
-        guard target != lastTrackedScreen else { return }
-        flyToScreen(target)
+    func setHotkeyRepositionActive(_ active: Bool) {
+        guard active != hotkeyRepositionActive else { return }
+        hotkeyRepositionActive = active
+
+        if active {
+            beginHotkeyReposition()
+        } else {
+            endHotkeyReposition()
+        }
     }
 
-    /// Animate Dexter to the upper-right corner of `screen`.
-    /// The HUD follows via the windowDidMove → hud.follow chain that fires
-    /// for each intermediate frame during the NSAnimationContext animation.
-    private func flyToScreen(_ screen: NSScreen) {
-        // Lock the target now so the timer doesn't re-fire mid-flight.
-        lastTrackedScreen  = screen
-        isAnimatingFlight  = true
+    func snapToCurrentMouseLocation() {
+        setHotkeyRepositionActive(false)
+        snapToMouseLocation(NSEvent.mouseLocation)
+    }
 
-        let margin: CGFloat = 20
-        let vf = screen.visibleFrame
-        let target = NSRect(
-            x: vf.maxX - frame.width  - margin,
-            y: vf.maxY - frame.height - margin,
-            width:  frame.width,
-            height: frame.height
+    func performPlacementSmokeSequence(_ rawSequence: String) {
+        smokeLogPlacementSnapshot("initial")
+        let commands = rawSequence
+            .split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
+            .map(String.init)
+
+        for command in commands {
+            handlePlacementCommand(command)
+            smokeLogPlacementSnapshot("after-\(command.lowercased())")
+        }
+
+        setHotkeyRepositionActive(false)
+        smokeLogPlacementSnapshot("final")
+    }
+
+    private func beginHotkeyReposition() {
+        let mouse = NSEvent.mouseLocation
+        snapToMouseLocation(mouse)
+        lastHotkeyMouseLocation = mouse
+        hotkeyRepositionTimer?.invalidate()
+
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applyHotkeyMouseDelta()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        hotkeyRepositionTimer = timer
+    }
+
+    private func endHotkeyReposition() {
+        hotkeyRepositionTimer?.invalidate()
+        hotkeyRepositionTimer = nil
+        lastHotkeyMouseLocation = nil
+        persistFrameNow()
+    }
+
+    private func applyHotkeyMouseDelta() {
+        applyHotkeyMouseDelta(
+            currentMouseLocation: NSEvent.mouseLocation,
+            primaryMouseButtonDown: isPrimaryMouseButtonDown
+        )
+    }
+
+    private func applyHotkeyMouseDelta(currentMouseLocation current: NSPoint, primaryMouseButtonDown: Bool) {
+        guard hotkeyRepositionActive,
+              let previous = lastHotkeyMouseLocation else { return }
+
+        guard primaryMouseButtonDown else {
+            lastHotkeyMouseLocation = current
+            return
+        }
+
+        let deltaX = current.x - previous.x
+        let deltaY = current.y - previous.y
+
+        guard abs(deltaX) >= 0.25 || abs(deltaY) >= 0.25 else { return }
+
+        var nextFrame = frame
+        nextFrame.origin.x += deltaX
+        nextFrame.origin.y += deltaY
+        setFrame(nextFrame, display: true)
+
+        hud.follow(entityFrame: nextFrame)
+        if let currentScreen = screen {
+            lastTrackedScreen = currentScreen
+        }
+        lastHotkeyMouseLocation = current
+    }
+
+    private var isPrimaryMouseButtonDown: Bool {
+        (NSEvent.pressedMouseButtons & 1) != 0
+    }
+
+    private func snapToMouseLocation(_ mouse: NSPoint) {
+        let target = clampedFrameCentered(on: mouse)
+        setFrame(target, display: true)
+        hud.follow(entityFrame: target)
+        if let currentScreen = screen {
+            lastTrackedScreen = currentScreen
+        }
+        persistFrameNow()
+    }
+
+    private func clampedFrameCentered(on point: NSPoint) -> NSRect {
+        var origin = NSPoint(
+            x: point.x - frame.width / 2,
+            y: point.y - frame.height / 2
         )
 
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration       = 0.55
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            self.animator().setFrame(target, display: true)
-        }, completionHandler: { [weak self] in
-            guard let self else { return }
-            self.isAnimatingFlight = false
-            // Snap HUD to final position in case windowDidMove didn't fire
-            // for every animated frame (AppKit does not guarantee this).
-            self.hud.follow(entityFrame: self.frame)
-            self.persistFrameNow()
-        })
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) {
+            let vf = screen.visibleFrame
+            origin.x = min(max(origin.x, vf.minX), vf.maxX - frame.width)
+            origin.y = min(max(origin.y, vf.minY), vf.maxY - frame.height)
+        }
+
+        return NSRect(
+            x: origin.x,
+            y: origin.y,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    private func handlePlacementCommand(_ rawCommand: String) {
+        let command = rawCommand
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch command {
+        case "snap":
+            FloatingWindowSmokeLog.log("placement command=snap")
+            snapToCurrentMouseLocation()
+            smokeLogPlacementSnapshot("after-command-snap")
+        case "start":
+            FloatingWindowSmokeLog.log("placement command=start")
+            setHotkeyRepositionActive(true)
+            smokeLogPlacementSnapshot("after-command-start")
+        case "stop":
+            FloatingWindowSmokeLog.log("placement command=stop")
+            setHotkeyRepositionActive(false)
+            smokeLogPlacementSnapshot("after-command-stop")
+        default:
+            if command.hasPrefix("synthetic-nodrag:") {
+                performSyntheticPlacementDelta(command, primaryMouseButtonDown: false)
+            } else if command.hasPrefix("synthetic-drag:") {
+                performSyntheticPlacementDelta(command, primaryMouseButtonDown: true)
+            }
+        }
+    }
+
+    private func performSyntheticPlacementDelta(_ command: String, primaryMouseButtonDown: Bool) {
+        let parts = command.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let dx = Double(parts[1]),
+              let dy = Double(parts[2]) else {
+            FloatingWindowSmokeLog.log("placement synthetic-invalid command=\(command)")
+            return
+        }
+
+        let before = centeredSyntheticPlacementFrame()
+        setFrame(before, display: true)
+        hud.follow(entityFrame: before)
+
+        hotkeyRepositionTimer?.invalidate()
+        hotkeyRepositionTimer = nil
+        hotkeyRepositionActive = true
+        let anchor = NSPoint(x: before.midX, y: before.midY)
+        lastHotkeyMouseLocation = anchor
+
+        applyHotkeyMouseDelta(
+            currentMouseLocation: NSPoint(x: anchor.x + dx, y: anchor.y + dy),
+            primaryMouseButtonDown: primaryMouseButtonDown
+        )
+
+        let after = frame
+        let actualDx = after.minX - before.minX
+        let actualDy = after.minY - before.minY
+        let moved = abs(actualDx) >= 0.25 || abs(actualDy) >= 0.25
+        let label = primaryMouseButtonDown ? "synthetic-drag" : "synthetic-nodrag"
+        FloatingWindowSmokeLog.log(
+            String(
+                format: "placement %@ expectedDx=%.1f expectedDy=%.1f actualDx=%.1f actualDy=%.1f moved=%@",
+                label,
+                dx,
+                dy,
+                actualDx,
+                actualDy,
+                moved ? "true" : "false"
+            )
+        )
+    }
+
+    private func centeredSyntheticPlacementFrame() -> NSRect {
+        let screen = lastTrackedScreen ?? self.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let vf = screen.visibleFrame
+        return NSRect(
+            x: round(vf.midX - frame.width / 2),
+            y: round(vf.midY - frame.height / 2),
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    private func smokeLogPlacementSnapshot(_ label: String) {
+        let contentBounds = contentView?.bounds ?? .zero
+        let cornerHit = contentView?.hitTest(NSPoint(x: 1, y: 1)) != nil
+        let centerHit = contentView?.hitTest(NSPoint(x: contentBounds.midX, y: contentBounds.midY)) != nil
+        let topCenterHit = contentView?.hitTest(NSPoint(x: contentBounds.midX, y: contentBounds.maxY - 1)) != nil
+        let bottomCenterHit = contentView?.hitTest(NSPoint(x: contentBounds.midX, y: contentBounds.minY + 1)) != nil
+        let leftCenterHit = contentView?.hitTest(NSPoint(x: contentBounds.minX + 1, y: contentBounds.midY)) != nil
+        let rightCenterHit = contentView?.hitTest(NSPoint(x: contentBounds.maxX - 1, y: contentBounds.midY)) != nil
+        let f = frame
+        FloatingWindowSmokeLog.log(
+            "placement \(label) frame=\(NSStringFromRect(f)) size=\(Int(round(f.width)))x\(Int(round(f.height))) cornerHit=\(cornerHit) topCenterHit=\(topCenterHit) bottomCenterHit=\(bottomCenterHit) leftCenterHit=\(leftCenterHit) rightCenterHit=\(rightCenterHit) centerHit=\(centerHit) movableByBackground=\(isMovableByWindowBackground) ignoresMouse=\(ignoresMouseEvents)"
+        )
     }
 
     // MARK: - Configuration
@@ -138,8 +354,8 @@ final class FloatingWindow: NSPanel {
         backgroundColor = .clear
 
         // Round 3 / behavioral fix: `isMovableByWindowBackground = true` was causing
-        // the entire 200×400pt window rect to intercept mouse events at the window-
-        // server level, even though only the ~55pt-radius orb circle is visible.
+        // the entire entity window rect to intercept mouse events at the window-
+        // server level, even though only the orb circle is visible.
         // Result: a large invisible border around the orb blocked clicks to windows
         // below. Removing this is safe because AnimatedEntity already implements
         // mouseDown/mouseDragged/mouseUp for dragging, and its hitTest only claims
@@ -167,7 +383,7 @@ final class FloatingWindow: NSPanel {
         // bitmap cache cannot detect Metal pixels (rendered through CAMetalLayer,
         // not captured by bitmapImageRepForCachingDisplay).
         // autoresizingMask keeps it frame-locked to the panel; the window size
-        // is fixed (200×400pt) so Auto Layout constraints are unnecessary overhead.
+        // is fixed and square so Auto Layout constraints are unnecessary overhead.
         let entity = AnimatedEntity(frame: content.bounds)
         entity.autoresizingMask = [.width, .height]
         content.addSubview(entity)
@@ -181,7 +397,7 @@ final class FloatingWindow: NSPanel {
     private static func loadOrDefaultFrame() -> NSRect {
         guard let str = UserDefaults.standard.string(forKey: frameDefaultsKey),
               !str.isEmpty else { return defaultFrame() }
-        let frame = NSRectFromString(str)
+        let frame = FloatingWindow.normalizedFrame(NSRectFromString(str))
         // NSRectFromString returns NSZeroRect for an unparseable string.
         guard frame != .zero else { return defaultFrame() }
         let center = NSPoint(x: frame.midX, y: frame.midY)
@@ -194,19 +410,34 @@ final class FloatingWindow: NSPanel {
     }
 
     /// Horizontal center of the main screen's visible frame, 80pt above the bottom edge.
-    /// Window size matches the dimensions used in Phase 1 (200 × 400 points).
+    /// The window is a tight square around the orb so transparent space above and
+    /// below Dexter does not block clicks into underlying apps.
     ///
     /// AppKit window frames are always in points, not pixels. NSStringFromRect and
     /// NSRectFromString operate on the same point-coordinate system, so round-tripping
     /// through UserDefaults is exact.
     private static func defaultFrame() -> NSRect {
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let size   = NSSize(width: 200, height: 400)
+        let size = entityWindowSize
         return NSRect(
             x: screen.visibleFrame.midX - size.width  / 2,
             y: screen.visibleFrame.minY + 80,
             width:  size.width,
             height: size.height
+        )
+    }
+
+    private static func normalizedFrame(_ frame: NSRect) -> NSRect {
+        guard frame != .zero else { return frame }
+        let expected = entityWindowSize
+        guard abs(frame.width - expected.width) > 0.5 || abs(frame.height - expected.height) > 0.5 else {
+            return frame
+        }
+        return NSRect(
+            x: frame.midX - expected.width / 2,
+            y: frame.midY - expected.height / 2,
+            width: expected.width,
+            height: expected.height
         )
     }
 
@@ -238,11 +469,9 @@ extension FloatingWindow: NSWindowDelegate {
         scheduleSaveFrame()
         // Keep the HUD pinned to the left of the entity as the operator drags.
         hud.follow(entityFrame: frame)
-        // Sync the tracked screen so the follow-timer doesn't fly Dexter back
-        // if the operator manually drags him to a different display.
-        // Suppressed during flyToScreen to avoid overwriting the destination
-        // screen mid-animation with the source screen.
-        if !isAnimatingFlight, let current = screen {
+        // Sync the tracked screen so Dexter's last intentional placement follows
+        // manual drags and hotkey-held repositioning.
+        if let current = screen {
             lastTrackedScreen = current
         }
     }
@@ -277,64 +506,35 @@ extension FloatingWindow: NSWindowDelegate {
 /// pass-through: transparent regions forward to apps below, opaque regions
 /// (where Dexter is rendered) receive events for drag, interaction, etc.
 ///
-/// Implementation: override `hitTest(_:)`. Return nil to pass through, return self
-/// (or the relevant subview) to claim the event. Pixel-level alpha is sampled from
-/// a cached bitmap, rebuilt only when the view is marked dirty.
-///
-/// Caching strategy: `setNeedsDisplay(_:)` is the canonical AppKit invalidation
-/// point — called by the system before redraws, on resize, and on backing store
-/// changes. Overriding it (rather than the `needsDisplay` property) catches all
-/// system-initiated invalidations, not just ones set via the property. The cache
-/// is nil'd on every invalidation and rebuilt lazily on the next hit test.
-/// Phase 12 (Metal rendering) inherits this mechanism without modification.
+/// Implementation: override `hitTest(_:)`. Return nil to pass through, return the
+/// relevant subview to claim the event. The root view itself never claims the
+/// transparent background; Dexter's visible Metal orb is handled by
+/// `AnimatedEntity.hitTest(_:)`.
 final class PassthroughView: NSView {
-
-    /// Cached alpha bitmap. Nil means stale — rebuild on next hit test.
-    /// Rebuilt at most once per display cycle, not once per mouse event.
-    private var cachedBitmap: NSBitmapImageRep?
 
     // ── Invalidation ──────────────────────────────────────────────────────────
 
     override func setNeedsDisplay(_ invalidRect: NSRect) {
-        // Any dirty region invalidates the whole hit-test cache.
-        // Partial-rect precision isn't worth the complexity here —
-        // a mouse event that falls outside the dirty rect is rare, and
-        // a false pass-through is less bad than a stale hit claim.
-        cachedBitmap = nil
         super.setNeedsDisplay(invalidRect)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        // Bounds changed → cached bitmap dimensions are wrong → discard.
-        cachedBitmap = nil
         super.setFrameSize(newSize)
     }
 
     // ── Hit testing ───────────────────────────────────────────────────────────
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+
         // Give subviews first opportunity to claim the event.
         for subview in subviews.reversed() {
             if let hit = subview.hitTest(convert(point, to: subview)) { return hit }
         }
 
-        // Rebuild bitmap only when cache has been invalidated.
-        // On a typical 60 Hz mouse-move sequence, this rebuilds at most once
-        // per frame (when content changes), not 60+ times per frame.
-        if cachedBitmap == nil {
-            guard let bitmap = bitmapImageRepForCachingDisplay(in: bounds) else {
-                return super.hitTest(point)
-            }
-            cacheDisplay(in: bounds, to: bitmap)
-            cachedBitmap = bitmap
-        }
-
-        let pixelX = Int(point.x)
-        let pixelY = Int(bounds.height - point.y)  // Flip: NSView is bottom-left origin
-        let alpha  = cachedBitmap?.colorAt(x: pixelX, y: pixelY)?.alphaComponent ?? 0
-
-        // Threshold at 1% — fully transparent pixels pass through.
-        return alpha < 0.01 ? nil : self
+        // The floating entity window has no clickable background. Returning self
+        // here would turn the square NSPanel back into an invisible click blocker.
+        return nil
     }
 
     override var isFlipped: Bool { false }

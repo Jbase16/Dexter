@@ -7,11 +7,10 @@ import Darwin
 _ = setvbuf(stdout, nil, _IONBF, 0)
 
 // Set activation policy BEFORE app.run() — this is the only reliable point.
-// Calling it inside applicationDidFinishLaunching is too late: the run loop
-// has already made its first activation decision, which can cause a transient
-// Dock icon. Setting it here ensures .accessory from the very first frame.
+// Dexter is now a normal Dock application so the operator can quit or restart
+// it without finding the Terminal window that launched `make run`.
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+app.setActivationPolicy(.regular)
 
 let delegate = DexterApp()
 app.delegate = delegate

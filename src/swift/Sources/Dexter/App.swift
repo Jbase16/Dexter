@@ -9,10 +9,14 @@ import AVFoundation
 /// static func main(), so @main would compile but never start the run loop.
 final class DexterApp: NSObject, NSApplicationDelegate {
 
+    private static let lifecycleConfirmationDelay: TimeInterval = 0.8
+
     private var floatingWindow: FloatingWindow?
     private var client: DexterClient?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installApplicationMenu()
+
         let window = FloatingWindow()
         self.floatingWindow = window
 
@@ -135,15 +139,39 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                 }
             }
 
+            // Full app controls from the HUD. These mirror the app menu items but are
+            // reachable from Dexter's own UI without making the app menu visible.
+            window.hud.onDexterRestartRequest = { [weak self, weak window] in
+                self?.beginDexterRestart(from: window)
+            }
+
+            window.hud.onDexterNewSessionRequest = { [weak c, weak window] in
+                window?.hud.showNewSessionStarting()
+                Task { await c?.startNewSession() }
+            }
+
+            window.hud.onDexterQuitRequest = { [weak self, weak window] in
+                self?.beginDexterQuit(from: window)
+            }
+
             if HUDSmokeConfig.enabled {
                 HUDSmokeConfig.log(
-                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) actionHistory=\(HUDSmokeConfig.actionHistoryRequest) actionDiagnostic=\(HUDSmokeConfig.actionDiagnosticRequest) restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
+                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) actionHistory=\(HUDSmokeConfig.actionHistoryRequest) actionDiagnostic=\(HUDSmokeConfig.actionDiagnosticRequest) newSession=\(HUDSmokeConfig.newSessionRequest) lifecycle=\(HUDSmokeConfig.lifecycleConfirmationAction ?? "none") restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
                 )
                 Task {
                     try? await Task.sleep(for: .seconds(HUDSmokeConfig.submitDelaySecs))
                     await MainActor.run {
-                        if HUDSmokeConfig.idleOnly {
+                        if let placementSequence = HUDSmokeConfig.placementSequence {
+                            window.performPlacementSmokeSequence(placementSequence)
+                        } else if let lifecycleAction = HUDSmokeConfig.lifecycleAction {
+                            HUDSmokeConfig.log("lifecycleActionRequest action=\(lifecycleAction)")
+                            performLifecycleActionForSmoke(lifecycleAction, window: window)
+                        } else if let lifecycleAction = HUDSmokeConfig.lifecycleConfirmationAction {
+                            window.hud.performLifecycleConfirmationForSmoke(lifecycleAction)
+                        } else if HUDSmokeConfig.idleOnly {
                             HUDSmokeConfig.log("idleOnly")
+                        } else if HUDSmokeConfig.newSessionRequest {
+                            window.hud.performNewSessionRequestForSmoke()
                         } else if HUDSmokeConfig.actionDiagnosticRequest {
                             window.hud.performActionDiagnosticRequestForSmoke()
                         } else if HUDSmokeConfig.actionHistoryRequest {
@@ -206,12 +234,185 @@ final class DexterApp: NSObject, NSApplicationDelegate {
         // here to guarantee the last-known position is persisted on every clean shutdown.
         // persistFrameNow() is idempotent — a redundant call is a harmless no-op write.
         floatingWindow?.persistFrameNow()
+        if !HUDSmokeConfig.keepCoreOnExit {
+            DexterProcessControl.terminateRustCore()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
         // Dexter has no "last window" in the conventional sense.
         // The floating window closing should not terminate the process.
         false
+    }
+
+    @MainActor private func installApplicationMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+
+        let appMenu = NSMenu(title: "Dexter")
+        appMenuItem.submenu = appMenu
+
+        appMenu.addItem(
+            withTitle: "New Session",
+            action: #selector(newSession(_:)),
+            keyEquivalent: "n"
+        ).target = self
+
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(
+            withTitle: "Move Dexter to Mouse",
+            action: #selector(moveDexterToMouse(_:)),
+            keyEquivalent: ""
+        ).target = self
+        appMenu.addItem(
+            withTitle: "Start Dexter Placement Drag",
+            action: #selector(startDexterPlacementDrag(_:)),
+            keyEquivalent: ""
+        ).target = self
+        appMenu.addItem(
+            withTitle: "Stop Dexter Placement Drag",
+            action: #selector(stopDexterPlacementDrag(_:)),
+            keyEquivalent: ""
+        ).target = self
+
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(
+            withTitle: "Restart Dexter",
+            action: #selector(restartDexter(_:)),
+            keyEquivalent: "r"
+        ).target = self
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(
+            withTitle: "Quit Dexter",
+            action: #selector(quitDexter(_:)),
+            keyEquivalent: "q"
+        ).target = self
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @MainActor @objc private func quitDexter(_ sender: Any?) {
+        beginDexterQuit(from: floatingWindow)
+    }
+
+    @MainActor @objc private func restartDexter(_ sender: Any?) {
+        beginDexterRestart(from: floatingWindow)
+    }
+
+    @MainActor @objc private func newSession(_ sender: Any?) {
+        floatingWindow?.hud.showNewSessionStarting()
+        Task { await client?.startNewSession() }
+    }
+
+    @MainActor private func performLifecycleActionForSmoke(_ action: String, window: FloatingWindow) {
+        switch action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "restart":
+            beginDexterRestart(from: window)
+        case "quit":
+            beginDexterQuit(from: window)
+        case "new_session", "new-session", "newsession", "session":
+            window.hud.showNewSessionStarting()
+            Task { await client?.startNewSession() }
+        default:
+            window.hud.performLifecycleConfirmationForSmoke(action)
+        }
+    }
+
+    @MainActor @objc private func moveDexterToMouse(_ sender: Any?) {
+        floatingWindow?.snapToCurrentMouseLocation()
+    }
+
+    @MainActor @objc private func startDexterPlacementDrag(_ sender: Any?) {
+        floatingWindow?.setHotkeyRepositionActive(true)
+    }
+
+    @MainActor @objc private func stopDexterPlacementDrag(_ sender: Any?) {
+        floatingWindow?.setHotkeyRepositionActive(false)
+    }
+
+    @MainActor private func beginDexterRestart(from window: FloatingWindow?) {
+        let targetWindow = window ?? floatingWindow
+        targetWindow?.hud.showDexterRestarting()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.lifecycleConfirmationDelay) {
+            DexterProcessControl.openRestartTerminal()
+            NSApp.terminate(nil)
+        }
+    }
+
+    @MainActor private func beginDexterQuit(from window: FloatingWindow?) {
+        let targetWindow = window ?? floatingWindow
+        targetWindow?.hud.showDexterQuitting()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.lifecycleConfirmationDelay) {
+            NSApp.terminate(nil)
+        }
+    }
+}
+
+private enum DexterProcessControl {
+    private static let repoPath = "/Users/jason/Developer/Dex"
+
+    static func terminateRustCore() {
+        run("/bin/bash", ["\(repoPath)/scripts/stop-dexter.sh", "--core-only", "--quiet"])
+    }
+
+    static func openRestartTerminal() {
+        if writeRestartSentinelIfConfigured() {
+            return
+        }
+        let command = """
+        cd \(shellQuote(repoPath)); export OLLAMA_MODELS=/Users/jason/ollama-models; echo 'Restarting Dexter...'; echo 'OLLAMA_MODELS='$OLLAMA_MODELS; sleep 1; make configure-ollama-models && make stop && make run
+        """
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "\(appleScriptString(command))"
+        end tell
+        """
+        run("/usr/bin/osascript", ["-e", script])
+    }
+
+    private static func run(_ executable: String, _ arguments: [String]) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        do {
+            try process.run()
+        } catch {
+            print("[DexterProcessControl] failed to run \(executable): \(error)")
+        }
+    }
+
+    private static func writeRestartSentinelIfConfigured() -> Bool {
+        let key = "DEXTER_PROCESS_CONTROL_RESTART_SENTINEL"
+        guard let path = ProcessInfo.processInfo.environment[key],
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+
+        do {
+            try "restart requested\n".write(
+                toFile: path,
+                atomically: true,
+                encoding: .utf8
+            )
+            print("[DexterProcessControl] restart sentinel wrote \(path)")
+        } catch {
+            print("[DexterProcessControl] failed to write restart sentinel \(path): \(error)")
+        }
+        return true
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func appleScriptString(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
     }
 }
 
@@ -238,6 +439,29 @@ private enum HUDSmokeConfig {
     static let actionDiagnosticRequest: Bool = {
         let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_ACTION_DIAGNOSTIC"] ?? ""
         return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let newSessionRequest: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_NEW_SESSION"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let placementSequence: String? = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE"] ?? ""
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }()
+
+    static let lifecycleConfirmationAction: String? = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_LIFECYCLE_CONFIRMATION"] ?? ""
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }()
+
+    static let lifecycleAction: String? = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_LIFECYCLE_ACTION"] ?? ""
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
     }()
 
     static let idleOnly: Bool = {
@@ -267,6 +491,11 @@ private enum HUDSmokeConfig {
 
     static let fromVoice: Bool = {
         let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_FROM_VOICE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let keepCoreOnExit: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_KEEP_CORE_ON_EXIT"] ?? ""
         return ["1", "true", "yes"].contains(raw.lowercased())
     }()
 

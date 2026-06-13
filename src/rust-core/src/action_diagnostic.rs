@@ -2,8 +2,30 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     action::audit::{recent_action_receipts, ActionAuditReceipt},
+    action_evidence::{
+        action_receipt_diagnosis, format_failed_action_evidence_block,
+        format_success_action_evidence_block, ActionEvidence,
+    },
     session::{state::HistoryEntry, SessionStateManager},
 };
+
+impl ActionEvidence for ActionAuditReceipt {
+    fn action_outcome(&self) -> &str {
+        &self.outcome
+    }
+
+    fn action_type(&self) -> &str {
+        &self.action_type
+    }
+
+    fn action_target(&self) -> &str {
+        &self.description
+    }
+
+    fn result_summary(&self) -> &str {
+        &self.summary
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionActionClue {
@@ -123,7 +145,8 @@ fn analyze_current_turn_for_action_clue(
 ) -> Option<SessionActionClue> {
     let assistant_text = clean_line_owned(assistant_text?)?;
     let user_text = user_text.and_then(clean_line_owned);
-    let (diagnosis, operator_next_step) = action_refusal_diagnosis(&assistant_text)?;
+    let (diagnosis, operator_next_step) =
+        action_refusal_diagnosis(user_text.as_deref(), &assistant_text)?;
 
     Some(SessionActionClue {
         session_id: "current".to_string(),
@@ -162,7 +185,8 @@ fn analyze_history_for_action_clue(
     }
 
     let assistant = last_assistant.as_deref()?;
-    let (diagnosis, operator_next_step) = action_refusal_diagnosis(assistant)?;
+    let (diagnosis, operator_next_step) =
+        action_refusal_diagnosis(last_user.as_deref(), assistant)?;
 
     Some(SessionActionClue {
         session_id,
@@ -176,7 +200,7 @@ fn analyze_history_for_action_clue(
     })
 }
 
-fn action_refusal_diagnosis(assistant: &str) -> Option<(String, String)> {
+fn action_refusal_diagnosis(user: Option<&str>, assistant: &str) -> Option<(String, String)> {
     let lower = assistant.to_ascii_lowercase();
     let (diagnosis, operator_next_step) = if lower.contains("different machine")
         || lower.contains("only run it here")
@@ -184,6 +208,14 @@ fn action_refusal_diagnosis(assistant: &str) -> Option<(String, String)> {
         (
             "Dexter refused to execute a shell action locally because the request looked off-host.",
             "Run the surfaced command on the target machine, or explicitly say it should run on this Mac.",
+        )
+    } else if user
+        .map(|text| is_explicit_web_action_request(text) && is_tool_capability_denial(&lower))
+        .unwrap_or(false)
+    {
+        (
+            "Dexter answered with a tool-capability denial even though the operator asked for web/search/download work. No action was emitted, so browser, shell, or download tooling never ran.",
+            "Fix the routing path so explicit web/search/download requests enter tool handling before normal chat, then retry the task.",
         )
     } else if lower.contains("couldn't determine the exact contacts recipient") {
         (
@@ -194,6 +226,11 @@ fn action_refusal_diagnosis(assistant: &str) -> Option<(String, String)> {
         (
             "Dexter refused a message send because the generated send action did not contain a verifiable Contacts recipient.",
             "Retry with the contact name exactly as it appears in Contacts so Rust can resolve the handle.",
+        )
+    } else if lower.contains("contacts lookup failed") {
+        (
+            "Dexter refused a message send because Contacts lookup failed before the recipient could be verified.",
+            "Check Contacts access, then retry with the contact name exactly as it appears in Contacts.",
         )
     } else if lower.contains("couldn't find that imessage recipient handle in contacts") {
         (
@@ -258,6 +295,59 @@ fn action_refusal_diagnosis(assistant: &str) -> Option<(String, String)> {
     Some((diagnosis.to_string(), operator_next_step.to_string()))
 }
 
+fn is_explicit_web_action_request(user: &str) -> bool {
+    let lower = user.to_ascii_lowercase();
+    [
+        "go online",
+        "search the web",
+        "search online",
+        "look online",
+        "browse",
+        "open the website",
+        "open this site",
+        "find me",
+        "find a ",
+        "find an ",
+        "download",
+        "save to my desktop",
+        "save it to my desktop",
+        "grab the video",
+        "rip the video",
+        "yt-dlp",
+        "full stream",
+        "direct stream",
+        "magnet",
+        "torrent",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+}
+
+fn is_tool_capability_denial(assistant_lower: &str) -> bool {
+    [
+        "i don't have a way to browse",
+        "i do not have a way to browse",
+        "i don't have the ability to browse",
+        "i do not have the ability to browse",
+        "i can't browse",
+        "i cannot browse",
+        "i can't access the web",
+        "i cannot access the web",
+        "i don't have the ability to access",
+        "i do not have the ability to access",
+        "my browsing is limited",
+        "i'm stuck looking",
+        "i am stuck looking",
+        "if you find a direct",
+        "if you give me a specific site",
+        "if you have a specific link",
+        "i don't \"find\"",
+        "i do not \"find\"",
+    ]
+    .iter()
+    .any(|pattern| assistant_lower.contains(pattern))
+}
+
 fn format_action_diagnostic_markdown(
     audit_log_path: &Path,
     receipts: &[ActionAuditReceipt],
@@ -277,16 +367,18 @@ fn format_action_diagnostic_markdown(
         .first()
         .filter(|receipt| receipt.outcome != "executed")
     {
-        out.push_str(&format!("- {cause}\n"));
-        out.push_str(&format!("- Evidence: {}\n", receipt.summary));
-        out.push_str(&format!("- Target: {}\n", receipt.description));
+        let block = format_failed_action_evidence_block(receipt);
+        debug_assert!(block.contains(cause));
+        out.push_str(&block);
     } else if let Some(clue) = session_clue {
         out.push_str(&format!("- {}\n", clue.diagnosis));
         out.push_str(&format!("- Evidence: {}\n", clue.evidence));
         out.push_str(&format!("- Next step: {}\n", clue.operator_next_step));
     } else if let Some(receipt) = receipts.first() {
-        out.push_str("- The most recent audited action executed successfully.\n");
-        out.push_str(&format!("- Evidence: {}\n", receipt.summary));
+        out.push_str(&format_success_action_evidence_block(
+            receipt,
+            "The most recent audited action executed successfully.",
+        ));
     }
 
     if let Some(clue) = session_clue {
@@ -338,43 +430,6 @@ fn format_action_diagnostic_markdown(
     }
 
     out
-}
-
-fn action_receipt_diagnosis(receipt: &ActionAuditReceipt) -> String {
-    let status = receipt.outcome.as_str();
-    let action_type = receipt.action_type.as_str();
-    let result = receipt.summary.to_ascii_lowercase();
-
-    if status == "denied" {
-        return "The action reached the approval gate and was denied before execution.".to_string();
-    }
-    if status == "expired" {
-        return "The action reached the approval gate, but approval expired before execution."
-            .to_string();
-    }
-    if status == "abandoned" {
-        return "The action was abandoned before approval, likely because the session ended."
-            .to_string();
-    }
-    if action_type == "message_send" && result.contains("must be resolved by the orchestrator") {
-        return "A raw message_send action was blocked because recipient resolution must happen through Rust-side Contacts lookup.".to_string();
-    }
-    if result.contains("timed out") {
-        return "The external tool or worker timed out before Dexter could complete the action."
-            .to_string();
-    }
-    if action_type == "applescript" {
-        return "AppleScript execution failed after the action was approved or allowed by policy."
-            .to_string();
-    }
-    if action_type == "browser" {
-        return "Browser automation failed after the action was dispatched.".to_string();
-    }
-    if action_type == "shell" {
-        return "The shell command ran but returned a failure.".to_string();
-    }
-
-    "The action reached the engine but did not complete successfully.".to_string()
 }
 
 fn action_review_label(category: &str) -> &'static str {
@@ -468,6 +523,9 @@ mod tests {
         assert!(report.has_diagnostic);
         assert!(report.cause.contains("raw message_send action was blocked"));
         assert!(report.markdown.contains("Send iMessage to: 555-0100"));
+        assert!(report
+            .markdown
+            .contains("Next step: Ask again using the recipient's exact Contacts name"));
     }
 
     #[test]
@@ -540,6 +598,78 @@ mod tests {
             .cause
             .contains("belonged to a different Contacts entry"));
         assert!(report.markdown.contains("Latest Session Clue"));
+    }
+
+    #[test]
+    fn diagnostic_detects_contacts_lookup_failure_without_receipts() {
+        let tmp = tempdir().unwrap();
+        let report = build_action_diagnostic(ActionDiagnosticInput {
+            state_dir: tmp.path(),
+            limit: 3,
+            current_user_text: Some("text Jason Phillips saying smoke".to_string()),
+            current_assistant_text: Some(
+                "Contacts lookup failed while resolving Jason Phillips, so I didn't send it. Check Contacts access and try again.".to_string(),
+            ),
+            health_warnings: Vec::new(),
+            only_if_clue: true,
+            ignore_action_receipts: true,
+        })
+        .unwrap();
+
+        assert!(report.has_diagnostic);
+        assert!(report.has_session_clue);
+        assert!(report.cause.contains("Contacts lookup failed"));
+        assert!(report.markdown.contains("Check Contacts access"));
+    }
+
+    #[test]
+    fn diagnostic_detects_web_tool_capability_denial_without_receipts() {
+        let tmp = tempdir().unwrap();
+        let report = build_action_diagnostic(ActionDiagnosticInput {
+            state_dir: tmp.path(),
+            limit: 3,
+            current_user_text: Some(
+                "go online and find me a public domain movie download".to_string(),
+            ),
+            current_assistant_text: Some(
+                "I don't have the ability to browse the web for streaming links. If you have a specific link, I can inspect it.".to_string(),
+            ),
+            health_warnings: Vec::new(),
+            only_if_clue: true,
+            ignore_action_receipts: true,
+        })
+        .unwrap();
+
+        assert!(report.has_diagnostic);
+        assert!(report.has_session_clue);
+        assert!(report.cause.contains("tool-capability denial"));
+        assert!(report
+            .cause
+            .contains("browser, shell, or download tooling never ran"));
+        assert!(report.markdown.contains(
+            "Fix the routing path so explicit web/search/download requests enter tool handling"
+        ));
+    }
+
+    #[test]
+    fn diagnostic_does_not_treat_capability_denial_as_action_clue_without_tool_request() {
+        let tmp = tempdir().unwrap();
+        let report = build_action_diagnostic(ActionDiagnosticInput {
+            state_dir: tmp.path(),
+            limit: 3,
+            current_user_text: Some("what are your limits".to_string()),
+            current_assistant_text: Some(
+                "I don't have the ability to browse the web unless you ask me to use tools."
+                    .to_string(),
+            ),
+            health_warnings: Vec::new(),
+            only_if_clue: true,
+            ignore_action_receipts: true,
+        })
+        .unwrap();
+
+        assert!(!report.has_diagnostic);
+        assert!(!report.has_session_clue);
     }
 
     #[test]

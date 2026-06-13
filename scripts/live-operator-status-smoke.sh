@@ -173,6 +173,21 @@ assert_contains() {
     return 0
 }
 
+assert_contains_any() {
+    local file="$1"
+    local label="$2"
+    shift 2
+    local pattern
+    for pattern in "$@"; do
+        if grep -Fq "$pattern" "$file"; then
+            return 0
+        fi
+    done
+    say "$FAIL" "$label - missing all expected patterns: $*"
+    cat "$file"
+    return 1
+}
+
 main() {
     require_bins
     start_core_if_requested
@@ -203,6 +218,11 @@ main() {
         assert_contains "$status_out" "Dexter Operator Status" "status prints operator header" || ok=1
         assert_contains "$status_out" "Health" "status prints health section" || ok=1
         assert_contains "$status_out" "daemon ping" "status includes daemon ping check" || ok=1
+        assert_contains "$status_out" "Current Context" "status prints current context section" || ok=1
+        assert_contains_any "$status_out" "status includes context capabilities or fallback" "Dexter can:" "No focused app context" || ok=1
+        assert_contains "$status_out" "Latest Action Summary" "status prints latest action summary" || ok=1
+        assert_contains "$status_out" "The latest audited action executed successfully." "status summarizes successful latest action" || ok=1
+        assert_contains "$status_out" "Evidence: Succeeded:" "status includes latest action evidence" || ok=1
         assert_contains "$status_out" "Recent Actions" "status prints recent action section" || ok=1
         assert_contains "$status_out" "source:" "status prints audit source" || ok=1
         assert_contains "$status_out" "target: echo $token" "status includes seeded action receipt" || ok=1

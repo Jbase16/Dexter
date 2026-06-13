@@ -18,6 +18,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 CORE_PID=""
+CORE_WARMUP_TIMEOUT_SECS="${DEXTER_SMOKE_CORE_WARMUP_TIMEOUT_SECS:-300}"
 TOKEN="dexter-action-cancel-$$_$(date +%s)"
 TARGET_FILE="/tmp/${TOKEN}.log"
 PROMPT="Use a Dexter shell action to run exactly this command: tail -f $TARGET_FILE"
@@ -113,7 +114,7 @@ start_core_if_requested() {
     fi
 
     waited=0
-    while [[ "$waited" -lt 120 ]]; do
+    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
         if grep -Fq "Daemon startup warmup complete" "$LOG"; then
             say "$INFO" "core warmup complete"
             return
@@ -121,7 +122,7 @@ start_core_if_requested() {
         sleep 1
         waited=$((waited + 1))
     done
-    say "$FAIL" "core socket opened, but warmup did not complete within 120s"
+    say "$FAIL" "core socket opened, but warmup did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
     tail -80 "$LOG" || true
     exit 2
 }

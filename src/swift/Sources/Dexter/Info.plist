@@ -3,10 +3,10 @@
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- LSUIElement: hide from Dock and App Switcher. Dexter is a system-level overlay,
-         not a conventional application. Established in Phase 11. -->
+    <!-- Dexter intentionally appears in the Dock so the operator has normal
+         app-level Quit/Restart affordances without finding the launch terminal. -->
     <key>LSUIElement</key>
-    <true/>
+    <false/>
 
     <!-- NSMicrophoneUsageDescription: required for AVCaptureSession microphone access.
          Displayed in the system permission dialog on first launch (Phase 13). -->

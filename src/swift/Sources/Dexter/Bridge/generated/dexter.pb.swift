@@ -447,6 +447,15 @@ struct Dexter_V1_HealthResponse: @unchecked Sendable {
     set {_uniqueStorage()._disk = newValue}
   }
 
+  /// Daemon-owned operator workflow summary derived from the latest observed
+  /// focused app/context snapshot. This surfaces what Dexter can do from the
+  /// current context without asking the model or duplicating context logic in
+  /// Swift.
+  var operatorContextMarkdown: String {
+    get {_storage._operatorContextMarkdown}
+    set {_uniqueStorage()._operatorContextMarkdown = newValue}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -504,6 +513,10 @@ struct Dexter_V1_ActionHistoryResponse: Sendable {
 
   /// Newest first
   var receipts: [Dexter_V1_ActionReceipt] = []
+
+  /// Daemon-owned latest-action summary markdown. Kept here so the Swift HUD
+  /// does not duplicate Rust's operator-facing action evidence rules.
+  var latestActionSummaryMarkdown: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1191,7 +1204,7 @@ extension Dexter_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".HealthResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0\u{3}operator_context_markdown\0")
 
   fileprivate class _StorageClass {
     var _traceID: String = String()
@@ -1214,6 +1227,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
     var _ttsWorker: String = String()
     var _browserWorker: String = String()
     var _disk: [Dexter_V1_DiskHealth] = []
+    var _operatorContextMarkdown: String = String()
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1244,6 +1258,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       _ttsWorker = source._ttsWorker
       _browserWorker = source._browserWorker
       _disk = source._disk
+      _operatorContextMarkdown = source._operatorContextMarkdown
     }
   }
 
@@ -1282,6 +1297,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         case 18: try { try decoder.decodeSingularStringField(value: &_storage._ttsWorker) }()
         case 19: try { try decoder.decodeSingularStringField(value: &_storage._browserWorker) }()
         case 20: try { try decoder.decodeRepeatedMessageField(value: &_storage._disk) }()
+        case 21: try { try decoder.decodeSingularStringField(value: &_storage._operatorContextMarkdown) }()
         default: break
         }
       }
@@ -1350,6 +1366,9 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       if !_storage._disk.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._disk, fieldNumber: 20)
       }
+      if !_storage._operatorContextMarkdown.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._operatorContextMarkdown, fieldNumber: 21)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1379,6 +1398,7 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if _storage._ttsWorker != rhs_storage._ttsWorker {return false}
         if _storage._browserWorker != rhs_storage._browserWorker {return false}
         if _storage._disk != rhs_storage._disk {return false}
+        if _storage._operatorContextMarkdown != rhs_storage._operatorContextMarkdown {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -1480,7 +1500,7 @@ extension Dexter_V1_ActionHistoryRequest: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Dexter_V1_ActionHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ActionHistoryResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}audit_log_path\0\u{1}receipts\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}audit_log_path\0\u{1}receipts\0\u{3}latest_action_summary_markdown\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1491,6 +1511,7 @@ extension Dexter_V1_ActionHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf.
       case 1: try { try decoder.decodeSingularStringField(value: &self.traceID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.auditLogPath) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.receipts) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.latestActionSummaryMarkdown) }()
       default: break
       }
     }
@@ -1506,6 +1527,9 @@ extension Dexter_V1_ActionHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.receipts.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.receipts, fieldNumber: 3)
     }
+    if !self.latestActionSummaryMarkdown.isEmpty {
+      try visitor.visitSingularStringField(value: self.latestActionSummaryMarkdown, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1513,6 +1537,7 @@ extension Dexter_V1_ActionHistoryResponse: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.traceID != rhs.traceID {return false}
     if lhs.auditLogPath != rhs.auditLogPath {return false}
     if lhs.receipts != rhs.receipts {return false}
+    if lhs.latestActionSummaryMarkdown != rhs.latestActionSummaryMarkdown {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

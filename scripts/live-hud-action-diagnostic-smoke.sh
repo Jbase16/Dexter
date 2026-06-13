@@ -13,6 +13,7 @@ SWIFT_LOG="/tmp/dexter-hud-action-diagnostic-swift-smoke.log"
 CLI_LOG="/tmp/dexter-hud-action-diagnostic-cli-smoke.log"
 START_CORE=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 SWIFT_DIR="$ROOT_DIR/src/swift"
@@ -62,11 +63,11 @@ PY
 
 cleanup() {
     if [[ -n "$SWIFT_PID" ]]; then
-        kill "$SWIFT_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$SWIFT_PID"
         wait "$SWIFT_PID" >/dev/null 2>&1 || true
     fi
     if [[ -n "$CORE_PID" ]]; then
-        kill "$CORE_PID" >/dev/null 2>&1 || true
+        stop_process_tree "$CORE_PID"
         wait "$CORE_PID" >/dev/null 2>&1 || true
     fi
 }

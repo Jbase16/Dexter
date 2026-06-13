@@ -1016,6 +1016,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shell_timeout_uses_default_for_non_download_commands() {
+        assert_eq!(
+            shell_timeout(&["echo".to_string(), "hello".to_string()]),
+            ACTION_DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(shell_timeout(&[]), ACTION_DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn shell_timeout_extends_for_download_tool_names_and_absolute_paths() {
+        for bin in [
+            "yt-dlp",
+            "/opt/homebrew/bin/yt-dlp",
+            "/usr/local/bin/curl",
+            "/opt/homebrew/bin/wget",
+            "/opt/homebrew/bin/ffmpeg",
+            "/opt/homebrew/bin/ffprobe",
+        ] {
+            assert_eq!(
+                shell_timeout(&[bin.to_string(), "--version".to_string()]),
+                ACTION_DOWNLOAD_TIMEOUT_SECS,
+                "{bin} should use the extended download timeout"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn message_send_fails_closed_if_it_reaches_action_engine() {
         let tmp = tempdir().unwrap();

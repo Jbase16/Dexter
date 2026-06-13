@@ -95,7 +95,7 @@ final class GeometricRenderer: EntityRenderer {
         float  pulseSpeed = 1.2;
         float  pulseAmp   = 0.04;
         float3 baseColor  = float3(0.75, 0.85, 1.00);  // idle: cool blue-white
-        float  baseRadius = 0.55;
+        float  baseRadius = 0.82;
         float  glowStr    = 0.35;
 
         if (u.state == 1) {

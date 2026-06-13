@@ -31,6 +31,7 @@ final class AnimatedEntity: MTKView {
     // MARK: - Private state
 
     private let entityRenderer: EntityRenderer
+    private static let shaderBaseRadius: CGFloat = 0.82
 
     // Drag tracking — captured in mouseDown, used in mouseDragged.
     // Screen-space coords avoid the feedback loop caused by locationInWindow
@@ -105,26 +106,27 @@ final class AnimatedEntity: MTKView {
 
     /// Circle SDF hit test matching the shader's rendered disc geometry.
     ///
-    /// The shader places a disc of `baseRadius = 0.55` in aspect-correct space
+    /// The shader places a disc of `baseRadius = 0.82` in aspect-correct space
     /// where the shorter dimension spans [-1, 1] (i.e. maps to 1.0 in shader
     /// coordinates). Converting to NSView points:
     ///
     ///   nsViewRadius = shaderBaseRadius × (min(width, height) / 2)
-    ///                = 0.55 × (min(200, 400) / 2)   [for the 200×400 window]
-    ///                = 0.55 × 100
-    ///                = 55pt
+    ///                = 0.82 × (min(136, 136) / 2)
+    ///                ≈ 56pt
     ///
     /// If `GeometricRenderer.shaderSource` changes `baseRadius`, update the
     /// constant here to match. Both are in the same file group for discoverability.
     override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+
         // Give subviews first crack (none in Phase 12, but future-proof).
         for subview in subviews.reversed() {
             if let hit = subview.hitTest(convert(point, to: subview)) { return hit }
         }
 
         let center = NSPoint(x: bounds.midX, y: bounds.midY)
-        // shaderBaseRadius = 0.55 — must match GeometricRenderer fragment shader
-        let radius = 0.55 * min(bounds.width, bounds.height) / 2.0
+        // shaderBaseRadius must match GeometricRenderer fragment shader.
+        let radius = Self.shaderBaseRadius * min(bounds.width, bounds.height) / 2.0
         let dx = point.x - center.x
         let dy = point.y - center.y
         return (dx * dx + dy * dy) <= (radius * radius) ? self : nil
