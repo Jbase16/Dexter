@@ -76,6 +76,12 @@ write_summary "$TMP_DIR/live-smoke-20260609_020000.md" "2026-06-09T02:00:00-0700
 write_summary "$TMP_DIR/live-smoke-20260609_030000.md" "2026-06-09T03:00:00-0700" \
     live-smoke-external-failures \
     live-smoke-action-diagnostic \
+    live-smoke-shortcut-action \
+    live-smoke-window-focus \
+    live-smoke-window-inspect \
+    live-smoke-ui-snapshot \
+    live-smoke-ui-click \
+    live-smoke-ui-type \
     live-smoke-action-matrix \
     live-smoke-action-receipts \
     live-smoke-approval-lifecycle \
@@ -100,6 +106,12 @@ write_summary "$TMP_DIR/live-smoke-20260609_040000.md" "2026-06-09T04:00:00-0700
     live-smoke-hud-unavailable-health \
     live-smoke-external-failures \
     live-smoke-action-diagnostic \
+    live-smoke-shortcut-action \
+    live-smoke-window-focus \
+    live-smoke-window-inspect \
+    live-smoke-ui-snapshot \
+    live-smoke-ui-click \
+    live-smoke-ui-type \
     live-smoke-action-matrix \
     live-smoke-action-receipts \
     live-smoke-approval-lifecycle \

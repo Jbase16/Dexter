@@ -104,12 +104,69 @@ pub enum ActionSpec {
         body: String,
         rationale: Option<String>,
     },
+    WindowFocus {
+        #[serde(alias = "app")]
+        app_name: String,
+        #[serde(default)]
+        title_contains: Option<String>,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
+    WindowInspect {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        rationale: Option<String>,
+    },
+    UiSnapshot {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        #[serde(default)]
+        max_depth: Option<u8>,
+        rationale: Option<String>,
+    },
+    UiClick {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        #[serde(default)]
+        role: Option<String>,
+        label: String,
+        #[serde(default)]
+        max_depth: Option<u8>,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
+    UiType {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        #[serde(default)]
+        role: Option<String>,
+        #[serde(default)]
+        label: Option<String>,
+        text: String,
+        #[serde(default)]
+        max_depth: Option<u8>,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
     Browser {
         // #[serde(flatten)] merges BrowserActionKind's tag ("action") and variant
         // fields into the parent object level so the model's flat JSON round-trips:
         //   {"type":"browser","action":"navigate","url":"..."}
         #[serde(flatten)]
         action: BrowserActionKind,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
+    Shortcut {
+        name: String,
+        #[serde(default)]
+        input_path: Option<PathBuf>,
+        #[serde(default)]
+        output_path: Option<PathBuf>,
         rationale: Option<String>,
         #[serde(default)]
         category_override: Option<String>,
@@ -543,9 +600,85 @@ impl ActionEngine {
                 exit_code: None,
                 duration_ms: 0,
             },
+            ActionSpec::WindowFocus {
+                app_name,
+                title_contains,
+                ..
+            } => {
+                executor::execute_window_focus(
+                    app_name,
+                    title_contains.as_deref(),
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::WindowInspect { app_name, .. } => {
+                executor::execute_window_inspect(app_name.as_deref(), ACTION_DEFAULT_TIMEOUT_SECS)
+                    .await
+            }
+            ActionSpec::UiSnapshot {
+                app_name,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_snapshot(
+                    app_name.as_deref(),
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiClick {
+                app_name,
+                role,
+                label,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_click(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiType {
+                app_name,
+                role,
+                label,
+                text,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_type(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label.as_deref(),
+                    text,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
             ActionSpec::Browser { action, .. } => {
                 executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
                     .await
+            }
+            ActionSpec::Shortcut {
+                name,
+                input_path,
+                output_path,
+                ..
+            } => {
+                executor::execute_shortcut(
+                    name,
+                    input_path.as_ref(),
+                    output_path.as_ref(),
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
             }
         };
 
@@ -646,6 +779,87 @@ impl ActionEngine {
             ActionSpec::MessageSend { recipient, .. } => {
                 format!("Send iMessage to: {recipient}")
             }
+            ActionSpec::WindowFocus {
+                app_name,
+                title_contains,
+                ..
+            } => match title_contains
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                Some(title) => format!("Focus window: {app_name} \"{title}\""),
+                None => format!("Focus app: {app_name}"),
+            },
+            ActionSpec::WindowInspect { app_name, .. } => match app_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|app| !app.is_empty())
+            {
+                Some(app) => format!("Inspect windows: {app}"),
+                None => "Inspect frontmost window".to_string(),
+            },
+            ActionSpec::UiSnapshot { app_name, .. } => match app_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|app| !app.is_empty())
+            {
+                Some(app) => format!("Snapshot UI: {app}"),
+                None => "Snapshot frontmost UI".to_string(),
+            },
+            ActionSpec::UiClick {
+                app_name,
+                role,
+                label,
+                ..
+            } => {
+                let target = match app_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|app| !app.is_empty())
+                {
+                    Some(app) => app.to_string(),
+                    None => "frontmost app".to_string(),
+                };
+                match role
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(role) => format!("Click UI: {target} {role} \"{}\"", label.trim()),
+                    None => format!("Click UI: {target} \"{}\"", label.trim()),
+                }
+            }
+            ActionSpec::UiType {
+                app_name,
+                role,
+                label,
+                ..
+            } => {
+                let target = match app_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|app| !app.is_empty())
+                {
+                    Some(app) => app.to_string(),
+                    None => "frontmost app".to_string(),
+                };
+                let control = match (
+                    role.as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                    label
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                ) {
+                    (Some(role), Some(label)) => format!("{role} \"{label}\""),
+                    (Some(role), None) => role.to_string(),
+                    (None, Some(label)) => format!("\"{label}\""),
+                    (None, None) => "control".to_string(),
+                };
+                format!("Type into UI: {target} {control}")
+            }
             ActionSpec::Browser { action, .. } => match action {
                 BrowserActionKind::Navigate { url } => format!("Browser navigate: {url}"),
                 BrowserActionKind::Click { selector } => format!("Browser click: {selector}"),
@@ -658,6 +872,7 @@ impl ActionEngine {
                 ),
                 BrowserActionKind::Screenshot => "Browser screenshot".to_string(),
             },
+            ActionSpec::Shortcut { name, .. } => format!("Run Shortcut: {name}"),
         }
     }
 
@@ -669,7 +884,13 @@ impl ActionEngine {
             ActionSpec::FileWrite { .. } => "file_write",
             ActionSpec::AppleScript { .. } => "applescript",
             ActionSpec::MessageSend { .. } => "message_send",
+            ActionSpec::WindowFocus { .. } => "window_focus",
+            ActionSpec::WindowInspect { .. } => "window_inspect",
+            ActionSpec::UiSnapshot { .. } => "ui_snapshot",
+            ActionSpec::UiClick { .. } => "ui_click",
+            ActionSpec::UiType { .. } => "ui_type",
             ActionSpec::Browser { .. } => "browser",
+            ActionSpec::Shortcut { .. } => "shortcut",
         }
     }
 
@@ -731,6 +952,72 @@ impl ActionEngine {
                     "rationale": rationale,
                 })
             }
+            ActionSpec::WindowFocus {
+                app_name,
+                title_contains,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "title_contains": title_contains,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::WindowInspect {
+                app_name,
+                rationale,
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::UiSnapshot {
+                app_name,
+                max_depth,
+                rationale,
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "max_depth": max_depth,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::UiClick {
+                app_name,
+                role,
+                label,
+                max_depth,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "role": role,
+                    "label": label,
+                    "max_depth": max_depth,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::UiType {
+                app_name,
+                role,
+                label,
+                text,
+                max_depth,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "role": role,
+                    "label": label,
+                    "text": format!("<{} bytes omitted>", text.len()),
+                    "max_depth": max_depth,
+                    "rationale": rationale,
+                })
+            }
             ActionSpec::Browser {
                 action, rationale, ..
             } => {
@@ -751,6 +1038,20 @@ impl ActionEngine {
                     BrowserActionKind::Screenshot => serde_json::json!({"action":"screenshot"}),
                 };
                 serde_json::json!({ "browser": action_detail, "rationale": rationale })
+            }
+            ActionSpec::Shortcut {
+                name,
+                input_path,
+                output_path,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "name": name,
+                    "input_path": input_path,
+                    "output_path": output_path,
+                    "rationale": rationale,
+                })
             }
         }
     }
@@ -889,9 +1190,85 @@ impl ExecutorHandle {
                 exit_code: None,
                 duration_ms: 0,
             },
+            ActionSpec::WindowFocus {
+                app_name,
+                title_contains,
+                ..
+            } => {
+                executor::execute_window_focus(
+                    app_name,
+                    title_contains.as_deref(),
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::WindowInspect { app_name, .. } => {
+                executor::execute_window_inspect(app_name.as_deref(), ACTION_DEFAULT_TIMEOUT_SECS)
+                    .await
+            }
+            ActionSpec::UiSnapshot {
+                app_name,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_snapshot(
+                    app_name.as_deref(),
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiClick {
+                app_name,
+                role,
+                label,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_click(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiType {
+                app_name,
+                role,
+                label,
+                text,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_type(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label.as_deref(),
+                    text,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
             ActionSpec::Browser { action, .. } => {
                 executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
                     .await
+            }
+            ActionSpec::Shortcut {
+                name,
+                input_path,
+                output_path,
+                ..
+            } => {
+                executor::execute_shortcut(
+                    name,
+                    input_path.as_ref(),
+                    output_path.as_ref(),
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
             }
         };
 
@@ -1062,6 +1439,63 @@ mod tests {
         }
     }
 
+    fn make_shortcut() -> ActionSpec {
+        ActionSpec::Shortcut {
+            name: "Morning Briefing".to_string(),
+            input_path: Some(PathBuf::from("~/Desktop/input.txt")),
+            output_path: Some(PathBuf::from("~/Desktop/output.txt")),
+            rationale: Some("operator requested a Shortcut".to_string()),
+            category_override: None,
+        }
+    }
+
+    fn make_window_focus() -> ActionSpec {
+        ActionSpec::WindowFocus {
+            app_name: "Safari".to_string(),
+            title_contains: Some("Dexter Docs".to_string()),
+            rationale: Some("bring the relevant browser window forward".to_string()),
+            category_override: None,
+        }
+    }
+
+    fn make_window_inspect() -> ActionSpec {
+        ActionSpec::WindowInspect {
+            app_name: Some("Safari".to_string()),
+            rationale: Some("confirm the current browser window".to_string()),
+        }
+    }
+
+    fn make_ui_snapshot() -> ActionSpec {
+        ActionSpec::UiSnapshot {
+            app_name: Some("Safari".to_string()),
+            max_depth: Some(2),
+            rationale: Some("identify controls before clicking".to_string()),
+        }
+    }
+
+    fn make_ui_click() -> ActionSpec {
+        ActionSpec::UiClick {
+            app_name: Some("Safari".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "OK".to_string(),
+            max_depth: Some(2),
+            rationale: Some("press the visible confirmation button".to_string()),
+            category_override: None,
+        }
+    }
+
+    fn make_ui_type() -> ActionSpec {
+        ActionSpec::UiType {
+            app_name: Some("TextEdit".to_string()),
+            role: Some("AXTextArea".to_string()),
+            label: None,
+            text: "hello Dexter".to_string(),
+            max_depth: Some(2),
+            rationale: Some("type into the only visible text area".to_string()),
+            category_override: None,
+        }
+    }
+
     fn make_messages_send_applescript() -> ActionSpec {
         ActionSpec::AppleScript {
             script: r#"tell application "Messages"
@@ -1092,6 +1526,98 @@ mod tests {
         assert_eq!(audit["recipient"], "Mom");
         assert_eq!(audit["body"], "<12 bytes omitted>");
         assert_eq!(audit["rationale"], "structured send");
+    }
+
+    #[test]
+    fn shortcut_describe_type_and_audit_are_readable() {
+        let spec = make_shortcut();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Run Shortcut: Morning Briefing"
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "shortcut");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["name"], "Morning Briefing");
+        assert_eq!(audit["input_path"], "~/Desktop/input.txt");
+        assert_eq!(audit["output_path"], "~/Desktop/output.txt");
+        assert_eq!(audit["rationale"], "operator requested a Shortcut");
+    }
+
+    #[test]
+    fn window_focus_describe_type_and_audit_are_readable() {
+        let spec = make_window_focus();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Focus window: Safari \"Dexter Docs\""
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "window_focus");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "Safari");
+        assert_eq!(audit["title_contains"], "Dexter Docs");
+        assert_eq!(
+            audit["rationale"],
+            "bring the relevant browser window forward"
+        );
+    }
+
+    #[test]
+    fn window_inspect_describe_type_and_audit_are_readable() {
+        let spec = make_window_inspect();
+        assert_eq!(ActionEngine::describe(&spec), "Inspect windows: Safari");
+        assert_eq!(ActionEngine::type_str(&spec), "window_inspect");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "Safari");
+        assert_eq!(audit["rationale"], "confirm the current browser window");
+    }
+
+    #[test]
+    fn ui_snapshot_describe_type_and_audit_are_readable() {
+        let spec = make_ui_snapshot();
+        assert_eq!(ActionEngine::describe(&spec), "Snapshot UI: Safari");
+        assert_eq!(ActionEngine::type_str(&spec), "ui_snapshot");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "Safari");
+        assert_eq!(audit["max_depth"], 2);
+        assert_eq!(audit["rationale"], "identify controls before clicking");
+    }
+
+    #[test]
+    fn ui_click_describe_type_and_audit_are_readable() {
+        let spec = make_ui_click();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Click UI: Safari AXButton \"OK\""
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "ui_click");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "Safari");
+        assert_eq!(audit["role"], "AXButton");
+        assert_eq!(audit["label"], "OK");
+        assert_eq!(audit["max_depth"], 2);
+        assert_eq!(audit["rationale"], "press the visible confirmation button");
+    }
+
+    #[test]
+    fn ui_type_describe_type_and_audit_redacts_text() {
+        let spec = make_ui_type();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Type into UI: TextEdit AXTextArea"
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "ui_type");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "TextEdit");
+        assert_eq!(audit["role"], "AXTextArea");
+        assert_eq!(audit["label"], serde_json::Value::Null);
+        assert_eq!(audit["text"], "<12 bytes omitted>");
+        assert_eq!(audit["max_depth"], 2);
+        assert_eq!(audit["rationale"], "type into the only visible text area");
     }
 
     #[test]

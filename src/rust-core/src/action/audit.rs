@@ -105,7 +105,7 @@ pub struct AuditEntry<'a> {
     pub timestamp: String,
     /// UUID v4 correlating this entry with the ActionRequest/ActionApproval gRPC messages.
     pub action_id: &'a str,
-    /// Action type tag: "shell" | "file_read" | "file_write" | "applescript"
+    /// Action type tag: "shell" | "file_read" | "file_write" | "applescript" | ...
     pub r#type: &'static str,
     /// Classified category: "safe" | "cautious" | "destructive"
     pub category: &'static str,
@@ -286,7 +286,15 @@ fn describe_audit_spec(action_type: &str, spec: &serde_json::Value) -> String {
         "message_send" => json_string(spec, "recipient")
             .map(|recipient| format!("Send iMessage to: {recipient}"))
             .unwrap_or_else(|| "Send iMessage".to_string()),
+        "window_focus" => describe_window_focus_audit_spec(spec),
+        "window_inspect" => describe_window_inspect_audit_spec(spec),
+        "ui_snapshot" => describe_ui_snapshot_audit_spec(spec),
+        "ui_click" => describe_ui_click_audit_spec(spec),
+        "ui_type" => describe_ui_type_audit_spec(spec),
         "browser" => describe_browser_audit_spec(spec),
+        "shortcut" => json_string(spec, "name")
+            .map(|name| format!("Run Shortcut: {name}"))
+            .unwrap_or_else(|| "Run Shortcut".to_string()),
         other => format!("Action: {other}"),
     }
 }
@@ -313,6 +321,48 @@ fn describe_browser_audit_spec(spec: &serde_json::Value) -> String {
         ("navigate", Some(url), _) => format!("Browser navigate: {url}"),
         (_, _, Some(selector)) => format!("Browser {action}: {selector}"),
         _ => format!("Browser: {action}"),
+    }
+}
+
+fn describe_window_focus_audit_spec(spec: &serde_json::Value) -> String {
+    let app_name = json_string(spec, "app_name").unwrap_or("app");
+    match json_string(spec, "title_contains")
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty())
+    {
+        Some(title) => format!("Focus window: {app_name} \"{title}\""),
+        None => format!("Focus app: {app_name}"),
+    }
+}
+
+fn describe_window_inspect_audit_spec(spec: &serde_json::Value) -> String {
+    json_string(spec, "app_name")
+        .map(|app_name| format!("Inspect windows: {app_name}"))
+        .unwrap_or_else(|| "Inspect frontmost window".to_string())
+}
+
+fn describe_ui_snapshot_audit_spec(spec: &serde_json::Value) -> String {
+    json_string(spec, "app_name")
+        .map(|app_name| format!("Snapshot UI: {app_name}"))
+        .unwrap_or_else(|| "Snapshot frontmost UI".to_string())
+}
+
+fn describe_ui_click_audit_spec(spec: &serde_json::Value) -> String {
+    let app_name = json_string(spec, "app_name").unwrap_or("frontmost app");
+    let label = json_string(spec, "label").unwrap_or("control");
+    match json_string(spec, "role") {
+        Some(role) => format!("Click UI: {app_name} {role} \"{label}\""),
+        None => format!("Click UI: {app_name} \"{label}\""),
+    }
+}
+
+fn describe_ui_type_audit_spec(spec: &serde_json::Value) -> String {
+    let app_name = json_string(spec, "app_name").unwrap_or("frontmost app");
+    match (json_string(spec, "role"), json_string(spec, "label")) {
+        (Some(role), Some(label)) => format!("Type UI: {app_name} {role} \"{label}\""),
+        (Some(role), None) => format!("Type UI: {app_name} {role}"),
+        (None, Some(label)) => format!("Type UI: {app_name} \"{label}\""),
+        (None, None) => format!("Type UI: {app_name} control"),
     }
 }
 
@@ -456,6 +506,103 @@ mod tests {
         assert_eq!(receipts[0].summary, "Approval expired before execution.");
         assert_eq!(receipts[1].action_id, "id-1");
         assert_eq!(receipts[1].outcome, "executed");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_shortcut_name() {
+        let description =
+            describe_audit_spec("shortcut", &serde_json::json!({"name": "Morning Briefing"}));
+
+        assert_eq!(description, "Run Shortcut: Morning Briefing");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_window_focus_target() {
+        let description = describe_audit_spec(
+            "window_focus",
+            &serde_json::json!({
+                "app_name": "Safari",
+                "title_contains": "Dexter Docs"
+            }),
+        );
+
+        assert_eq!(description, "Focus window: Safari \"Dexter Docs\"");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_window_inspect_target() {
+        let frontmost = describe_audit_spec("window_inspect", &serde_json::json!({}));
+        let named = describe_audit_spec(
+            "window_inspect",
+            &serde_json::json!({
+                "app_name": "Safari",
+                "rationale": "confirm the active docs window",
+            }),
+        );
+
+        assert_eq!(frontmost, "Inspect frontmost window");
+        assert_eq!(named, "Inspect windows: Safari");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_ui_snapshot_target() {
+        let frontmost = describe_audit_spec("ui_snapshot", &serde_json::json!({}));
+        let named = describe_audit_spec(
+            "ui_snapshot",
+            &serde_json::json!({
+                "app_name": "Safari",
+                "max_depth": 2,
+                "rationale": "identify controls before clicking",
+            }),
+        );
+
+        assert_eq!(frontmost, "Snapshot frontmost UI");
+        assert_eq!(named, "Snapshot UI: Safari");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_ui_click_target() {
+        let frontmost = describe_audit_spec(
+            "ui_click",
+            &serde_json::json!({
+                "label": "OK",
+            }),
+        );
+        let named = describe_audit_spec(
+            "ui_click",
+            &serde_json::json!({
+                "app_name": "Safari",
+                "role": "AXButton",
+                "label": "Continue",
+            }),
+        );
+
+        assert_eq!(frontmost, "Click UI: frontmost app \"OK\"");
+        assert_eq!(named, "Click UI: Safari AXButton \"Continue\"");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_ui_type_target() {
+        let role_only = describe_audit_spec(
+            "ui_type",
+            &serde_json::json!({
+                "app_name": "TextEdit",
+                "role": "AXTextArea",
+                "text": "<11 bytes omitted>",
+            }),
+        );
+        let named = describe_audit_spec(
+            "ui_type",
+            &serde_json::json!({
+                "app_name": "Safari",
+                "role": "AXTextField",
+                "label": "Search",
+                "text": "<5 bytes omitted>",
+            }),
+        );
+
+        assert_eq!(role_only, "Type UI: TextEdit AXTextArea");
+        assert_eq!(named, "Type UI: Safari AXTextField \"Search\"");
     }
 
     #[test]

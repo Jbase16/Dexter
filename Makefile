@@ -27,7 +27,7 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -287,6 +287,59 @@ live-smoke-action-diagnostic: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-action-diagnostic-smoke.sh --start-core
 
+## live-smoke-shortcut-action: verify macOS Shortcut actions route through approval and audit
+##
+## Drives an exact synthetic `shortcut` ActionSpec and auto-denies it. This
+## proves the lane parses, requests approval, records readable receipts, and
+## does not execute an opaque Shortcut without operator approval.
+live-smoke-shortcut-action: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-shortcut-action-smoke.sh
+
+## live-smoke-window-focus: verify structured window focus executes and audits
+##
+## Drives an exact synthetic `window_focus` ActionSpec against Finder. This
+## proves Dexter can bring a local app/window forward without model-written raw
+## AppleScript and records a readable receipt for subsequent GUI targeting.
+live-smoke-window-focus: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-window-focus-smoke.sh
+
+## live-smoke-window-inspect: verify structured window inspection executes and audits
+##
+## Drives an exact synthetic `window_inspect` ActionSpec for the frontmost app.
+## This proves Dexter can gather read-only window evidence before GUI work.
+live-smoke-window-inspect: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-window-inspect-smoke.sh
+
+## live-smoke-ui-snapshot: verify structured UI snapshot executes and audits
+##
+## Drives an exact synthetic `ui_snapshot` ActionSpec for the frontmost app.
+## This proves Dexter can gather bounded read-only Accessibility control
+## evidence before choosing a GUI interaction strategy.
+live-smoke-ui-snapshot: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-snapshot-smoke.sh
+
+## live-smoke-ui-click: verify structured UI click executes and audits
+##
+## Drives an exact synthetic `ui_click` ActionSpec against a temporary dialog.
+## This proves Dexter can press one unambiguous visible control without model-
+## written raw AppleScript or coordinate clicks.
+live-smoke-ui-click: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-click-smoke.sh
+
+## live-smoke-ui-type: verify structured UI text entry executes and audits
+##
+## Drives an exact synthetic `ui_type` ActionSpec against a temporary AppKit text
+## field fixture. This proves Dexter can enter text into one unambiguous text field
+## without model-written raw AppleScript keystrokes.
+live-smoke-ui-type: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-type-smoke.sh
+
 ## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
@@ -462,6 +515,12 @@ live-smoke-all:
 	$(MAKE) live-smoke-external-failures
 	$(MAKE) live-smoke-operator-status
 	$(MAKE) live-smoke-action-diagnostic
+	$(MAKE) live-smoke-shortcut-action
+	$(MAKE) live-smoke-window-focus
+	$(MAKE) live-smoke-window-inspect
+	$(MAKE) live-smoke-ui-snapshot
+	$(MAKE) live-smoke-ui-click
+	$(MAKE) live-smoke-ui-type
 	$(MAKE) live-smoke-cli
 	$(MAKE) live-smoke-action-matrix
 	$(MAKE) live-smoke-action-receipts
@@ -527,6 +586,12 @@ live-smoke-action-safety:
 	bash scripts/live-smoke-summary.sh \
 		live-smoke-external-failures \
 		live-smoke-action-diagnostic \
+		live-smoke-shortcut-action \
+		live-smoke-window-focus \
+		live-smoke-window-inspect \
+		live-smoke-ui-snapshot \
+		live-smoke-ui-click \
+		live-smoke-ui-type \
 		live-smoke-action-matrix \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
@@ -556,6 +621,12 @@ live-smoke-acceptance:
 		live-smoke-hud-unavailable-health \
 		live-smoke-external-failures \
 		live-smoke-action-diagnostic \
+		live-smoke-shortcut-action \
+		live-smoke-window-focus \
+		live-smoke-window-inspect \
+		live-smoke-ui-snapshot \
+		live-smoke-ui-click \
+		live-smoke-ui-type \
 		live-smoke-action-matrix \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \

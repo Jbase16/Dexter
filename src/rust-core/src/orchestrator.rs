@@ -2503,9 +2503,15 @@ impl CoreOrchestrator {
                         ActionSpec::Shell { .. } => "run that shell command",
                         ActionSpec::AppleScript { .. } => "run that AppleScript",
                         ActionSpec::MessageSend { .. } => "send that iMessage",
+                        ActionSpec::WindowFocus { .. } => "focus that window",
+                        ActionSpec::WindowInspect { .. } => "inspect that window",
+                        ActionSpec::UiSnapshot { .. } => "snapshot that UI",
+                        ActionSpec::UiClick { .. } => "press that UI control",
+                        ActionSpec::UiType { .. } => "type into that UI control",
                         ActionSpec::Browser { .. } => "do that in the browser",
                         ActionSpec::FileRead { .. } => "read that file",
                         ActionSpec::FileWrite { .. } => "save that file",
+                        ActionSpec::Shortcut { .. } => "run that Shortcut",
                     };
                     let msg = format!(
                         "I tried to {action_phrase} twice with the same result. \

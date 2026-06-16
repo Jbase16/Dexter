@@ -34,6 +34,12 @@ DEFAULT_TARGETS=(
     live-smoke-external-failures
     live-smoke-operator-status
     live-smoke-action-diagnostic
+    live-smoke-shortcut-action
+    live-smoke-window-focus
+    live-smoke-window-inspect
+    live-smoke-ui-snapshot
+    live-smoke-ui-click
+    live-smoke-ui-type
     live-smoke-cli
     live-smoke-action-matrix
     live-smoke-action-receipts

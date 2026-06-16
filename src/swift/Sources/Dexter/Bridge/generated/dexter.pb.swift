@@ -1075,7 +1075,7 @@ struct Dexter_V1_ActionReceipt: Sendable {
   /// Correlates with ActionRequest and audit.jsonl
   var actionID: String = String()
 
-  /// shell | file_read | file_write | applescript | browser | message_send
+  /// shell | file_read | file_write | applescript | browser | message_send | shortcut | window_focus | window_inspect | ui_snapshot | ui_click | ui_type
   var actionType: String = String()
 
   /// safe | cautious | destructive

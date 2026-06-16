@@ -88,7 +88,8 @@ use action_evidence::{
     format_failed_action_evidence_block, format_success_action_evidence_block, ActionEvidence,
 };
 use ambient::{
-    AmbientEvent, AmbientEventStore, AmbientSeverity, AmbientTrigger, AmbientTriggerAction,
+    AmbientEvent, AmbientEventStatus, AmbientEventStore, AmbientSeverity, AmbientTrigger,
+    AmbientTriggerAction,
 };
 
 use proto::{
@@ -109,6 +110,8 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_ACTION_RECEIPT_LIMIT: usize = 10;
 const DEFAULT_OPERATOR_STATUS_ACTION_LIMIT: usize = 5;
 const DEFAULT_OPERATOR_STATUS_AMBIENT_LIMIT: usize = 5;
+const OPERATOR_STATUS_ACTION_SCAN_LIMIT: usize = 50;
+const OPERATOR_STATUS_AMBIENT_SCAN_LIMIT: usize = 50;
 const DEFAULT_OPERATOR_CONTEXT_MARKDOWN: &str = "- No focused app context has been observed yet.\n\
     - I can still answer questions, use recent action receipts, and run explicit actions you request.";
 const DOCTOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -950,14 +953,18 @@ async fn run_operator_status(cfg: &CliConfig) -> Result<i32> {
     } else {
         cfg.action_limit
     };
-    let receipts = read_action_receipts(&audit_path, receipt_limit)?;
+    let receipts = read_operator_status_action_receipts(&audit_path, receipt_limit)?;
     let ambient_store = AmbientEventStore::new(&state_dir);
     let ambient_path = ambient_store.events_path();
-    let (ambient_events, ambient_error) =
-        match ambient_store.recent_events(DEFAULT_OPERATOR_STATUS_AMBIENT_LIMIT) {
-            Ok((_, events)) => (events, None),
-            Err(error) => (Vec::new(), Some(error.to_string())),
-        };
+    let (ambient_events, ambient_error) = match ambient_store.recent_events(
+        DEFAULT_OPERATOR_STATUS_AMBIENT_LIMIT.max(OPERATOR_STATUS_AMBIENT_SCAN_LIMIT),
+    ) {
+        Ok((_, events)) => (
+            operator_status_ambient_events(events, DEFAULT_OPERATOR_STATUS_AMBIENT_LIMIT),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     print_operator_status_report(
         &checks,
         &audit_path,
@@ -1244,6 +1251,15 @@ struct SessionActionClue {
 }
 
 fn read_action_receipts(audit_path: &Path, limit: usize) -> Result<Vec<ActionReceipt>> {
+    Ok(read_audit_entries(audit_path)?
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(action_receipt_from_audit)
+        .collect())
+}
+
+fn read_audit_entries(audit_path: &Path) -> Result<Vec<AuditEntryOwned>> {
     if !audit_path.exists() {
         return Ok(Vec::new());
     }
@@ -1263,10 +1279,121 @@ fn read_action_receipts(audit_path: &Path, limit: usize) -> Result<Vec<ActionRec
                 audit_path.display()
             )
         })?;
-        entries.push(action_receipt_from_audit(entry));
+        entries.push(entry);
     }
 
-    Ok(entries.into_iter().rev().take(limit).collect())
+    Ok(entries)
+}
+
+fn read_operator_status_action_receipts(
+    audit_path: &Path,
+    receipt_limit: usize,
+) -> Result<Vec<ActionReceipt>> {
+    let scan_limit = receipt_limit.max(OPERATOR_STATUS_ACTION_SCAN_LIMIT);
+    let entries = read_audit_entries(audit_path)?;
+    Ok(entries
+        .into_iter()
+        .rev()
+        .take(scan_limit)
+        .filter(|entry| !is_operator_status_smoke_audit_entry(entry))
+        .map(action_receipt_from_audit)
+        .filter(|receipt| !is_operator_status_smoke_receipt(receipt))
+        .take(receipt_limit)
+        .collect())
+}
+
+fn is_operator_status_smoke_audit_entry(entry: &AuditEntryOwned) -> bool {
+    contains_operator_status_smoke_marker(&entry.action_id)
+        || contains_operator_status_smoke_marker(&entry.action_type)
+        || contains_operator_status_smoke_marker(&entry.category)
+        || contains_operator_status_smoke_marker(&entry.spec_json.to_string())
+        || entry
+            .output_preview
+            .as_deref()
+            .is_some_and(contains_operator_status_smoke_marker)
+        || entry
+            .error
+            .as_deref()
+            .is_some_and(contains_operator_status_smoke_marker)
+}
+
+fn is_operator_status_smoke_receipt(receipt: &ActionReceipt) -> bool {
+    contains_operator_status_smoke_marker(&receipt.target)
+        || contains_operator_status_smoke_marker(&receipt.result)
+}
+
+fn operator_status_ambient_events(
+    events: Vec<AmbientEvent>,
+    ambient_limit: usize,
+) -> Vec<AmbientEvent> {
+    events
+        .into_iter()
+        .filter(|event| !is_operator_status_smoke_ambient_event(event))
+        .take(ambient_limit)
+        .collect()
+}
+
+fn is_operator_status_smoke_ambient_event(event: &AmbientEvent) -> bool {
+    if event.source == "trigger"
+        && matches!(
+            event.status,
+            AmbientEventStatus::Acknowledged | AmbientEventStatus::Dismissed
+        )
+    {
+        return true;
+    }
+
+    contains_operator_status_smoke_marker(&event.title)
+        || contains_operator_status_smoke_marker(&event.summary)
+        || contains_operator_status_smoke_marker(&event.payload.to_string())
+}
+
+fn contains_operator_status_smoke_marker(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    [
+        "AMBIENT_ACTION_",
+        "AMBIENT_INBOX_",
+        "AMBIENT_TRIGGER_ACTIONS_",
+        "ACTION_UX_SMOKE_",
+        "ACTION_JSON_",
+        "APPROVAL_EXPIRED_",
+        "APPROVAL_TYPED_CANCEL_",
+        "APPROVAL_TYPED_NO_",
+        "APPROVAL_TYPED_YES_",
+        "APPLESCRIPT_APPROVE_SMOKE_",
+        "APPLESCRIPT_DENY_SMOKE_",
+        "APPLESCRIPT_SAFE_SMOKE_",
+        "BROWSER_ACTION_JSON_TYPED_SMOKE",
+        "BROWSER SMOKE FIXTURE",
+        "BROWSER_TYPED_SMOKE",
+        "CLICK #DELETE-ACCOUNT",
+        "CLIPBOARD_SMOKE_CONTEXT_VALUE",
+        "DEXTER-ACTION-JSON",
+        "DEXTER-BROWSER-ACTION-JSON",
+        "DEXTER-AMBIENT-ACTION-",
+        "DEXTER-HUD-SMOKE",
+        "DIAGNOSTICBYPASS_",
+        "DETERMINISTIC SMOKE",
+        "EXTRACT #STATUS",
+        "FILE_READ_SMOKE_",
+        "FILE_WRITE_APPROVE_SMOKE_",
+        "FILE_WRITE_DENY_SMOKE_",
+        "FILE_WRITE_SMOKE_",
+        "HUD_ACTION_",
+        "HUD_STATUS_",
+        "OPERATOR_STATUS_SMOKE_",
+        "POST_SMOKE_READY",
+        "RECEIPT_",
+        "SHELL_SMOKE_CONTEXT_",
+        "SMOKE",
+        "TYPE INTO INPUT[NAME='Q']",
+        "LS -LA  (CWD: /)",
+        "PS -EF  (CWD: /)",
+        "-SMOKE",
+        "/USERS/USERNAME/REPO",
+    ]
+    .iter()
+    .any(|marker| upper.contains(marker))
 }
 
 fn load_latest_session_clue(state_dir: &Path) -> Result<Option<SessionActionClue>> {
@@ -1466,7 +1593,17 @@ fn action_target(action_type: &str, spec: &serde_json::Value) -> String {
             .and_then(|value| value.as_str())
             .map(|recipient| format!("iMessage to {}", one_line(recipient)))
             .unwrap_or_else(|| "iMessage recipient unavailable".to_string()),
+        "window_focus" => window_focus_action_target(spec),
+        "window_inspect" => window_inspect_action_target(spec),
+        "ui_snapshot" => ui_snapshot_action_target(spec),
+        "ui_click" => ui_click_action_target(spec),
+        "ui_type" => ui_type_action_target(spec),
         "browser" => browser_action_target(spec),
+        "shortcut" => spec
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(|name| format!("Shortcut: {}", one_line(name)))
+            .unwrap_or_else(|| "Shortcut unavailable".to_string()),
         _ => "target unavailable".to_string(),
     }
 }
@@ -1502,6 +1639,90 @@ fn browser_action_target(spec: &serde_json::Value) -> String {
             .unwrap_or_else(|| "extract page".to_string()),
         "screenshot" => "screenshot".to_string(),
         other => one_line(other),
+    }
+}
+
+fn window_focus_action_target(spec: &serde_json::Value) -> String {
+    let app_name = spec
+        .get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "app unavailable".to_string());
+    match spec
+        .get("title_contains")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+    {
+        Some(title) => format!("Window: {app_name} \"{title}\""),
+        None => format!("App: {app_name}"),
+    }
+}
+
+fn window_inspect_action_target(spec: &serde_json::Value) -> String {
+    spec.get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .map(|app_name| format!("Inspect: {app_name}"))
+        .unwrap_or_else(|| "Inspect: frontmost window".to_string())
+}
+
+fn ui_snapshot_action_target(spec: &serde_json::Value) -> String {
+    spec.get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .map(|app_name| format!("UI snapshot: {app_name}"))
+        .unwrap_or_else(|| "UI snapshot: frontmost window".to_string())
+}
+
+fn ui_click_action_target(spec: &serde_json::Value) -> String {
+    let app_name = spec
+        .get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "frontmost app".to_string());
+    let label = spec
+        .get("label")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "control".to_string());
+    match spec
+        .get("role")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+    {
+        Some(role) => format!("UI click: {app_name} {role} \"{label}\""),
+        None => format!("UI click: {app_name} \"{label}\""),
+    }
+}
+
+fn ui_type_action_target(spec: &serde_json::Value) -> String {
+    let app_name = spec
+        .get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "frontmost app".to_string());
+    match (
+        spec.get("role")
+            .and_then(|value| value.as_str())
+            .map(one_line)
+            .filter(|value| !value.is_empty()),
+        spec.get("label")
+            .and_then(|value| value.as_str())
+            .map(one_line)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(role), Some(label)) => format!("UI type: {app_name} {role} \"{label}\""),
+        (Some(role), None) => format!("UI type: {app_name} {role}"),
+        (None, Some(label)) => format!("UI type: {app_name} \"{label}\""),
+        (None, None) => format!("UI type: {app_name} control"),
     }
 }
 
@@ -3993,6 +4214,199 @@ mod tests {
     }
 
     #[test]
+    fn action_receipt_from_audit_formats_shortcut_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "shortcut-1".to_string(),
+            action_type: "shortcut".to_string(),
+            category: "destructive".to_string(),
+            spec_json: serde_json::json!({
+                "name": "Morning Briefing",
+                "input_path": null,
+                "output_path": null,
+                "rationale": "operator requested a Shortcut",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some("done".to_string()),
+            error: None,
+            duration_ms: Some(17),
+            operator_approved: Some(true),
+        });
+
+        assert_eq!(receipt.action_type, "shortcut");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "approved");
+        assert_eq!(receipt.target, "Shortcut: Morning Briefing");
+        assert_eq!(receipt.result, "Succeeded: done");
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_window_focus_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "window-focus-1".to_string(),
+            action_type: "window_focus".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "Safari",
+                "title_contains": "Dexter Docs",
+                "rationale": "bring the docs forward",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some("focused Safari window: Dexter Docs".to_string()),
+            error: None,
+            duration_ms: Some(31),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "window_focus");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(receipt.target, "Window: Safari \"Dexter Docs\"");
+        assert_eq!(
+            receipt.result,
+            "Succeeded: focused Safari window: Dexter Docs"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_window_inspect_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "window-inspect-1".to_string(),
+            action_type: "window_inspect".to_string(),
+            category: "safe".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "Safari",
+                "rationale": "confirm current window",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "inspected app: Safari\nfrontmost: true\nfront window: Dexter Docs".to_string(),
+            ),
+            error: None,
+            duration_ms: Some(24),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "window_inspect");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(receipt.target, "Inspect: Safari");
+        assert_eq!(
+            receipt.result,
+            "Succeeded: inspected app: Safari frontmost: true front window: Dexter Docs"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_ui_snapshot_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-snapshot-1".to_string(),
+            action_type: "ui_snapshot".to_string(),
+            category: "safe".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "Safari",
+                "max_depth": 2,
+                "rationale": "identify controls before clicking",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "ui snapshot app: Safari\nfrontmost: true\nfront window: Dexter Docs\ncontrols:\n- AXButton | name='Reload'"
+                    .to_string(),
+            ),
+            error: None,
+            duration_ms: Some(24),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_snapshot");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(receipt.target, "UI snapshot: Safari");
+        assert_eq!(
+            receipt.result,
+            "Succeeded: ui snapshot app: Safari frontmost: true front window: Dexter Docs controls: - AXButton | name='Reload'"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_ui_click_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-click-1".to_string(),
+            action_type: "ui_click".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "Safari",
+                "role": "AXButton",
+                "label": "Continue",
+                "max_depth": 2,
+                "rationale": "press visible button",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "pressed UI control: AXButton | name='Continue'\napp: Safari\nfront window: Dexter Docs"
+                    .to_string(),
+            ),
+            error: None,
+            duration_ms: Some(24),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_click");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(receipt.target, "UI click: Safari AXButton \"Continue\"");
+        assert_eq!(
+            receipt.result,
+            "Succeeded: pressed UI control: AXButton | name='Continue' app: Safari front window: Dexter Docs"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_ui_type_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-type-1".to_string(),
+            action_type: "ui_type".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "TextEdit",
+                "role": "AXTextArea",
+                "label": null,
+                "text": "<12 bytes omitted>",
+                "max_depth": 2,
+                "rationale": "type into the only visible text area",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "typed into UI control: AXTextArea\napp: TextEdit\nfront window: Untitled\ntext: <12 chars>"
+                    .to_string(),
+            ),
+            error: None,
+            duration_ms: Some(24),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_type");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(receipt.target, "UI type: TextEdit AXTextArea");
+        assert_eq!(
+            receipt.result,
+            "Succeeded: typed into UI control: AXTextArea app: TextEdit front window: Untitled text: <12 chars>"
+        );
+    }
+
+    #[test]
     fn action_receipt_from_audit_formats_denied_destructive_action() {
         let receipt = action_receipt_from_audit(AuditEntryOwned {
             timestamp: "2026-05-18T12:00:00Z".to_string(),
@@ -4278,6 +4692,107 @@ mod tests {
         assert!(report.contains("Next step: Ask again using the recipient's exact Contacts name"));
         assert!(report
             .contains("Ambient event history unavailable: ambient store invalid data: bad line"));
+    }
+
+    #[test]
+    fn operator_status_receipts_filter_smoke_actions_only() {
+        let receipts = vec![
+            ActionReceipt {
+                timestamp: "2026-05-18T12:00:02Z".to_string(),
+                action_id: "smoke-action".to_string(),
+                action_type: "shell".to_string(),
+                category: "safe".to_string(),
+                target: "false AMBIENT_TRIGGER_ACTIONS_FAILED_123".to_string(),
+                status: "failed".to_string(),
+                approval: "not required".to_string(),
+                result: "Failed with exit code 1.".to_string(),
+                duration_ms: Some(2),
+            },
+            ActionReceipt {
+                timestamp: "2026-05-18T12:00:01Z".to_string(),
+                action_id: "real-action".to_string(),
+                action_type: "shell".to_string(),
+                category: "safe".to_string(),
+                target: "false real-user-command".to_string(),
+                status: "failed".to_string(),
+                approval: "not required".to_string(),
+                result: "Failed with exit code 1.".to_string(),
+                duration_ms: Some(2),
+            },
+        ];
+
+        let filtered: Vec<_> = receipts
+            .into_iter()
+            .filter(|receipt| !is_operator_status_smoke_receipt(receipt))
+            .collect();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].action_id, "real-action");
+    }
+
+    #[test]
+    fn operator_status_filters_smoke_marker_in_raw_audit_spec() {
+        let smoke_entry = AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:02Z".to_string(),
+            action_id: "window-inspect-smoke".to_string(),
+            action_type: "window_inspect".to_string(),
+            category: "safe".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": null,
+                "rationale": "WINDOW_INSPECT_SMOKE frontmost evidence",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some("inspected app: Finder".to_string()),
+            error: None,
+            duration_ms: Some(5),
+            operator_approved: None,
+        };
+        let real_entry = AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:01Z".to_string(),
+            action_id: "window-inspect-real".to_string(),
+            action_type: "window_inspect".to_string(),
+            category: "safe".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": null,
+                "rationale": "operator asked what window is active",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some("inspected app: Safari".to_string()),
+            error: None,
+            duration_ms: Some(5),
+            operator_approved: None,
+        };
+
+        assert!(is_operator_status_smoke_audit_entry(&smoke_entry));
+        assert!(!is_operator_status_smoke_audit_entry(&real_entry));
+    }
+
+    #[test]
+    fn operator_status_ambient_events_filter_acknowledged_trigger_notices() {
+        let mut smoke_trigger = AmbientEvent::new(
+            "trigger",
+            "trigger_task_completed",
+            AmbientSeverity::Warn,
+            "Trigger task completed: Smoke start task 123",
+            "Action failure diagnostic ready for smoke.",
+            serde_json::json!({"trigger_name": "Smoke start task 123"}),
+        );
+        smoke_trigger.status = AmbientEventStatus::Acknowledged;
+        let health_event = AmbientEvent::new(
+            "health",
+            "health_status_changed",
+            AmbientSeverity::Info,
+            "Dexter health ready",
+            "Daemon health changed to ready.",
+            serde_json::json!({}),
+        );
+
+        let filtered = operator_status_ambient_events(vec![smoke_trigger, health_event], 5);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].kind, "health_status_changed");
     }
 
     #[test]

@@ -60,6 +60,12 @@ FOCUSED_SLICES = (
         (
             "live-smoke-external-failures",
             "live-smoke-action-diagnostic",
+            "live-smoke-shortcut-action",
+            "live-smoke-window-focus",
+            "live-smoke-window-inspect",
+            "live-smoke-ui-snapshot",
+            "live-smoke-ui-click",
+            "live-smoke-ui-type",
             "live-smoke-action-matrix",
             "live-smoke-action-receipts",
             "live-smoke-approval-lifecycle",

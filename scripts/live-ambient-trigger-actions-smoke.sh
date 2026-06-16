@@ -9,6 +9,9 @@ ACTION_OUT="/tmp/dexter-ambient-trigger-actions-action.out"
 EVENTS_OUT="/tmp/dexter-ambient-trigger-actions-events.out"
 INBOX_OUT="/tmp/dexter-ambient-trigger-actions-inbox.out"
 SOCKET="/tmp/dexter.sock"
+TRIGGERS_PATH="$HOME/.dexter/state/ambient_triggers.json"
+TRIGGERS_BACKUP="/tmp/dexter-ambient-trigger-actions-triggers.$$.json"
+TRIGGERS_EXISTED=0
 
 say() {
     local level="$1"
@@ -59,6 +62,64 @@ PY
 
 cleanup() {
     make -C "$ROOT_DIR" stop >/dev/null 2>&1 || true
+    if [[ "$TRIGGERS_EXISTED" == "1" && -f "$TRIGGERS_BACKUP" ]]; then
+        cp "$TRIGGERS_BACKUP" "$TRIGGERS_PATH" || true
+    elif [[ "$TRIGGERS_EXISTED" == "0" ]]; then
+        rm -f "$TRIGGERS_PATH" || true
+    fi
+    python3 - <<'PY' >/dev/null 2>&1 || true
+import json
+import pathlib
+
+state = pathlib.Path.home() / ".dexter" / "state"
+events_path = state / "ambient_events.jsonl"
+ack_path = state / "ambient_acknowledgements.json"
+if not events_path.exists():
+    raise SystemExit(0)
+
+events = []
+matched_events_by_id = {}
+for line in events_path.read_text().splitlines():
+    if not line.strip():
+        continue
+    event = json.loads(line)
+    events.append(event)
+    event_id = event.get("event_id")
+    if event_id:
+        matched_events_by_id[event_id] = event
+
+acknowledged = set()
+if ack_path.exists() and ack_path.read_text().strip():
+    acknowledgement = json.loads(ack_path.read_text())
+    acknowledged.update(str(event_id) for event_id in acknowledgement.get("acknowledged_event_ids", []) if event_id)
+
+smoke_prefixes = ("Smoke ask approval ", "Smoke start task ")
+smoke_action_token = "AMBIENT_TRIGGER_ACTIONS_FAILED_"
+for event in events:
+    event_id = event.get("event_id")
+    payload = event.get("payload") or {}
+    trigger_name = str(payload.get("trigger_name", ""))
+    matched_event_id = payload.get("matched_event_id")
+    matched_event = matched_events_by_id.get(matched_event_id, {})
+    matched_payload = matched_event.get("payload") or {}
+    matched_description = str(matched_payload.get("description", ""))
+    is_smoke_trigger_notice = trigger_name.startswith(smoke_prefixes)
+    is_smoke_default_notice = (
+        trigger_name == "Dexter action failures"
+        and smoke_action_token in matched_description
+    )
+    if event_id and (is_smoke_trigger_notice or is_smoke_default_notice):
+        acknowledged.add(str(event_id))
+
+ack = {
+    "schema_version": "1.0",
+    "acknowledged_event_ids": sorted(acknowledged),
+}
+tmp = ack_path.with_name(f".{ack_path.name}.tmp")
+tmp.write_text(json.dumps(ack, indent=2) + "\n")
+tmp.replace(ack_path)
+PY
+    rm -f "$TRIGGERS_BACKUP" || true
 }
 trap cleanup EXIT
 
@@ -67,6 +128,11 @@ if socket_accepts; then
 fi
 
 rm -f "$CORE_LOG" "$ACTION_OUT" "$EVENTS_OUT" "$INBOX_OUT"
+if [[ -f "$TRIGGERS_PATH" ]]; then
+    mkdir -p "$(dirname "$TRIGGERS_BACKUP")"
+    cp "$TRIGGERS_PATH" "$TRIGGERS_BACKUP"
+    TRIGGERS_EXISTED=1
+fi
 
 say INFO "building release core and CLI"
 cd "$RUST_DIR"

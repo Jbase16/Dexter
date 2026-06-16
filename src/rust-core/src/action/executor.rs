@@ -445,6 +445,872 @@ pub async fn execute_applescript(script: &str, timeout_secs: u64) -> ExecutionRe
     execute_shell(&args, None, timeout_secs).await
 }
 
+// ── execute_window_focus ─────────────────────────────────────────────────────
+
+/// Focus an application, optionally raising the first window whose title contains
+/// a requested substring.
+///
+/// This is intentionally narrower than arbitrary AppleScript: the model supplies
+/// structured app/window labels, and Rust builds the script with literal escaping.
+/// No clicks, keystrokes, or text entry happen here.
+pub async fn execute_window_focus(
+    app_name: &str,
+    title_contains: Option<&str>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name.trim();
+    if app_name.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "window_focus app_name must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+
+    let title_contains = title_contains
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let script = build_window_focus_script(app_name, title_contains);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_window_focus_script(app_name: &str, title_contains: &str) -> String {
+    let app = escape_applescript_literal(app_name);
+    let title = escape_applescript_literal(title_contains);
+    format!(
+        r#"set targetAppName to "{app}"
+set wantedTitle to "{title}"
+
+tell application targetAppName to activate
+
+tell application "System Events"
+    set targetProcess to first process whose name is targetAppName
+    set frontmost of targetProcess to true
+    delay 0.05
+
+    if wantedTitle is not "" then
+        repeat with candidateWindow in windows of targetProcess
+            set candidateTitle to ""
+            try
+                set candidateTitle to name of candidateWindow as text
+            end try
+            if candidateTitle contains wantedTitle then
+                try
+                    perform action "AXRaise" of candidateWindow
+                end try
+                try
+                    set focused of candidateWindow to true
+                end try
+                return "focused " & targetAppName & " window: " & candidateTitle
+            end if
+        end repeat
+        return "focused " & targetAppName & "; no visible window title contained: " & wantedTitle
+    end if
+
+    if (count of windows of targetProcess) > 0 then
+        try
+            perform action "AXRaise" of window 1 of targetProcess
+        end try
+        return "focused " & targetAppName
+    end if
+
+    return "focused " & targetAppName & "; no visible windows reported"
+end tell"#
+    )
+}
+
+// ── execute_window_inspect ───────────────────────────────────────────────────
+
+/// Inspect the current frontmost app/window, or a named app's visible windows.
+///
+/// This is read-only System Events observation. It does not activate apps,
+/// raise windows, click, type, or mutate UI state. The output is line-oriented
+/// so it can be injected back into the model context and shown in receipts.
+pub async fn execute_window_inspect(app_name: Option<&str>, timeout_secs: u64) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let script = build_window_inspect_script(app_name);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_window_inspect_script(app_name: &str) -> String {
+    let app = escape_applescript_literal(app_name);
+    format!(
+        r#"set requestedAppName to "{app}"
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            return "window inspection failed: app not running: " & requestedAppName
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set isFrontmost to frontmost of targetProcess
+    set frontWindowTitle to ""
+    try
+        set frontWindowTitle to name of front window of targetProcess as text
+    end try
+
+    set windowTitles to {{}}
+    repeat with candidateWindow in windows of targetProcess
+        set candidateTitle to ""
+        try
+            set candidateTitle to name of candidateWindow as text
+        end try
+        if candidateTitle is not "" then
+            set end of windowTitles to candidateTitle
+        end if
+    end repeat
+
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set windowText to windowTitles as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if windowText is "" then
+        set windowText to "(none)"
+    end if
+    if frontWindowTitle is "" then
+        set frontWindowTitle to "(none)"
+    end if
+
+    return "inspected app: " & targetAppName & linefeed & "frontmost: " & (isFrontmost as text) & linefeed & "front window: " & frontWindowTitle & linefeed & "visible windows:" & linefeed & windowText
+end tell"#
+    )
+}
+
+// ── execute_ui_snapshot ──────────────────────────────────────────────────────
+
+/// Capture a bounded, read-only snapshot of actionable controls in a window.
+///
+/// This is the next step after `window_inspect`: it does not activate, raise,
+/// click, type, or mutate UI state. It only reads Accessibility metadata for the
+/// front window of the requested app, or for the frontmost app when `app_name`
+/// is absent. Secure text field values are never read.
+pub async fn execute_ui_snapshot(
+    app_name: Option<&str>,
+    max_depth: Option<u8>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let script = build_ui_snapshot_script(app_name, depth);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_ui_snapshot_script(app_name: &str, max_depth: u8) -> String {
+    let app = escape_applescript_literal(app_name);
+    format!(
+        r#"set requestedAppName to "{app}"
+set maxDepth to {max_depth}
+set maxRows to 80
+
+on cleanText(rawValue)
+    try
+        set textValue to rawValue as text
+    on error
+        return ""
+    end try
+    set textValue to my replaceText(textValue, return, " ")
+    set textValue to my replaceText(textValue, linefeed, " ")
+    set textValue to my replaceText(textValue, tab, " ")
+    repeat while textValue contains "  "
+        set textValue to my replaceText(textValue, "  ", " ")
+    end repeat
+    if (length of textValue) > 120 then
+        return (text 1 thru 120 of textValue) & "..."
+    end if
+    return textValue
+end cleanText
+
+on replaceText(sourceText, searchText, replacementText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to searchText
+    set textItems to text items of sourceText
+    set AppleScript's text item delimiters to replacementText
+    set joinedText to textItems as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end replaceText
+
+on safeProperty(uiElement, propertyName)
+    try
+        tell application "System Events"
+            if propertyName is "role" then
+                set rawValue to role of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "name" then
+                set rawValue to name of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "description" then
+                set rawValue to description of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "value" then
+                try
+                    if (role of uiElement as text) is "AXSecureTextField" then return ""
+                end try
+                set rawValue to value of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+        end tell
+    end try
+    return ""
+end safeProperty
+
+on isInterestingRole(roleName)
+    if roleName is "" then return false
+    set interestingRoles to {{"AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXLink", "AXTabGroup", "AXTable", "AXOutline", "AXList", "AXScrollArea", "AXGroup", "AXToolbar"}}
+    return interestingRoles contains roleName
+end isInterestingRole
+
+on elementLine(uiElement)
+    set roleName to my safeProperty(uiElement, "role")
+    if not my isInterestingRole(roleName) then return ""
+    set labelParts to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
+    if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
+    if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to " | "
+    set labelsText to labelParts as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if labelsText is "" then return "- " & roleName
+    return "- " & roleName & " | " & labelsText
+end elementLine
+
+on collectControls(uiElement, currentDepth, allowedDepth)
+    set rows to {{}}
+    if currentDepth > allowedDepth then return rows
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return rows
+    end try
+    repeat with childElement in childElements
+        set rowText to my elementLine(childElement)
+        if rowText is not "" then set end of rows to rowText
+        if currentDepth < allowedDepth then
+            set nestedRows to my collectControls(childElement, currentDepth + 1, allowedDepth)
+            repeat with nestedRow in nestedRows
+                set end of rows to nestedRow as text
+            end repeat
+        end if
+    end repeat
+    return rows
+end collectControls
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            return "ui snapshot failed: app not running: " & requestedAppName
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set isFrontmost to frontmost of targetProcess
+    set frontWindowTitle to "(none)"
+    try
+        set targetWindow to front window of targetProcess
+        set frontWindowTitle to my cleanText(name of targetWindow)
+    on error
+        return "ui snapshot app: " & targetAppName & linefeed & "frontmost: " & (isFrontmost as text) & linefeed & "front window: (none)" & linefeed & "controls:" & linefeed & "(no front window)"
+    end try
+
+    set focusedLine to "(none)"
+    try
+        set focusedElement to value of attribute "AXFocusedUIElement" of targetProcess
+        set focusedLine to my elementLine(focusedElement)
+        if focusedLine is "" then set focusedLine to my safeProperty(focusedElement, "role")
+        if focusedLine is "" then set focusedLine to "(unavailable)"
+    end try
+
+    set controlRows to my collectControls(targetWindow, 1, maxDepth)
+    set boundedRows to {{}}
+    repeat with rowText in controlRows
+        if (count of boundedRows) is greater than or equal to maxRows then exit repeat
+        set end of boundedRows to rowText as text
+    end repeat
+
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set controlsText to boundedRows as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if controlsText is "" then set controlsText to "(no actionable controls found)"
+
+    return "ui snapshot app: " & targetAppName & linefeed & "frontmost: " & (isFrontmost as text) & linefeed & "front window: " & frontWindowTitle & linefeed & "focused element: " & focusedLine & linefeed & "controls:" & linefeed & controlsText
+end tell"#
+    )
+}
+
+// ── execute_ui_click ─────────────────────────────────────────────────────────
+
+/// Press one visible Accessibility control by role/label.
+///
+/// This is intentionally narrower than raw AppleScript or coordinate clicking:
+/// it targets the front window of a named app, or the current frontmost app, and
+/// presses exactly one unambiguous control found by Accessibility metadata.
+pub async fn execute_ui_click(
+    app_name: Option<&str>,
+    role: Option<&str>,
+    label: &str,
+    max_depth: Option<u8>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let role = role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let label = label.trim();
+    if label.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "ui_click label must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let script = build_ui_click_script(app_name, role, label, depth);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_ui_click_script(app_name: &str, role: &str, label: &str, max_depth: u8) -> String {
+    let app = escape_applescript_literal(app_name);
+    let role = escape_applescript_literal(role);
+    let label = escape_applescript_literal(label);
+    format!(
+        r#"set requestedAppName to "{app}"
+set requestedRole to "{role}"
+set requestedLabel to "{label}"
+set maxDepth to {max_depth}
+set maxRows to 80
+
+on cleanText(rawValue)
+    try
+        set textValue to rawValue as text
+    on error
+        return ""
+    end try
+    set textValue to my replaceText(textValue, return, " ")
+    set textValue to my replaceText(textValue, linefeed, " ")
+    set textValue to my replaceText(textValue, tab, " ")
+    repeat while textValue contains "  "
+        set textValue to my replaceText(textValue, "  ", " ")
+    end repeat
+    if (length of textValue) > 120 then
+        return (text 1 thru 120 of textValue) & "..."
+    end if
+    return textValue
+end cleanText
+
+on replaceText(sourceText, searchText, replacementText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to searchText
+    set textItems to text items of sourceText
+    set AppleScript's text item delimiters to replacementText
+    set joinedText to textItems as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end replaceText
+
+on safeProperty(uiElement, propertyName)
+    try
+        tell application "System Events"
+            if propertyName is "role" then
+                set rawValue to role of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "name" then
+                set rawValue to name of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "description" then
+                set rawValue to description of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "value" then
+                try
+                    if (role of uiElement as text) is "AXSecureTextField" then return ""
+                end try
+                set rawValue to value of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+        end tell
+    end try
+    return ""
+end safeProperty
+
+on isInterestingRole(roleName)
+    if roleName is "" then return false
+    set interestingRoles to {{"AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXComboBox", "AXLink", "AXTabGroup", "AXToolbar"}}
+    return interestingRoles contains roleName
+end isInterestingRole
+
+on isEnabledControl(uiElement)
+    try
+        tell application "System Events"
+            set rawEnabled to enabled of uiElement
+            if rawEnabled is missing value then return true
+            return rawEnabled as boolean
+        end tell
+    end try
+    return true
+end isEnabledControl
+
+on labelMatches(uiElement, wantedLabel, exactMatch)
+    set candidateLabels to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of candidateLabels to elementName
+    if elementDescription is not "" then set end of candidateLabels to elementDescription
+    if elementValue is not "" then set end of candidateLabels to elementValue
+
+    repeat with candidateLabel in candidateLabels
+        set candidateText to candidateLabel as text
+        ignoring case
+            if exactMatch then
+                if candidateText is wantedLabel then return true
+            else
+                if candidateText contains wantedLabel then return true
+            end if
+        end ignoring
+    end repeat
+    return false
+end labelMatches
+
+on elementSummary(uiElement)
+    set roleName to my safeProperty(uiElement, "role")
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    set labelParts to {{}}
+    if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
+    if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
+    if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to " | "
+    set labelsText to labelParts as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if labelsText is "" then return roleName
+    return roleName & " | " & labelsText
+end elementSummary
+
+on collectMatches(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        set roleOk to true
+        if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
+        if roleOk and my isInterestingRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectMatches(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectMatches
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            error "ui control press failed: app not running: " & requestedAppName number 1728
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set frontWindowTitle to "(none)"
+    try
+        set targetWindow to front window of targetProcess
+        set frontWindowTitle to my cleanText(name of targetWindow)
+    on error
+        set targetWindow to targetProcess
+        set frontWindowTitle to "(process root)"
+    end try
+end tell
+
+set exactMatches to my collectMatches(targetWindow, 1, maxDepth, requestedRole, requestedLabel, true, maxRows)
+if (count of exactMatches) is 1 then
+    set targetElement to item 1 of exactMatches
+else if (count of exactMatches) is greater than 1 then
+    error "ui control press failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+else
+    set fuzzyMatches to my collectMatches(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
+    if (count of fuzzyMatches) is 0 then
+        error "ui control press failed: no matching control for " & quoted form of requestedLabel number 1728
+    else if (count of fuzzyMatches) is greater than 1 then
+        error "ui control press failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+    end if
+    set targetElement to item 1 of fuzzyMatches
+end if
+
+if not my isEnabledControl(targetElement) then
+    error "ui control press failed: matched control is disabled: " & my elementSummary(targetElement) number 1728
+end if
+
+set targetSummary to my elementSummary(targetElement)
+tell application "System Events"
+    perform action "AXPress" of targetElement
+end tell
+return "pressed UI control: " & targetSummary & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle"#
+    )
+}
+
+// ── execute_ui_type ──────────────────────────────────────────────────────────
+
+/// Set the value of one visible text-entry Accessibility control.
+///
+/// The target must resolve to exactly one typeable control. The typed text is
+/// passed only to the executor script; audit surfaces record its length instead
+/// of the content.
+pub async fn execute_ui_type(
+    app_name: Option<&str>,
+    role: Option<&str>,
+    label: Option<&str>,
+    text: &str,
+    max_depth: Option<u8>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let role = role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let label = label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    if role.is_empty() && label.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "ui_type requires a role or label".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let script = build_ui_type_script(app_name, role, label, text, depth);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_ui_type_script(
+    app_name: &str,
+    role: &str,
+    label: &str,
+    text: &str,
+    max_depth: u8,
+) -> String {
+    let app = escape_applescript_literal(app_name);
+    let role = escape_applescript_literal(role);
+    let label = escape_applescript_literal(label);
+    let text = escape_applescript_literal(text);
+    format!(
+        r#"set requestedAppName to "{app}"
+set requestedRole to "{role}"
+set requestedLabel to "{label}"
+set requestedText to "{text}"
+set maxDepth to {max_depth}
+set maxRows to 80
+
+on cleanText(rawValue)
+    try
+        set textValue to rawValue as text
+    on error
+        return ""
+    end try
+    set textValue to my replaceText(textValue, return, " ")
+    set textValue to my replaceText(textValue, linefeed, " ")
+    set textValue to my replaceText(textValue, tab, " ")
+    repeat while textValue contains "  "
+        set textValue to my replaceText(textValue, "  ", " ")
+    end repeat
+    if (length of textValue) > 120 then
+        return (text 1 thru 120 of textValue) & "..."
+    end if
+    return textValue
+end cleanText
+
+on replaceText(sourceText, searchText, replacementText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to searchText
+    set textItems to text items of sourceText
+    set AppleScript's text item delimiters to replacementText
+    set joinedText to textItems as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end replaceText
+
+on safeProperty(uiElement, propertyName)
+    try
+        tell application "System Events"
+            if propertyName is "role" then
+                set rawValue to role of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "name" then
+                set rawValue to name of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "description" then
+                set rawValue to description of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "value" then
+                try
+                    if (role of uiElement as text) is "AXSecureTextField" then return ""
+                end try
+                set rawValue to value of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+        end tell
+    end try
+    return ""
+end safeProperty
+
+on isTypeableRole(roleName)
+    if roleName is "" then return false
+    set typeableRoles to {{"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"}}
+    return typeableRoles contains roleName
+end isTypeableRole
+
+on labelMatches(uiElement, wantedLabel, exactMatch)
+    if wantedLabel is "" then return true
+    set candidateLabels to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of candidateLabels to elementName
+    if elementDescription is not "" then set end of candidateLabels to elementDescription
+    if elementValue is not "" then set end of candidateLabels to elementValue
+
+    repeat with candidateLabel in candidateLabels
+        set candidateText to candidateLabel as text
+        ignoring case
+            if exactMatch then
+                if candidateText is wantedLabel then return true
+            else
+                if candidateText contains wantedLabel then return true
+            end if
+        end ignoring
+    end repeat
+    return false
+end labelMatches
+
+on elementSummary(uiElement)
+    set roleName to my safeProperty(uiElement, "role")
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    set labelParts to {{}}
+    if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
+    if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
+    if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to " | "
+    set labelsText to labelParts as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if labelsText is "" then return roleName
+    return roleName & " | " & labelsText
+end elementSummary
+
+on collectTypeTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        set roleOk to true
+        if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
+        if roleOk and my isTypeableRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectTypeTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectTypeTargets
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            error "ui type failed: app not running: " & requestedAppName number 1728
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set frontWindowTitle to "(none)"
+    try
+        set targetWindow to front window of targetProcess
+        set frontWindowTitle to my cleanText(name of targetWindow)
+    on error
+        set targetWindow to targetProcess
+        set frontWindowTitle to "(process root)"
+    end try
+end tell
+
+set exactMatches to my collectTypeTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, true, maxRows)
+if (count of exactMatches) is 1 then
+    set targetElement to item 1 of exactMatches
+else if (count of exactMatches) is greater than 1 then
+    error "ui type failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+else
+    if requestedLabel is "" then
+        error "ui type failed: no matching text control for role " & quoted form of requestedRole number 1728
+    end if
+    set fuzzyMatches to my collectTypeTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
+    if (count of fuzzyMatches) is 0 then
+        error "ui type failed: no matching text control for " & quoted form of requestedLabel number 1728
+    else if (count of fuzzyMatches) is greater than 1 then
+        error "ui type failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+    end if
+    set targetElement to item 1 of fuzzyMatches
+end if
+
+set targetSummary to my elementSummary(targetElement)
+tell application "System Events"
+    try
+        set value of targetElement to requestedText
+    on error errMsg number errNum
+        error "ui type failed: could not set text value: " & errMsg number errNum
+    end try
+end tell
+return "typed into UI control: " & targetSummary & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle & linefeed & "text: <" & ((length of requestedText) as text) & " chars>"
+"#
+    )
+}
+
+fn escape_applescript_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' | '\r' => out.push(' '),
+            ch if ch.is_control() => out.push(' '),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+// ── execute_shortcut ─────────────────────────────────────────────────────────
+
+/// Execute a macOS Shortcut via `/usr/bin/shortcuts run`.
+///
+/// Arguments are passed as argv entries, never through a shell, so shortcut names
+/// and paths cannot introduce shell metacharacter injection.
+pub async fn execute_shortcut(
+    name: &str,
+    input_path: Option<&PathBuf>,
+    output_path: Option<&PathBuf>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "shortcut name must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+
+    let mut args = vec![
+        "/usr/bin/shortcuts".to_string(),
+        "run".to_string(),
+        trimmed_name.to_string(),
+    ];
+    if let Some(path) = input_path {
+        args.push("--input-path".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
+    if let Some(path) = output_path {
+        args.push("--output-path".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
+
+    execute_shell(&args, None, timeout_secs).await
+}
+
 // ── execute_browser ───────────────────────────────────────────────────────────
 
 /// Execute a browser action via the long-lived BrowserCoordinator.
@@ -641,6 +1507,132 @@ mod tests {
             result
         );
         assert_eq!(result.error, "timed out after 1s");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn execute_shortcut_empty_name_fails_closed() {
+        let result = execute_shortcut("", None, None, ACTION_DEFAULT_TIMEOUT_SECS).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "shortcut name must not be empty");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn execute_window_focus_empty_app_fails_closed() {
+        let result = execute_window_focus("  ", None, ACTION_DEFAULT_TIMEOUT_SECS).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "window_focus app_name must not be empty");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn build_window_focus_script_escapes_literals() {
+        let script = build_window_focus_script("Bad \" App", "Docs\\Thing\nNew");
+        assert!(
+            script.contains("set targetAppName to \"Bad \\\" App\""),
+            "app literal must be escaped: {script}"
+        );
+        assert!(
+            script.contains("set wantedTitle to \"Docs\\\\Thing New\""),
+            "title literal must be escaped and line-normalized: {script}"
+        );
+    }
+
+    #[test]
+    fn build_window_inspect_script_escapes_literals_and_stays_read_only() {
+        let script = build_window_inspect_script("Bad \" App\\Name\nNew");
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(script.contains("first application process whose frontmost is true"));
+        assert!(script.contains("visible windows:"));
+        assert!(!script.contains(" to activate"));
+        assert!(!script.contains("AXRaise"));
+    }
+
+    #[test]
+    fn build_ui_snapshot_script_escapes_literals_and_stays_read_only() {
+        let script = build_ui_snapshot_script("Bad \" App\\Name\nNew", 2);
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(script.contains("set maxDepth to 2"));
+        assert!(script.contains("AXSecureTextField"));
+        assert!(script.contains("controls:"));
+        assert!(!script.contains(" to activate"));
+        assert!(!script.contains("AXRaise"));
+        assert!(!script.contains("keystroke"));
+        assert!(!script.contains("click "));
+    }
+
+    #[test]
+    fn build_ui_click_script_escapes_literals_and_uses_axpress_only() {
+        let script = build_ui_click_script("Bad \" App\\Name\nNew", "AXButton", "OK \"Now\"", 2);
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(
+            script.contains("set requestedLabel to \"OK \\\"Now\\\"\""),
+            "label literal must be escaped: {script}"
+        );
+        assert!(script.contains("set requestedRole to \"AXButton\""));
+        assert!(script.contains("set maxDepth to 2"));
+        assert!(script.contains("perform action \"AXPress\" of targetElement"));
+        assert!(!script.contains(" to activate"));
+        assert!(!script.contains("AXRaise"));
+        assert!(!script.contains("keystroke"));
+    }
+
+    #[tokio::test]
+    async fn execute_ui_click_blank_label_fails_closed() {
+        let result = execute_ui_click(None, Some("AXButton"), "   ", Some(2), 1).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "ui_click label must not be empty");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn build_ui_type_script_escapes_text_and_sets_ax_value() {
+        let script = build_ui_type_script(
+            "Bad \" App\\Name\nNew",
+            "AXTextField",
+            "Search \"Field\"",
+            "hello \"Dexter\"\\line\nnext",
+            2,
+        );
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(
+            script.contains("set requestedLabel to \"Search \\\"Field\\\"\""),
+            "label literal must be escaped: {script}"
+        );
+        assert!(
+            script.contains("set requestedText to \"hello \\\"Dexter\\\"\\\\line next\""),
+            "typed text literal must be escaped and line-normalized: {script}"
+        );
+        assert!(script.contains("set value of targetElement to requestedText"));
+        assert!(script.contains("AXTextField"));
+        assert!(script.contains("AXTextArea"));
+        assert!(!script.contains("keystroke"));
+        assert!(!script.contains("perform action \"AXPress\""));
+        assert!(!script.contains("click "));
+    }
+
+    #[tokio::test]
+    async fn execute_ui_type_without_role_or_label_fails_closed() {
+        let result = execute_ui_type(None, None, None, "hello", Some(2), 1).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "ui_type requires a role or label");
         assert_eq!(result.exit_code, None);
     }
 

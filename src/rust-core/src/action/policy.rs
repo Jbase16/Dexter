@@ -220,6 +220,47 @@ impl PolicyEngine {
                 // Messages AppleScript before execution.
                 ActionCategory::Cautious
             }
+            ActionSpec::WindowFocus {
+                category_override, ..
+            } => {
+                // Focus changes are reversible local UI state. Audit them because
+                // they affect where subsequent actions land, but do not interrupt
+                // the operator with approval unless an upward override requests it.
+                Self::apply_override(ActionCategory::Cautious, category_override.as_deref())
+            }
+            ActionSpec::WindowInspect { .. } => {
+                // Read-only UI observation. This is the structured alternative to
+                // asking the model to infer frontmost state from stale context.
+                ActionCategory::Safe
+            }
+            ActionSpec::UiSnapshot { .. } => {
+                // Read-only Accessibility metadata. This grounds GUI actions
+                // without activating, clicking, typing, or mutating app state.
+                ActionCategory::Safe
+            }
+            ActionSpec::UiClick {
+                role,
+                label,
+                category_override,
+                ..
+            } => {
+                // A structured Accessibility press changes UI state, so it is
+                // audited. Obvious consequence labels still require approval.
+                let base = Self::classify_ui_click(role.as_deref(), label);
+                Self::apply_override(base, category_override.as_deref())
+            }
+            ActionSpec::UiType {
+                role,
+                label,
+                category_override,
+                ..
+            } => {
+                // UI typing mutates local app state and can place secrets into
+                // fields. Ordinary text entry is audited; sensitive targets go
+                // through the approval path.
+                let base = Self::classify_ui_type(role.as_deref(), label.as_deref());
+                Self::apply_override(base, category_override.as_deref())
+            }
             ActionSpec::Browser {
                 action,
                 category_override,
@@ -227,6 +268,15 @@ impl PolicyEngine {
             } => {
                 let base = Self::classify_browser(action);
                 Self::apply_override(base, category_override.as_deref())
+            }
+            ActionSpec::Shortcut {
+                category_override, ..
+            } => {
+                // Shortcuts can send messages, move files, call web services, or
+                // control apps depending on the operator's local shortcut body.
+                // Treat them like an approval-required bridge into the Apple
+                // automation ecosystem until Dexter has an allowlist.
+                Self::apply_override(ActionCategory::Destructive, category_override.as_deref())
             }
         }
     }
@@ -258,6 +308,36 @@ impl PolicyEngine {
         }
     }
 
+    fn classify_ui_click(role: Option<&str>, label: &str) -> ActionCategory {
+        let combined = match role.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(role) => format!("{role} {label}"),
+            None => label.to_string(),
+        };
+        if Self::control_text_has_consequence(&combined) {
+            ActionCategory::Destructive
+        } else {
+            ActionCategory::Cautious
+        }
+    }
+
+    fn classify_ui_type(role: Option<&str>, label: Option<&str>) -> ActionCategory {
+        let mut combined = String::new();
+        if let Some(role) = role.map(str::trim).filter(|value| !value.is_empty()) {
+            combined.push_str(role);
+        }
+        if let Some(label) = label.map(str::trim).filter(|value| !value.is_empty()) {
+            if !combined.is_empty() {
+                combined.push(' ');
+            }
+            combined.push_str(label);
+        }
+        if Self::control_text_is_sensitive_input(&combined) {
+            ActionCategory::Destructive
+        } else {
+            ActionCategory::Cautious
+        }
+    }
+
     fn classify_browser_navigate(url: &str) -> ActionCategory {
         let trimmed = url.trim().to_ascii_lowercase();
         if trimmed.starts_with("javascript:") || trimmed.starts_with("data:text/html") {
@@ -268,6 +348,10 @@ impl PolicyEngine {
     }
 
     fn browser_text_has_consequence(text: &str) -> bool {
+        Self::control_text_has_consequence(text)
+    }
+
+    fn control_text_has_consequence(text: &str) -> bool {
         let normalized = Self::normalize_browser_policy_text(text);
         BROWSER_CONSEQUENCE_TERMS
             .iter()
@@ -275,7 +359,11 @@ impl PolicyEngine {
     }
 
     fn browser_selector_is_sensitive_input(selector: &str) -> bool {
-        let normalized = Self::normalize_browser_policy_text(selector);
+        Self::control_text_is_sensitive_input(selector)
+    }
+
+    fn control_text_is_sensitive_input(text: &str) -> bool {
+        let normalized = Self::normalize_browser_policy_text(text);
         BROWSER_SENSITIVE_INPUT_TERMS
             .iter()
             .any(|term| normalized.contains(term))
@@ -802,6 +890,63 @@ mod tests {
         }
     }
 
+    fn shortcut(name: &str) -> ActionSpec {
+        ActionSpec::Shortcut {
+            name: name.to_string(),
+            input_path: None,
+            output_path: None,
+            rationale: None,
+            category_override: None,
+        }
+    }
+
+    fn window_focus(app_name: &str, title_contains: Option<&str>) -> ActionSpec {
+        ActionSpec::WindowFocus {
+            app_name: app_name.to_string(),
+            title_contains: title_contains.map(str::to_string),
+            rationale: None,
+            category_override: None,
+        }
+    }
+
+    fn window_inspect(app_name: Option<&str>) -> ActionSpec {
+        ActionSpec::WindowInspect {
+            app_name: app_name.map(str::to_string),
+            rationale: None,
+        }
+    }
+
+    fn ui_snapshot(app_name: Option<&str>) -> ActionSpec {
+        ActionSpec::UiSnapshot {
+            app_name: app_name.map(str::to_string),
+            max_depth: Some(2),
+            rationale: None,
+        }
+    }
+
+    fn ui_click(label: &str) -> ActionSpec {
+        ActionSpec::UiClick {
+            app_name: Some("Safari".to_string()),
+            role: Some("AXButton".to_string()),
+            label: label.to_string(),
+            max_depth: Some(2),
+            rationale: None,
+            category_override: None,
+        }
+    }
+
+    fn ui_type(role: &str, label: Option<&str>) -> ActionSpec {
+        ActionSpec::UiType {
+            app_name: Some("Safari".to_string()),
+            role: Some(role.to_string()),
+            label: label.map(str::to_string),
+            text: "hello".to_string(),
+            max_depth: Some(2),
+            rationale: None,
+            category_override: None,
+        }
+    }
+
     #[test]
     fn classify_shell_echo_is_safe() {
         assert_eq!(
@@ -815,6 +960,78 @@ mod tests {
         assert_eq!(
             PolicyEngine::classify(&message_send()),
             ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_shortcut_requires_approval_by_default() {
+        assert_eq!(
+            PolicyEngine::classify(&shortcut("Morning Briefing")),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_window_focus_is_cautious() {
+        assert_eq!(
+            PolicyEngine::classify(&window_focus("Safari", Some("Dexter Docs"))),
+            ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_window_inspect_is_safe() {
+        assert_eq!(
+            PolicyEngine::classify(&window_inspect(Some("Safari"))),
+            ActionCategory::Safe
+        );
+        assert_eq!(
+            PolicyEngine::classify(&window_inspect(None)),
+            ActionCategory::Safe
+        );
+    }
+
+    #[test]
+    fn classify_ui_snapshot_is_safe() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_snapshot(Some("Safari"))),
+            ActionCategory::Safe
+        );
+        assert_eq!(
+            PolicyEngine::classify(&ui_snapshot(None)),
+            ActionCategory::Safe
+        );
+    }
+
+    #[test]
+    fn classify_ui_click_is_cautious_by_default() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_click("Continue")),
+            ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_ui_click_consequence_label_requires_approval() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_click("Delete account")),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_ui_type_is_cautious_by_default() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_type("AXTextField", Some("Search"))),
+            ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_ui_type_sensitive_target_requires_approval() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_type("AXTextField", Some("API token"))),
+            ActionCategory::Destructive
         );
     }
 
