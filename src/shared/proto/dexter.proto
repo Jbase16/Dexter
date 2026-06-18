@@ -355,7 +355,7 @@ message ActionRequest {
 // This is not model text: it is Rust-side execution/audit metadata for the HUD.
 message ActionReceipt {
   string action_id      = 1;  // Correlates with ActionRequest and audit.jsonl
-  string action_type    = 2;  // shell | file_read | file_write | applescript | browser | message_send | shortcut | window_focus | window_inspect | ui_snapshot | ui_click | ui_type
+  string action_type    = 2;  // shell | file_read | file_write | applescript | browser | message_send | shortcut | window_focus | window_inspect | ui_snapshot | ui_click | ui_type | ui_select | ui_toggle | ui_pick
   string category       = 3;  // safe | cautious | destructive
   string description    = 4;  // Operator-readable target/summary
   string outcome        = 5;  // executed | denied | expired | failed | pending

@@ -261,6 +261,46 @@ impl PolicyEngine {
                 let base = Self::classify_ui_type(role.as_deref(), label.as_deref());
                 Self::apply_override(base, category_override.as_deref())
             }
+            ActionSpec::UiSelect {
+                role,
+                label,
+                option,
+                category_override,
+                ..
+            } => {
+                // Selecting from a visible UI control mutates local app state.
+                // Ordinary option choice is immediate with audit logging; obvious
+                // consequence labels/options require approval.
+                let base = Self::classify_ui_select(role.as_deref(), label, option);
+                Self::apply_override(base, category_override.as_deref())
+            }
+            ActionSpec::UiToggle {
+                role,
+                label,
+                state,
+                category_override,
+                ..
+            } => {
+                // State-aware toggles mutate local app state. Routine checkbox
+                // and switch changes are immediate with audit logging; obvious
+                // consequence labels require approval.
+                let base = Self::classify_ui_toggle(role.as_deref(), label, *state);
+                Self::apply_override(base, category_override.as_deref())
+            }
+            ActionSpec::UiPick {
+                role,
+                label,
+                container_label,
+                category_override,
+                ..
+            } => {
+                // Picking a visible row/item mutates local UI selection. Routine
+                // navigation rows are immediate with audit logging; consequence
+                // labels still require approval.
+                let base =
+                    Self::classify_ui_pick(role.as_deref(), label, container_label.as_deref());
+                Self::apply_override(base, category_override.as_deref())
+            }
             ActionSpec::Browser {
                 action,
                 category_override,
@@ -332,6 +372,55 @@ impl PolicyEngine {
             combined.push_str(label);
         }
         if Self::control_text_is_sensitive_input(&combined) {
+            ActionCategory::Destructive
+        } else {
+            ActionCategory::Cautious
+        }
+    }
+
+    fn classify_ui_select(role: Option<&str>, label: &str, option: &str) -> ActionCategory {
+        let combined = match role.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(role) => format!("{role} {label} {option}"),
+            None => format!("{label} {option}"),
+        };
+        if Self::control_text_has_consequence(&combined) {
+            ActionCategory::Destructive
+        } else {
+            ActionCategory::Cautious
+        }
+    }
+
+    fn classify_ui_toggle(role: Option<&str>, label: &str, state: bool) -> ActionCategory {
+        let desired = if state { "on" } else { "off" };
+        let combined = match role.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(role) => format!("{role} {label} {desired}"),
+            None => format!("{label} {desired}"),
+        };
+        if Self::control_text_has_consequence(&combined) {
+            ActionCategory::Destructive
+        } else {
+            ActionCategory::Cautious
+        }
+    }
+
+    fn classify_ui_pick(
+        role: Option<&str>,
+        label: &str,
+        container_label: Option<&str>,
+    ) -> ActionCategory {
+        let mut parts = Vec::new();
+        if let Some(role) = role.map(str::trim).filter(|value| !value.is_empty()) {
+            parts.push(role);
+        }
+        if let Some(container_label) = container_label
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            parts.push(container_label);
+        }
+        parts.push(label);
+        let combined = parts.join(" ");
+        if Self::control_text_has_consequence(&combined) {
             ActionCategory::Destructive
         } else {
             ActionCategory::Cautious
@@ -947,6 +1036,42 @@ mod tests {
         }
     }
 
+    fn ui_select(label: &str, option: &str) -> ActionSpec {
+        ActionSpec::UiSelect {
+            app_name: Some("System Settings".to_string()),
+            role: Some("AXPopUpButton".to_string()),
+            label: label.to_string(),
+            option: option.to_string(),
+            max_depth: Some(2),
+            rationale: None,
+            category_override: None,
+        }
+    }
+
+    fn ui_toggle(label: &str, state: bool) -> ActionSpec {
+        ActionSpec::UiToggle {
+            app_name: Some("System Settings".to_string()),
+            role: Some("AXCheckBox".to_string()),
+            label: label.to_string(),
+            state,
+            max_depth: Some(2),
+            rationale: None,
+            category_override: None,
+        }
+    }
+
+    fn ui_pick(label: &str, container_label: Option<&str>) -> ActionSpec {
+        ActionSpec::UiPick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXRow".to_string()),
+            label: label.to_string(),
+            container_label: container_label.map(str::to_string),
+            max_depth: Some(3),
+            rationale: None,
+            category_override: None,
+        }
+    }
+
     #[test]
     fn classify_shell_echo_is_safe() {
         assert_eq!(
@@ -1031,6 +1156,54 @@ mod tests {
     fn classify_ui_type_sensitive_target_requires_approval() {
         assert_eq!(
             PolicyEngine::classify(&ui_type("AXTextField", Some("API token"))),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_ui_select_is_cautious_by_default() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_select("Theme", "Dark")),
+            ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_ui_select_consequence_option_requires_approval() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_select("Account action", "Delete account")),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_ui_toggle_is_cautious_by_default() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_toggle("Show previews", true)),
+            ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_ui_toggle_consequence_label_requires_approval() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_toggle("Delete account confirmation", true)),
+            ActionCategory::Destructive
+        );
+    }
+
+    #[test]
+    fn classify_ui_pick_is_cautious_by_default() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_pick("Downloads", Some("Sidebar"))),
+            ActionCategory::Cautious
+        );
+    }
+
+    #[test]
+    fn classify_ui_pick_consequence_label_requires_approval() {
+        assert_eq!(
+            PolicyEngine::classify(&ui_pick("Delete account", Some("Account actions"))),
             ActionCategory::Destructive
         );
     }

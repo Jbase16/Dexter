@@ -40,6 +40,9 @@ DEFAULT_TARGETS=(
     live-smoke-ui-snapshot
     live-smoke-ui-click
     live-smoke-ui-type
+    live-smoke-ui-select
+    live-smoke-ui-toggle
+    live-smoke-ui-pick
     live-smoke-cli
     live-smoke-action-matrix
     live-smoke-action-receipts

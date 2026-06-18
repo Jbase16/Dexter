@@ -151,6 +151,46 @@ pub enum ActionSpec {
         #[serde(default)]
         category_override: Option<String>,
     },
+    UiSelect {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        #[serde(default)]
+        role: Option<String>,
+        label: String,
+        option: String,
+        #[serde(default)]
+        max_depth: Option<u8>,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
+    UiToggle {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        #[serde(default)]
+        role: Option<String>,
+        label: String,
+        state: bool,
+        #[serde(default)]
+        max_depth: Option<u8>,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
+    UiPick {
+        #[serde(default, alias = "app")]
+        app_name: Option<String>,
+        #[serde(default)]
+        role: Option<String>,
+        label: String,
+        #[serde(default)]
+        container_label: Option<String>,
+        #[serde(default)]
+        max_depth: Option<u8>,
+        rationale: Option<String>,
+        #[serde(default)]
+        category_override: Option<String>,
+    },
     Browser {
         // #[serde(flatten)] merges BrowserActionKind's tag ("action") and variant
         // fields into the parent object level so the model's flat JSON round-trips:
@@ -662,6 +702,60 @@ impl ActionEngine {
                 )
                 .await
             }
+            ActionSpec::UiSelect {
+                app_name,
+                role,
+                label,
+                option,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_select(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    option,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiToggle {
+                app_name,
+                role,
+                label,
+                state,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_toggle(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    *state,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiPick {
+                app_name,
+                role,
+                label,
+                container_label,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_pick(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    container_label.as_deref(),
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
             ActionSpec::Browser { action, .. } => {
                 executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
                     .await
@@ -860,6 +954,104 @@ impl ActionEngine {
                 };
                 format!("Type into UI: {target} {control}")
             }
+            ActionSpec::UiSelect {
+                app_name,
+                role,
+                label,
+                option,
+                ..
+            } => {
+                let target = match app_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|app| !app.is_empty())
+                {
+                    Some(app) => app.to_string(),
+                    None => "frontmost app".to_string(),
+                };
+                match role
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(role) => {
+                        format!(
+                            "Select UI: {target} {role} \"{}\" -> \"{}\"",
+                            label.trim(),
+                            option.trim()
+                        )
+                    }
+                    None => {
+                        format!(
+                            "Select UI: {target} \"{}\" -> \"{}\"",
+                            label.trim(),
+                            option.trim()
+                        )
+                    }
+                }
+            }
+            ActionSpec::UiToggle {
+                app_name,
+                role,
+                label,
+                state,
+                ..
+            } => {
+                let target = match app_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|app| !app.is_empty())
+                {
+                    Some(app) => app.to_string(),
+                    None => "frontmost app".to_string(),
+                };
+                let desired = if *state { "on" } else { "off" };
+                match role
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(role) => {
+                        format!(
+                            "Toggle UI: {target} {role} \"{}\" -> {desired}",
+                            label.trim()
+                        )
+                    }
+                    None => format!("Toggle UI: {target} \"{}\" -> {desired}", label.trim()),
+                }
+            }
+            ActionSpec::UiPick {
+                app_name,
+                role,
+                label,
+                container_label,
+                ..
+            } => {
+                let target = match app_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|app| !app.is_empty())
+                {
+                    Some(app) => app.to_string(),
+                    None => "frontmost app".to_string(),
+                };
+                let item = match role
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(role) => format!("{role} \"{}\"", label.trim()),
+                    None => format!("\"{}\"", label.trim()),
+                };
+                match container_label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(container) => format!("Pick UI: {target} \"{container}\" -> {item}"),
+                    None => format!("Pick UI: {target} {item}"),
+                }
+            }
             ActionSpec::Browser { action, .. } => match action {
                 BrowserActionKind::Navigate { url } => format!("Browser navigate: {url}"),
                 BrowserActionKind::Click { selector } => format!("Browser click: {selector}"),
@@ -889,6 +1081,9 @@ impl ActionEngine {
             ActionSpec::UiSnapshot { .. } => "ui_snapshot",
             ActionSpec::UiClick { .. } => "ui_click",
             ActionSpec::UiType { .. } => "ui_type",
+            ActionSpec::UiSelect { .. } => "ui_select",
+            ActionSpec::UiToggle { .. } => "ui_toggle",
+            ActionSpec::UiPick { .. } => "ui_pick",
             ActionSpec::Browser { .. } => "browser",
             ActionSpec::Shortcut { .. } => "shortcut",
         }
@@ -1014,6 +1209,60 @@ impl ActionEngine {
                     "role": role,
                     "label": label,
                     "text": format!("<{} bytes omitted>", text.len()),
+                    "max_depth": max_depth,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::UiSelect {
+                app_name,
+                role,
+                label,
+                option,
+                max_depth,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "role": role,
+                    "label": label,
+                    "option": option,
+                    "max_depth": max_depth,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::UiToggle {
+                app_name,
+                role,
+                label,
+                state,
+                max_depth,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "role": role,
+                    "label": label,
+                    "state": state,
+                    "max_depth": max_depth,
+                    "rationale": rationale,
+                })
+            }
+            ActionSpec::UiPick {
+                app_name,
+                role,
+                label,
+                container_label,
+                max_depth,
+                rationale,
+                ..
+            } => {
+                serde_json::json!({
+                    "app_name": app_name,
+                    "role": role,
+                    "label": label,
+                    "container_label": container_label,
                     "max_depth": max_depth,
                     "rationale": rationale,
                 })
@@ -1247,6 +1496,60 @@ impl ExecutorHandle {
                     role.as_deref(),
                     label.as_deref(),
                     text,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiSelect {
+                app_name,
+                role,
+                label,
+                option,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_select(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    option,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiToggle {
+                app_name,
+                role,
+                label,
+                state,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_toggle(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    *state,
+                    *max_depth,
+                    ACTION_DEFAULT_TIMEOUT_SECS,
+                )
+                .await
+            }
+            ActionSpec::UiPick {
+                app_name,
+                role,
+                label,
+                container_label,
+                max_depth,
+                ..
+            } => {
+                executor::execute_ui_pick(
+                    app_name.as_deref(),
+                    role.as_deref(),
+                    label,
+                    container_label.as_deref(),
                     *max_depth,
                     ACTION_DEFAULT_TIMEOUT_SECS,
                 )
@@ -1496,6 +1799,42 @@ mod tests {
         }
     }
 
+    fn make_ui_select() -> ActionSpec {
+        ActionSpec::UiSelect {
+            app_name: Some("System Settings".to_string()),
+            role: Some("AXPopUpButton".to_string()),
+            label: "Appearance".to_string(),
+            option: "Dark".to_string(),
+            max_depth: Some(2),
+            rationale: Some("select the visible appearance option".to_string()),
+            category_override: None,
+        }
+    }
+
+    fn make_ui_toggle() -> ActionSpec {
+        ActionSpec::UiToggle {
+            app_name: Some("System Settings".to_string()),
+            role: Some("AXCheckBox".to_string()),
+            label: "Show previews".to_string(),
+            state: true,
+            max_depth: Some(2),
+            rationale: Some("turn the visible checkbox on".to_string()),
+            category_override: None,
+        }
+    }
+
+    fn make_ui_pick() -> ActionSpec {
+        ActionSpec::UiPick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXRow".to_string()),
+            label: "Downloads".to_string(),
+            container_label: Some("Sidebar".to_string()),
+            max_depth: Some(3),
+            rationale: Some("select the visible sidebar row".to_string()),
+            category_override: None,
+        }
+    }
+
     fn make_messages_send_applescript() -> ActionSpec {
         ActionSpec::AppleScript {
             script: r#"tell application "Messages"
@@ -1618,6 +1957,60 @@ mod tests {
         assert_eq!(audit["text"], "<12 bytes omitted>");
         assert_eq!(audit["max_depth"], 2);
         assert_eq!(audit["rationale"], "type into the only visible text area");
+    }
+
+    #[test]
+    fn ui_select_describe_type_and_audit_are_readable() {
+        let spec = make_ui_select();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Select UI: System Settings AXPopUpButton \"Appearance\" -> \"Dark\""
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "ui_select");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "System Settings");
+        assert_eq!(audit["role"], "AXPopUpButton");
+        assert_eq!(audit["label"], "Appearance");
+        assert_eq!(audit["option"], "Dark");
+        assert_eq!(audit["max_depth"], 2);
+        assert_eq!(audit["rationale"], "select the visible appearance option");
+    }
+
+    #[test]
+    fn ui_toggle_describe_type_and_audit_are_readable() {
+        let spec = make_ui_toggle();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Toggle UI: System Settings AXCheckBox \"Show previews\" -> on"
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "ui_toggle");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "System Settings");
+        assert_eq!(audit["role"], "AXCheckBox");
+        assert_eq!(audit["label"], "Show previews");
+        assert_eq!(audit["state"], true);
+        assert_eq!(audit["max_depth"], 2);
+        assert_eq!(audit["rationale"], "turn the visible checkbox on");
+    }
+
+    #[test]
+    fn ui_pick_describe_type_and_audit_are_readable() {
+        let spec = make_ui_pick();
+        assert_eq!(
+            ActionEngine::describe(&spec),
+            "Pick UI: Finder \"Sidebar\" -> AXRow \"Downloads\""
+        );
+        assert_eq!(ActionEngine::type_str(&spec), "ui_pick");
+
+        let audit = ActionEngine::spec_to_audit_json(&spec);
+        assert_eq!(audit["app_name"], "Finder");
+        assert_eq!(audit["role"], "AXRow");
+        assert_eq!(audit["label"], "Downloads");
+        assert_eq!(audit["container_label"], "Sidebar");
+        assert_eq!(audit["max_depth"], 3);
+        assert_eq!(audit["rationale"], "select the visible sidebar row");
     }
 
     #[test]

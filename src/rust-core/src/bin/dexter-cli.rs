@@ -1598,6 +1598,9 @@ fn action_target(action_type: &str, spec: &serde_json::Value) -> String {
         "ui_snapshot" => ui_snapshot_action_target(spec),
         "ui_click" => ui_click_action_target(spec),
         "ui_type" => ui_type_action_target(spec),
+        "ui_select" => ui_select_action_target(spec),
+        "ui_toggle" => ui_toggle_action_target(spec),
+        "ui_pick" => ui_pick_action_target(spec),
         "browser" => browser_action_target(spec),
         "shortcut" => spec
             .get("name")
@@ -1723,6 +1726,98 @@ fn ui_type_action_target(spec: &serde_json::Value) -> String {
         (Some(role), None) => format!("UI type: {app_name} {role}"),
         (None, Some(label)) => format!("UI type: {app_name} \"{label}\""),
         (None, None) => format!("UI type: {app_name} control"),
+    }
+}
+
+fn ui_select_action_target(spec: &serde_json::Value) -> String {
+    let app_name = spec
+        .get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "frontmost app".to_string());
+    let label = spec
+        .get("label")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "control".to_string());
+    let option = spec
+        .get("option")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "option".to_string());
+    match spec
+        .get("role")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+    {
+        Some(role) => format!("UI select: {app_name} {role} \"{label}\" -> \"{option}\""),
+        None => format!("UI select: {app_name} \"{label}\" -> \"{option}\""),
+    }
+}
+
+fn ui_toggle_action_target(spec: &serde_json::Value) -> String {
+    let app_name = spec
+        .get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "frontmost app".to_string());
+    let label = spec
+        .get("label")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "control".to_string());
+    let state = match spec.get("state").and_then(|value| value.as_bool()) {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "state",
+    };
+    match spec
+        .get("role")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+    {
+        Some(role) => format!("UI toggle: {app_name} {role} \"{label}\" -> {state}"),
+        None => format!("UI toggle: {app_name} \"{label}\" -> {state}"),
+    }
+}
+
+fn ui_pick_action_target(spec: &serde_json::Value) -> String {
+    let app_name = spec
+        .get("app_name")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "frontmost app".to_string());
+    let label = spec
+        .get("label")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "item".to_string());
+    let item = match spec
+        .get("role")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+    {
+        Some(role) => format!("{role} \"{label}\""),
+        None => format!("\"{label}\""),
+    };
+    match spec
+        .get("container_label")
+        .and_then(|value| value.as_str())
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+    {
+        Some(container) => format!("UI pick: {app_name} \"{container}\" -> {item}"),
+        None => format!("UI pick: {app_name} {item}"),
     }
 }
 
@@ -4403,6 +4498,123 @@ mod tests {
         assert_eq!(
             receipt.result,
             "Succeeded: typed into UI control: AXTextArea app: TextEdit front window: Untitled text: <12 chars>"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_ui_select_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-select-1".to_string(),
+            action_type: "ui_select".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "System Settings",
+                "role": "AXPopUpButton",
+                "label": "Appearance",
+                "option": "Dark",
+                "max_depth": 2,
+                "rationale": "select dark appearance",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "selected UI option: AXMenuItem | name='Dark'\ncontrol: AXPopUpButton | name='Appearance'\napp: System Settings\nfront window: Appearance"
+                    .to_string(),
+            ),
+            error: None,
+            duration_ms: Some(30),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_select");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(
+            receipt.target,
+            "UI select: System Settings AXPopUpButton \"Appearance\" -> \"Dark\""
+        );
+        assert_eq!(
+            receipt.result,
+            "Succeeded: selected UI option: AXMenuItem | name='Dark' control: AXPopUpButton | name='Appearance' app: System Settings front window: Appearance"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_ui_toggle_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-toggle-1".to_string(),
+            action_type: "ui_toggle".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "System Settings",
+                "role": "AXCheckBox",
+                "label": "Show previews",
+                "state": true,
+                "max_depth": 2,
+                "rationale": "turn previews on",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "set UI toggle: AXCheckBox | name='Show previews'\nstate: on\nchanged: true\napp: System Settings\nfront window: Notifications"
+                    .to_string(),
+            ),
+            error: None,
+            duration_ms: Some(30),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_toggle");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(
+            receipt.target,
+            "UI toggle: System Settings AXCheckBox \"Show previews\" -> on"
+        );
+        assert_eq!(
+            receipt.result,
+            "Succeeded: set UI toggle: AXCheckBox | name='Show previews' state: on changed: true app: System Settings front window: Notifications"
+        );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_formats_ui_pick_target() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-pick-1".to_string(),
+            action_type: "ui_pick".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "Finder",
+                "role": "AXRow",
+                "label": "Downloads",
+                "container_label": "Sidebar",
+                "max_depth": 3,
+                "rationale": "select Downloads",
+            }),
+            outcome: "success".to_string(),
+            exit_code: Some(0),
+            output_preview: Some(
+                "picked UI item: AXRow | name='Downloads'\nverified: true\napp: Finder\nfront window: Home"
+                    .to_string(),
+            ),
+            error: None,
+            duration_ms: Some(32),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_pick");
+        assert_eq!(receipt.status, "executed");
+        assert_eq!(receipt.approval, "not required");
+        assert_eq!(
+            receipt.target,
+            "UI pick: Finder \"Sidebar\" -> AXRow \"Downloads\""
+        );
+        assert_eq!(
+            receipt.result,
+            "Succeeded: picked UI item: AXRow | name='Downloads' verified: true app: Finder front window: Home"
         );
     }
 

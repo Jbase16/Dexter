@@ -82,6 +82,9 @@ write_summary "$TMP_DIR/live-smoke-20260609_030000.md" "2026-06-09T03:00:00-0700
     live-smoke-ui-snapshot \
     live-smoke-ui-click \
     live-smoke-ui-type \
+    live-smoke-ui-select \
+    live-smoke-ui-toggle \
+    live-smoke-ui-pick \
     live-smoke-action-matrix \
     live-smoke-action-receipts \
     live-smoke-approval-lifecycle \
@@ -112,6 +115,9 @@ write_summary "$TMP_DIR/live-smoke-20260609_040000.md" "2026-06-09T04:00:00-0700
     live-smoke-ui-snapshot \
     live-smoke-ui-click \
     live-smoke-ui-type \
+    live-smoke-ui-select \
+    live-smoke-ui-toggle \
+    live-smoke-ui-pick \
     live-smoke-action-matrix \
     live-smoke-action-receipts \
     live-smoke-approval-lifecycle \

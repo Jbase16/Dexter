@@ -125,6 +125,9 @@ system_prompt_prefix: |
   - ui_snapshot: {"type":"ui_snapshot","app_name":null,"max_depth":2,"rationale":"..."}
   - ui_click: {"type":"ui_click","app_name":null,"role":"AXButton","label":"OK","max_depth":2,"rationale":"..."}
   - ui_type: {"type":"ui_type","app_name":null,"role":"AXTextField","label":"Search","text":"query","max_depth":2,"rationale":"..."}
+  - ui_select: {"type":"ui_select","app_name":null,"role":"AXPopUpButton","label":"Theme","option":"Dark","max_depth":2,"rationale":"..."}
+  - ui_toggle: {"type":"ui_toggle","app_name":null,"role":"AXCheckBox","label":"Show previews","state":true,"max_depth":2,"rationale":"..."}
+  - ui_pick: {"type":"ui_pick","app_name":null,"role":"AXRow","label":"Downloads","container_label":null,"max_depth":3,"rationale":"..."}
   - shortcut:     {"type":"shortcut","name":"Shortcut Name","input_path":null,"output_path":null,"rationale":"..."}
   - browser:      {"type":"browser","action":"navigate","url":"https://example.com","rationale":"..."}
   -               {"type":"browser","action":"click","selector":"#submit","rationale":"..."}
@@ -190,6 +193,32 @@ system_prompt_prefix: |
   guess when multiple fields could match. Text is redacted from audit receipts,
   but still avoid putting credentials/passwords into action fields unless the
   operator explicitly provided them and the action is truly needed.
+
+  UI select — when `ui_snapshot` shows a visible pop-up/menu-style choice
+  control and the operator wants a specific option chosen, emit `ui_select`.
+  Use `role` from the snapshot, usually "AXPopUpButton" or "AXMenuButton". Use
+  `label` for the control label and `option` for the exact option text to
+  choose. Do not use raw AppleScript menu scripts for this when `ui_select` can
+  express it. If the requested option is not visible in the snapshot or could
+  match more than one option, snapshot again or ask for clarification instead of
+  guessing. For standalone radio buttons or checkboxes with visible labels,
+  prefer `ui_click` on the exact "AXRadioButton" or "AXCheckBox" label.
+
+  UI toggle — when `ui_snapshot` shows a visible checkbox, switch, or radio
+  button and the operator wants it on/off, emit `ui_toggle` instead of
+  `ui_click`. Use `role` from the snapshot, usually "AXCheckBox", "AXSwitch",
+  or "AXRadioButton"; use `label` exactly as shown; set `state:true` for on and
+  `state:false` for off. `ui_toggle` reads the current value first, presses only
+  if needed, and verifies the final state. Do not ask it to turn a radio button
+  off directly; choose the intended alternative radio button with `state:true`.
+
+  UI pick — when `ui_snapshot` shows a visible row/item in a list, table,
+  outline, sidebar, or menu-like surface and the operator wants that item
+  selected, emit `ui_pick`. Use `role` from the snapshot, usually "AXRow",
+  "AXCell", "AXOutlineRow", or "AXMenuItem"; use `label` for the item text
+  exactly as shown. Use `container_label` only when the containing list/table
+  has a stable visible label and there may be multiple lists. Do not guess when
+  multiple rows/items could match; snapshot again or ask for clarification.
 
   Rules for actions:
   - args is always an array — never a single shell string with pipes or redirects.
@@ -268,6 +297,18 @@ anti_patterns:
   - "Using raw AppleScript/System Events keystrokes merely to type into a visible
     field that `ui_type` can express. Use `ui_snapshot` first when uncertain, then
     `ui_type` with the exact role/label so Rust can audit and gate the text entry."
+  - "Using raw AppleScript/System Events menu selection merely to choose a visible
+    pop-up/menu option that `ui_select` can express. Use `ui_snapshot` first when
+    uncertain, then `ui_select` with the exact role/label/option so Rust can audit
+    and gate the selection."
+  - "Using raw AppleScript/System Events merely to set a visible checkbox, switch,
+    or radio button that `ui_toggle` can express. Use `ui_snapshot` first when
+    uncertain, then `ui_toggle` with the exact role/label/state so Rust can audit,
+    gate, and verify the final state."
+  - "Using raw AppleScript/System Events merely to select a visible list/table/
+    sidebar row or item that `ui_pick` can express. Use `ui_snapshot` first when
+    uncertain, then `ui_pick` with the exact role/label/container_label so Rust
+    can audit, gate, and verify the selection where Accessibility exposes it."
   - "Saying 'let me try again', 'let me try a different approach', 'let me retry',
     or any similar phrase without IMMEDIATELY following it with a materially different
     action block. If you received an error from an action, quote the EXACT error text,

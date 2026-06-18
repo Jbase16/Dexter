@@ -1257,6 +1257,1007 @@ return "typed into UI control: " & targetSummary & linefeed & "app: " & targetAp
     )
 }
 
+// ── execute_ui_select ────────────────────────────────────────────────────────
+
+/// Select one exact option from one visible Accessibility menu-style control.
+///
+/// This is the structured alternative to model-authored menu AppleScript. It
+/// resolves a single control by role/label, opens it with AXPress, then presses a
+/// single exact menu-item option.
+pub async fn execute_ui_select(
+    app_name: Option<&str>,
+    role: Option<&str>,
+    label: &str,
+    option: &str,
+    max_depth: Option<u8>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let role = role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let label = label.trim();
+    let option = option.trim();
+    if label.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "ui_select label must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+    if option.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "ui_select option must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let script = build_ui_select_script(app_name, role, label, option, depth);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_ui_select_script(
+    app_name: &str,
+    role: &str,
+    label: &str,
+    option: &str,
+    max_depth: u8,
+) -> String {
+    let app = escape_applescript_literal(app_name);
+    let role = escape_applescript_literal(role);
+    let label = escape_applescript_literal(label);
+    let option = escape_applescript_literal(option);
+    format!(
+        r#"set requestedAppName to "{app}"
+set requestedRole to "{role}"
+set requestedLabel to "{label}"
+set requestedOption to "{option}"
+set maxDepth to {max_depth}
+set maxRows to 80
+
+on cleanText(rawValue)
+    try
+        set textValue to rawValue as text
+    on error
+        return ""
+    end try
+    set textValue to my replaceText(textValue, return, " ")
+    set textValue to my replaceText(textValue, linefeed, " ")
+    set textValue to my replaceText(textValue, tab, " ")
+    repeat while textValue contains "  "
+        set textValue to my replaceText(textValue, "  ", " ")
+    end repeat
+    if (length of textValue) > 120 then
+        return (text 1 thru 120 of textValue) & "..."
+    end if
+    return textValue
+end cleanText
+
+on replaceText(sourceText, searchText, replacementText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to searchText
+    set textItems to text items of sourceText
+    set AppleScript's text item delimiters to replacementText
+    set joinedText to textItems as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end replaceText
+
+on safeProperty(uiElement, propertyName)
+    try
+        tell application "System Events"
+            if propertyName is "role" then
+                set rawValue to role of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "name" then
+                set rawValue to name of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "description" then
+                set rawValue to description of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "value" then
+                set rawValue to value of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+        end tell
+    end try
+    return ""
+end safeProperty
+
+on isSelectableRole(roleName)
+    if roleName is "" then return false
+    set selectableRoles to {{"AXPopUpButton", "AXMenuButton", "AXComboBox"}}
+    return selectableRoles contains roleName
+end isSelectableRole
+
+on isEnabledControl(uiElement)
+    try
+        tell application "System Events"
+            set rawEnabled to enabled of uiElement
+            if rawEnabled is missing value then return true
+            return rawEnabled as boolean
+        end tell
+    end try
+    return true
+end isEnabledControl
+
+on labelMatches(uiElement, wantedLabel, exactMatch)
+    set candidateLabels to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of candidateLabels to elementName
+    if elementDescription is not "" then set end of candidateLabels to elementDescription
+    if elementValue is not "" then set end of candidateLabels to elementValue
+
+    repeat with candidateLabel in candidateLabels
+        set candidateText to candidateLabel as text
+        ignoring case
+            if exactMatch then
+                if candidateText is wantedLabel then return true
+            else
+                if candidateText contains wantedLabel then return true
+            end if
+        end ignoring
+    end repeat
+    return false
+end labelMatches
+
+on optionMatches(uiElement, wantedOption)
+    set candidateLabels to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of candidateLabels to elementName
+    if elementDescription is not "" then set end of candidateLabels to elementDescription
+    if elementValue is not "" then set end of candidateLabels to elementValue
+
+    repeat with candidateLabel in candidateLabels
+        set candidateText to candidateLabel as text
+        ignoring case
+            if candidateText is wantedOption then return true
+        end ignoring
+    end repeat
+    return false
+end optionMatches
+
+on elementSummary(uiElement)
+    set roleName to my safeProperty(uiElement, "role")
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    set labelParts to {{}}
+    if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
+    if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
+    if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to " | "
+    set labelsText to labelParts as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if labelsText is "" then return roleName
+    return roleName & " | " & labelsText
+end elementSummary
+
+on collectSelectTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        set roleOk to true
+        if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
+        if roleOk and my isSelectableRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectSelectTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectSelectTargets
+
+on collectOptionTargets(uiElement, currentDepth, allowedDepth, wantedOption, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        if roleName is "AXMenuItem" and my optionMatches(childElement, wantedOption) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectOptionTargets(childElement, currentDepth + 1, allowedDepth, wantedOption, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectOptionTargets
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            error "ui select failed: app not running: " & requestedAppName number 1728
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set frontWindowTitle to "(none)"
+    try
+        set targetWindow to front window of targetProcess
+        set frontWindowTitle to my cleanText(name of targetWindow)
+    on error
+        set targetWindow to targetProcess
+        set frontWindowTitle to "(process root)"
+    end try
+end tell
+
+set exactMatches to my collectSelectTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, true, maxRows)
+if (count of exactMatches) is 1 then
+    set targetElement to item 1 of exactMatches
+else if (count of exactMatches) is greater than 1 then
+    error "ui select failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+else
+    set fuzzyMatches to my collectSelectTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
+    if (count of fuzzyMatches) is 0 then
+        error "ui select failed: no matching selectable control for " & quoted form of requestedLabel number 1728
+    else if (count of fuzzyMatches) is greater than 1 then
+        error "ui select failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+    end if
+    set targetElement to item 1 of fuzzyMatches
+end if
+
+if not my isEnabledControl(targetElement) then
+    error "ui select failed: matched control is disabled: " & my elementSummary(targetElement) number 1728
+end if
+
+set targetSummary to my elementSummary(targetElement)
+tell application "System Events"
+    perform action "AXPress" of targetElement
+end tell
+delay 0.2
+
+set optionMatches to my collectOptionTargets(targetElement, 1, 4, requestedOption, maxRows)
+if (count of optionMatches) is 0 then
+    set optionMatches to my collectOptionTargets(targetProcess, 1, 4, requestedOption, maxRows)
+end if
+if (count of optionMatches) is 0 then
+    error "ui select failed: no exact option " & quoted form of requestedOption & " for " & targetSummary number 1728
+else if (count of optionMatches) is greater than 1 then
+    error "ui select failed: ambiguous option " & quoted form of requestedOption & " for " & targetSummary number 1728
+end if
+
+set optionElement to item 1 of optionMatches
+set optionSummary to my elementSummary(optionElement)
+tell application "System Events"
+    try
+        perform action "AXPress" of optionElement
+    on error errMsg number errNum
+        error "ui select failed: could not select option: " & errMsg number errNum
+    end try
+end tell
+return "selected UI option: " & optionSummary & linefeed & "control: " & targetSummary & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle"#
+    )
+}
+
+// ── execute_ui_toggle ────────────────────────────────────────────────────────
+
+/// Ensure one visible toggle-style Accessibility control reaches a desired state.
+///
+/// Unlike `ui_click`, this reads the current state first and only presses when
+/// needed. It verifies the post-press state before reporting success.
+pub async fn execute_ui_toggle(
+    app_name: Option<&str>,
+    role: Option<&str>,
+    label: &str,
+    state: bool,
+    max_depth: Option<u8>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let role = role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let label = label.trim();
+    if label.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "ui_toggle label must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let script = build_ui_toggle_script(app_name, role, label, state, depth);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_ui_toggle_script(
+    app_name: &str,
+    role: &str,
+    label: &str,
+    state: bool,
+    max_depth: u8,
+) -> String {
+    let app = escape_applescript_literal(app_name);
+    let role = escape_applescript_literal(role);
+    let label = escape_applescript_literal(label);
+    let requested_state = if state { "true" } else { "false" };
+    format!(
+        r#"set requestedAppName to "{app}"
+set requestedRole to "{role}"
+set requestedLabel to "{label}"
+set requestedState to {requested_state}
+set maxDepth to {max_depth}
+set maxRows to 80
+
+on cleanText(rawValue)
+    try
+        set textValue to rawValue as text
+    on error
+        return ""
+    end try
+    set textValue to my replaceText(textValue, return, " ")
+    set textValue to my replaceText(textValue, linefeed, " ")
+    set textValue to my replaceText(textValue, tab, " ")
+    repeat while textValue contains "  "
+        set textValue to my replaceText(textValue, "  ", " ")
+    end repeat
+    if (length of textValue) > 120 then
+        return (text 1 thru 120 of textValue) & "..."
+    end if
+    return textValue
+end cleanText
+
+on replaceText(sourceText, searchText, replacementText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to searchText
+    set textItems to text items of sourceText
+    set AppleScript's text item delimiters to replacementText
+    set joinedText to textItems as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end replaceText
+
+on safeProperty(uiElement, propertyName)
+    try
+        tell application "System Events"
+            if propertyName is "role" then
+                set rawValue to role of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "name" then
+                set rawValue to name of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "description" then
+                set rawValue to description of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "value" then
+                set rawValue to value of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+        end tell
+    end try
+    return ""
+end safeProperty
+
+on isToggleRole(roleName)
+    if roleName is "" then return false
+    set toggleRoles to {{"AXCheckBox", "AXSwitch", "AXRadioButton"}}
+    return toggleRoles contains roleName
+end isToggleRole
+
+on isEnabledControl(uiElement)
+    try
+        tell application "System Events"
+            set rawEnabled to enabled of uiElement
+            if rawEnabled is missing value then return true
+            return rawEnabled as boolean
+        end tell
+    end try
+    return true
+end isEnabledControl
+
+on labelMatches(uiElement, wantedLabel, exactMatch)
+    set candidateLabels to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of candidateLabels to elementName
+    if elementDescription is not "" then set end of candidateLabels to elementDescription
+    if elementValue is not "" then set end of candidateLabels to elementValue
+
+    repeat with candidateLabel in candidateLabels
+        set candidateText to candidateLabel as text
+        ignoring case
+            if exactMatch then
+                if candidateText is wantedLabel then return true
+            else
+                if candidateText contains wantedLabel then return true
+            end if
+        end ignoring
+    end repeat
+    return false
+end labelMatches
+
+on toggleState(uiElement)
+    try
+        tell application "System Events"
+            set rawValue to value of uiElement
+        end tell
+    on error
+        error "ui toggle failed: matched control has no readable value" number 1728
+    end try
+    if rawValue is missing value then error "ui toggle failed: matched control value is missing" number 1728
+    if rawValue is true then return true
+    if rawValue is false then return false
+    set textValue to my cleanText(rawValue)
+    if textValue is "1" then return true
+    if textValue is "0" then return false
+    ignoring case
+        if textValue is "true" then return true
+        if textValue is "false" then return false
+        if textValue is "on" then return true
+        if textValue is "off" then return false
+        if textValue is "yes" then return true
+        if textValue is "no" then return false
+    end ignoring
+    error "ui toggle failed: unsupported toggle value: " & quoted form of textValue number 1728
+end toggleState
+
+on stateName(stateValue)
+    if stateValue then return "on"
+    return "off"
+end stateName
+
+on elementSummary(uiElement)
+    set roleName to my safeProperty(uiElement, "role")
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    set labelParts to {{}}
+    if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
+    if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
+    if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to " | "
+    set labelsText to labelParts as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if labelsText is "" then return roleName
+    return roleName & " | " & labelsText
+end elementSummary
+
+on collectToggleTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        set roleOk to true
+        if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
+        if roleOk and my isToggleRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectToggleTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectToggleTargets
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            error "ui toggle failed: app not running: " & requestedAppName number 1728
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set frontWindowTitle to "(none)"
+    try
+        set targetWindow to front window of targetProcess
+        set frontWindowTitle to my cleanText(name of targetWindow)
+    on error
+        set targetWindow to targetProcess
+        set frontWindowTitle to "(process root)"
+    end try
+end tell
+
+set exactMatches to my collectToggleTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, true, maxRows)
+if (count of exactMatches) is 1 then
+    set targetElement to item 1 of exactMatches
+else if (count of exactMatches) is greater than 1 then
+    error "ui toggle failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+else
+    set fuzzyMatches to my collectToggleTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
+    if (count of fuzzyMatches) is 0 then
+        error "ui toggle failed: no matching toggle control for " & quoted form of requestedLabel number 1728
+    else if (count of fuzzyMatches) is greater than 1 then
+        error "ui toggle failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+    end if
+    set targetElement to item 1 of fuzzyMatches
+end if
+
+if not my isEnabledControl(targetElement) then
+    error "ui toggle failed: matched control is disabled: " & my elementSummary(targetElement) number 1728
+end if
+
+set targetSummary to my elementSummary(targetElement)
+set roleName to my safeProperty(targetElement, "role")
+if roleName is "AXRadioButton" and requestedState is false then
+    error "ui toggle failed: cannot turn off a radio button directly: " & targetSummary number 1728
+end if
+
+set initialState to my toggleState(targetElement)
+set changedState to false
+if initialState is not requestedState then
+    tell application "System Events"
+        perform action "AXPress" of targetElement
+    end tell
+    set changedState to true
+    delay 0.2
+end if
+
+set finalState to my toggleState(targetElement)
+if finalState is not requestedState then
+    error "ui toggle failed: final state " & my stateName(finalState) & " did not match requested " & my stateName(requestedState) & " for " & targetSummary number 1728
+end if
+
+return "set UI toggle: " & targetSummary & linefeed & "state: " & my stateName(finalState) & linefeed & "changed: " & (changedState as text) & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle"#
+    )
+}
+
+// ── execute_ui_pick ──────────────────────────────────────────────────────────
+
+/// Select one visible row/item in a list, table, outline, sidebar, or menu-like surface.
+///
+/// This handles the common Accessibility shape where the selectable row has no
+/// direct label but contains a child `AXStaticText` with the visible text.
+pub async fn execute_ui_pick(
+    app_name: Option<&str>,
+    role: Option<&str>,
+    label: &str,
+    container_label: Option<&str>,
+    max_depth: Option<u8>,
+    timeout_secs: u64,
+) -> ExecutionResult {
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let role = role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let label = label.trim();
+    let container_label = container_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    if label.is_empty() {
+        return ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: "ui_pick label must not be empty".to_string(),
+            exit_code: None,
+            duration_ms: 0,
+        };
+    }
+    let depth = max_depth.unwrap_or(3).clamp(1, 5);
+    let script = build_ui_pick_script(app_name, role, label, container_label, depth);
+    execute_applescript(&script, timeout_secs).await
+}
+
+fn build_ui_pick_script(
+    app_name: &str,
+    role: &str,
+    label: &str,
+    container_label: &str,
+    max_depth: u8,
+) -> String {
+    let app = escape_applescript_literal(app_name);
+    let role = escape_applescript_literal(role);
+    let label = escape_applescript_literal(label);
+    let container_label = escape_applescript_literal(container_label);
+    format!(
+        r#"set requestedAppName to "{app}"
+set requestedRole to "{role}"
+set requestedLabel to "{label}"
+set requestedContainerLabel to "{container_label}"
+set maxDepth to {max_depth}
+set maxRows to 120
+
+on cleanText(rawValue)
+    try
+        set textValue to rawValue as text
+    on error
+        return ""
+    end try
+    set textValue to my replaceText(textValue, return, " ")
+    set textValue to my replaceText(textValue, linefeed, " ")
+    set textValue to my replaceText(textValue, tab, " ")
+    repeat while textValue contains "  "
+        set textValue to my replaceText(textValue, "  ", " ")
+    end repeat
+    if (length of textValue) > 120 then
+        return (text 1 thru 120 of textValue) & "..."
+    end if
+    return textValue
+end cleanText
+
+on replaceText(sourceText, searchText, replacementText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to searchText
+    set textItems to text items of sourceText
+    set AppleScript's text item delimiters to replacementText
+    set joinedText to textItems as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end replaceText
+
+on safeProperty(uiElement, propertyName)
+    try
+        tell application "System Events"
+            if propertyName is "role" then
+                set rawValue to role of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "name" then
+                set rawValue to name of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "description" then
+                set rawValue to description of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+            if propertyName is "value" then
+                set rawValue to value of uiElement
+                if rawValue is missing value then return ""
+                return my cleanText(rawValue)
+            end if
+        end tell
+    end try
+    return ""
+end safeProperty
+
+on isPickableRole(roleName)
+    if roleName is "" then return false
+    set pickableRoles to {{"AXRow", "AXCell", "AXOutlineRow", "AXMenuItem", "AXStaticText"}}
+    return pickableRoles contains roleName
+end isPickableRole
+
+on isContainerRole(roleName)
+    if roleName is "" then return false
+    set containerRoles to {{"AXTable", "AXOutline", "AXList", "AXScrollArea", "AXGroup", "AXSplitGroup", "AXBrowser"}}
+    return containerRoles contains roleName
+end isContainerRole
+
+on isEnabledControl(uiElement)
+    try
+        tell application "System Events"
+            set rawEnabled to enabled of uiElement
+            if rawEnabled is missing value then return true
+            return rawEnabled as boolean
+        end tell
+    end try
+    return true
+end isEnabledControl
+
+on labelMatches(uiElement, wantedLabel, exactMatch)
+    set candidateLabels to my elementLabels(uiElement, 1)
+    repeat with candidateLabel in candidateLabels
+        set candidateText to candidateLabel as text
+        ignoring case
+            if exactMatch then
+                if candidateText is wantedLabel then return true
+            else
+                if candidateText contains wantedLabel then return true
+            end if
+        end ignoring
+    end repeat
+    return false
+end labelMatches
+
+on elementLabels(uiElement, descendantDepth)
+    set candidateLabels to {{}}
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    if elementName is not "" then set end of candidateLabels to elementName
+    if elementDescription is not "" then set end of candidateLabels to elementDescription
+    if elementValue is not "" then set end of candidateLabels to elementValue
+
+    if descendantDepth <= 0 then return candidateLabels
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return candidateLabels
+    end try
+    repeat with childElement in childElements
+        set childLabels to my elementLabels(childElement, descendantDepth - 1)
+        repeat with childLabel in childLabels
+            set end of candidateLabels to childLabel as text
+        end repeat
+    end repeat
+    return candidateLabels
+end elementLabels
+
+on elementSummary(uiElement)
+    set roleName to my safeProperty(uiElement, "role")
+    set elementName to my safeProperty(uiElement, "name")
+    set elementDescription to my safeProperty(uiElement, "description")
+    set elementValue to my safeProperty(uiElement, "value")
+    set labelParts to {{}}
+    if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
+    if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
+    if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to " | "
+    set labelsText to labelParts as text
+    set AppleScript's text item delimiters to oldDelimiters
+    if labelsText is "" then return roleName
+    return roleName & " | " & labelsText
+end elementSummary
+
+on collectContainerTargets(uiElement, currentDepth, allowedDepth, wantedLabel, exactMatch, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        if my isContainerRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectContainerTargets(childElement, currentDepth + 1, allowedDepth, wantedLabel, exactMatch, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectContainerTargets
+
+on collectPickTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+    set matches to {{}}
+    if currentDepth > allowedDepth then return matches
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return matches
+    end try
+    repeat with childElement in childElements
+        set roleName to my safeProperty(childElement, "role")
+        set roleOk to true
+        if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
+        if roleOk and my isPickableRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
+            set end of matches to childElement
+        end if
+        if currentDepth < allowedDepth then
+            set nestedMatches to my collectPickTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
+            repeat with nestedMatch in nestedMatches
+                set end of matches to nestedMatch
+            end repeat
+        end if
+        if (count of matches) is greater than rowLimit then exit repeat
+    end repeat
+    return matches
+end collectPickTargets
+
+tell application "System Events"
+    if requestedAppName is "" then
+        set targetProcess to first application process whose frontmost is true
+    else
+        set matchingProcesses to application processes whose name is requestedAppName
+        if (count of matchingProcesses) is 0 then
+            error "ui pick failed: app not running: " & requestedAppName number 1728
+        end if
+        set targetProcess to item 1 of matchingProcesses
+    end if
+
+    set targetAppName to name of targetProcess as text
+    set frontWindowTitle to "(none)"
+    try
+        set targetWindow to front window of targetProcess
+        set frontWindowTitle to my cleanText(name of targetWindow)
+    on error
+        set targetWindow to targetProcess
+        set frontWindowTitle to "(process root)"
+    end try
+end tell
+
+set searchRoot to targetWindow
+if requestedContainerLabel is not "" then
+    set exactContainers to my collectContainerTargets(targetWindow, 1, maxDepth, requestedContainerLabel, true, maxRows)
+    if (count of exactContainers) is 1 then
+        set searchRoot to item 1 of exactContainers
+    else if (count of exactContainers) is greater than 1 then
+        error "ui pick failed: ambiguous exact container match for " & quoted form of requestedContainerLabel number 1728
+    else
+        set fuzzyContainers to my collectContainerTargets(targetWindow, 1, maxDepth, requestedContainerLabel, false, maxRows)
+        if (count of fuzzyContainers) is 0 then
+            error "ui pick failed: no matching container for " & quoted form of requestedContainerLabel number 1728
+        else if (count of fuzzyContainers) is greater than 1 then
+            error "ui pick failed: ambiguous partial container match for " & quoted form of requestedContainerLabel number 1728
+        end if
+        set searchRoot to item 1 of fuzzyContainers
+    end if
+end if
+
+set exactMatches to my collectPickTargets(searchRoot, 1, maxDepth, requestedRole, requestedLabel, true, maxRows)
+if (count of exactMatches) is 1 then
+    set targetElement to item 1 of exactMatches
+else if (count of exactMatches) is greater than 1 then
+    error "ui pick failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+else
+    set fuzzyMatches to my collectPickTargets(searchRoot, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
+    if (count of fuzzyMatches) is 0 then
+        error "ui pick failed: no matching visible item for " & quoted form of requestedLabel number 1728
+    else if (count of fuzzyMatches) is greater than 1 then
+        error "ui pick failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+    end if
+    set targetElement to item 1 of fuzzyMatches
+end if
+
+if not my isEnabledControl(targetElement) then
+    error "ui pick failed: matched item is disabled: " & my elementSummary(targetElement) number 1728
+end if
+
+set targetSummary to my elementSummary(targetElement)
+set targetRoleName to my safeProperty(targetElement, "role")
+set verifiedState to "unknown"
+tell application "System Events"
+    try
+        perform action "AXPress" of targetElement
+    on error
+        try
+            perform action "AXSelect" of targetElement
+        on error errMsg number errNum
+            error "ui pick failed: could not select item: " & errMsg number errNum
+        end try
+    end try
+end tell
+delay 0.2
+
+set selectedWasReadable to false
+set selectedWasTrue to false
+try
+    tell application "System Events"
+        set rawSelected to selected of targetElement
+    end tell
+    if rawSelected is not missing value then
+        set selectedWasReadable to true
+        set selectedWasTrue to rawSelected as boolean
+    end if
+end try
+
+if selectedWasReadable and not selectedWasTrue then
+    tell application "System Events"
+        try
+            perform action "AXSelect" of targetElement
+        end try
+    end tell
+    delay 0.2
+    try
+        tell application "System Events"
+            set rawSelected to selected of targetElement
+        end tell
+        if rawSelected is not missing value then
+            set selectedWasReadable to true
+            set selectedWasTrue to rawSelected as boolean
+        end if
+    end try
+end if
+
+if selectedWasReadable and not selectedWasTrue then
+    tell application "System Events"
+        try
+            set selected of targetElement to true
+        end try
+    end tell
+    delay 0.2
+    try
+        tell application "System Events"
+            set rawSelected to selected of targetElement
+        end tell
+        if rawSelected is not missing value then
+            set selectedWasReadable to true
+            set selectedWasTrue to rawSelected as boolean
+        end if
+    end try
+end if
+
+if selectedWasReadable then
+    if selectedWasTrue then
+        set verifiedState to "true"
+    else if targetRoleName is "AXMenuItem" then
+        set verifiedState to "not_applicable"
+    else
+        error "ui pick failed: selected state remained false for " & targetSummary number 1728
+    end if
+end if
+
+return "picked UI item: " & targetSummary & linefeed & "verified: " & verifiedState & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle"#
+    )
+}
+
 fn escape_applescript_literal(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1633,6 +2634,135 @@ mod tests {
 
         assert!(!result.success);
         assert_eq!(result.error, "ui_type requires a role or label");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn build_ui_select_script_escapes_literals_and_uses_axpress() {
+        let script = build_ui_select_script(
+            "Bad \" App\\Name\nNew",
+            "AXPopUpButton",
+            "Theme \"Choice\"",
+            "Dark \"Mode\"",
+            2,
+        );
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(
+            script.contains("set requestedLabel to \"Theme \\\"Choice\\\"\""),
+            "label literal must be escaped: {script}"
+        );
+        assert!(
+            script.contains("set requestedOption to \"Dark \\\"Mode\\\"\""),
+            "option literal must be escaped: {script}"
+        );
+        assert!(script.contains("AXPopUpButton"));
+        assert!(script.contains("AXMenuItem"));
+        assert!(script.contains("perform action \"AXPress\" of targetElement"));
+        assert!(script.contains("perform action \"AXPress\" of optionElement"));
+        assert!(!script.contains("keystroke"));
+        assert!(!script.contains("click "));
+    }
+
+    #[tokio::test]
+    async fn execute_ui_select_blank_label_fails_closed() {
+        let result =
+            execute_ui_select(None, Some("AXPopUpButton"), "   ", "Dark", Some(2), 1).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "ui_select label must not be empty");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn execute_ui_select_blank_option_fails_closed() {
+        let result =
+            execute_ui_select(None, Some("AXPopUpButton"), "Theme", "   ", Some(2), 1).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "ui_select option must not be empty");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn build_ui_toggle_script_escapes_literals_and_verifies_state() {
+        let script = build_ui_toggle_script(
+            "Bad \" App\\Name\nNew",
+            "AXCheckBox",
+            "Enable \"Magic\"",
+            true,
+            2,
+        );
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(
+            script.contains("set requestedLabel to \"Enable \\\"Magic\\\"\""),
+            "label literal must be escaped: {script}"
+        );
+        assert!(script.contains("set requestedState to true"));
+        assert!(script.contains("AXCheckBox"));
+        assert!(script.contains("AXSwitch"));
+        assert!(script.contains("AXRadioButton"));
+        assert!(script.contains("perform action \"AXPress\" of targetElement"));
+        assert!(script.contains("final state"));
+        assert!(script.contains("cannot turn off a radio button directly"));
+        assert!(!script.contains("keystroke"));
+        assert!(!script.contains("click "));
+    }
+
+    #[tokio::test]
+    async fn execute_ui_toggle_blank_label_fails_closed() {
+        let result = execute_ui_toggle(None, Some("AXCheckBox"), "   ", true, Some(2), 1).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "ui_toggle label must not be empty");
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn build_ui_pick_script_escapes_literals_and_selects_visible_item() {
+        let script = build_ui_pick_script(
+            "Bad \" App\\Name\nNew",
+            "AXRow",
+            "Downloads \"Folder\"",
+            "Finder \"Sidebar\"",
+            3,
+        );
+        assert!(
+            script.contains("set requestedAppName to \"Bad \\\" App\\\\Name New\""),
+            "app literal must be escaped and line-normalized: {script}"
+        );
+        assert!(
+            script.contains("set requestedLabel to \"Downloads \\\"Folder\\\"\""),
+            "label literal must be escaped: {script}"
+        );
+        assert!(
+            script.contains("set requestedContainerLabel to \"Finder \\\"Sidebar\\\"\""),
+            "container label literal must be escaped: {script}"
+        );
+        assert!(script.contains("AXRow"));
+        assert!(script.contains("AXCell"));
+        assert!(script.contains("AXStaticText"));
+        assert!(script.contains("collectContainerTargets"));
+        assert!(script.contains("perform action \"AXPress\" of targetElement"));
+        assert!(script.contains("perform action \"AXSelect\" of targetElement"));
+        assert!(script.contains("set selected of targetElement to true"));
+        assert!(script.contains("set verifiedState to \"not_applicable\""));
+        assert!(script.contains("selected state remained false"));
+        assert!(!script.contains("keystroke"));
+        assert!(!script.contains("click "));
+    }
+
+    #[tokio::test]
+    async fn execute_ui_pick_blank_label_fails_closed() {
+        let result = execute_ui_pick(None, Some("AXRow"), "   ", None, Some(3), 1).await;
+
+        assert!(!result.success);
+        assert_eq!(result.error, "ui_pick label must not be empty");
         assert_eq!(result.exit_code, None);
     }
 

@@ -291,6 +291,9 @@ fn describe_audit_spec(action_type: &str, spec: &serde_json::Value) -> String {
         "ui_snapshot" => describe_ui_snapshot_audit_spec(spec),
         "ui_click" => describe_ui_click_audit_spec(spec),
         "ui_type" => describe_ui_type_audit_spec(spec),
+        "ui_select" => describe_ui_select_audit_spec(spec),
+        "ui_toggle" => describe_ui_toggle_audit_spec(spec),
+        "ui_pick" => describe_ui_pick_audit_spec(spec),
         "browser" => describe_browser_audit_spec(spec),
         "shortcut" => json_string(spec, "name")
             .map(|name| format!("Run Shortcut: {name}"))
@@ -363,6 +366,43 @@ fn describe_ui_type_audit_spec(spec: &serde_json::Value) -> String {
         (Some(role), None) => format!("Type UI: {app_name} {role}"),
         (None, Some(label)) => format!("Type UI: {app_name} \"{label}\""),
         (None, None) => format!("Type UI: {app_name} control"),
+    }
+}
+
+fn describe_ui_select_audit_spec(spec: &serde_json::Value) -> String {
+    let app_name = json_string(spec, "app_name").unwrap_or("frontmost app");
+    let label = json_string(spec, "label").unwrap_or("control");
+    let option = json_string(spec, "option").unwrap_or("option");
+    match json_string(spec, "role") {
+        Some(role) => format!("Select UI: {app_name} {role} \"{label}\" -> \"{option}\""),
+        None => format!("Select UI: {app_name} \"{label}\" -> \"{option}\""),
+    }
+}
+
+fn describe_ui_toggle_audit_spec(spec: &serde_json::Value) -> String {
+    let app_name = json_string(spec, "app_name").unwrap_or("frontmost app");
+    let label = json_string(spec, "label").unwrap_or("control");
+    let state = match spec.get("state").and_then(|value| value.as_bool()) {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "state",
+    };
+    match json_string(spec, "role") {
+        Some(role) => format!("Toggle UI: {app_name} {role} \"{label}\" -> {state}"),
+        None => format!("Toggle UI: {app_name} \"{label}\" -> {state}"),
+    }
+}
+
+fn describe_ui_pick_audit_spec(spec: &serde_json::Value) -> String {
+    let app_name = json_string(spec, "app_name").unwrap_or("frontmost app");
+    let label = json_string(spec, "label").unwrap_or("item");
+    let item = match json_string(spec, "role") {
+        Some(role) => format!("{role} \"{label}\""),
+        None => format!("\"{label}\""),
+    };
+    match json_string(spec, "container_label") {
+        Some(container) => format!("Pick UI: {app_name} \"{container}\" -> {item}"),
+        None => format!("Pick UI: {app_name} {item}"),
     }
 }
 
@@ -603,6 +643,83 @@ mod tests {
 
         assert_eq!(role_only, "Type UI: TextEdit AXTextArea");
         assert_eq!(named, "Type UI: Safari AXTextField \"Search\"");
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_ui_select_target() {
+        let frontmost = describe_audit_spec(
+            "ui_select",
+            &serde_json::json!({
+                "label": "Theme",
+                "option": "Dark",
+            }),
+        );
+        let named = describe_audit_spec(
+            "ui_select",
+            &serde_json::json!({
+                "app_name": "System Settings",
+                "role": "AXPopUpButton",
+                "label": "Appearance",
+                "option": "Dark",
+            }),
+        );
+
+        assert_eq!(frontmost, "Select UI: frontmost app \"Theme\" -> \"Dark\"");
+        assert_eq!(
+            named,
+            "Select UI: System Settings AXPopUpButton \"Appearance\" -> \"Dark\""
+        );
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_ui_toggle_target() {
+        let frontmost = describe_audit_spec(
+            "ui_toggle",
+            &serde_json::json!({
+                "label": "Enable previews",
+                "state": true,
+            }),
+        );
+        let named = describe_audit_spec(
+            "ui_toggle",
+            &serde_json::json!({
+                "app_name": "System Settings",
+                "role": "AXCheckBox",
+                "label": "Show previews",
+                "state": false,
+            }),
+        );
+
+        assert_eq!(
+            frontmost,
+            "Toggle UI: frontmost app \"Enable previews\" -> on"
+        );
+        assert_eq!(
+            named,
+            "Toggle UI: System Settings AXCheckBox \"Show previews\" -> off"
+        );
+    }
+
+    #[test]
+    fn describe_audit_spec_formats_ui_pick_target() {
+        let frontmost = describe_audit_spec(
+            "ui_pick",
+            &serde_json::json!({
+                "label": "Downloads",
+            }),
+        );
+        let named = describe_audit_spec(
+            "ui_pick",
+            &serde_json::json!({
+                "app_name": "Finder",
+                "role": "AXRow",
+                "label": "Downloads",
+                "container_label": "Sidebar",
+            }),
+        );
+
+        assert_eq!(frontmost, "Pick UI: frontmost app \"Downloads\"");
+        assert_eq!(named, "Pick UI: Finder \"Sidebar\" -> AXRow \"Downloads\"");
     }
 
     #[test]

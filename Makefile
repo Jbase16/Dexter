@@ -27,7 +27,7 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -340,6 +340,33 @@ live-smoke-ui-type: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-type-smoke.sh
 
+## live-smoke-ui-select: verify structured UI option selection executes and audits
+##
+## Drives an exact synthetic `ui_select` ActionSpec against a temporary AppKit
+## pop-up fixture. This proves Dexter can choose one unambiguous visible option
+## without model-written raw AppleScript menu scripts.
+live-smoke-ui-select: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-select-smoke.sh
+
+## live-smoke-ui-toggle: verify structured UI toggle state setting executes and audits
+##
+## Drives an exact synthetic `ui_toggle` ActionSpec against a temporary AppKit
+## checkbox fixture. This proves Dexter can set one unambiguous visible toggle
+## to a requested final state without blindly pressing it.
+live-smoke-ui-toggle: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-toggle-smoke.sh
+
+## live-smoke-ui-pick: verify structured UI row/item selection executes and audits
+##
+## Drives an exact synthetic `ui_pick` ActionSpec against a temporary AppKit
+## table fixture. This proves Dexter can select one unambiguous visible row/item
+## without model-written raw AppleScript selection scripts.
+live-smoke-ui-pick: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-pick-smoke.sh
+
 ## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
@@ -521,6 +548,9 @@ live-smoke-all:
 	$(MAKE) live-smoke-ui-snapshot
 	$(MAKE) live-smoke-ui-click
 	$(MAKE) live-smoke-ui-type
+	$(MAKE) live-smoke-ui-select
+	$(MAKE) live-smoke-ui-toggle
+	$(MAKE) live-smoke-ui-pick
 	$(MAKE) live-smoke-cli
 	$(MAKE) live-smoke-action-matrix
 	$(MAKE) live-smoke-action-receipts
@@ -592,6 +622,9 @@ live-smoke-action-safety:
 		live-smoke-ui-snapshot \
 		live-smoke-ui-click \
 		live-smoke-ui-type \
+		live-smoke-ui-select \
+		live-smoke-ui-toggle \
+		live-smoke-ui-pick \
 		live-smoke-action-matrix \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
@@ -627,6 +660,9 @@ live-smoke-acceptance:
 		live-smoke-ui-snapshot \
 		live-smoke-ui-click \
 		live-smoke-ui-type \
+		live-smoke-ui-select \
+		live-smoke-ui-toggle \
+		live-smoke-ui-pick \
 		live-smoke-action-matrix \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
