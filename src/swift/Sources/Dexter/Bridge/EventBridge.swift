@@ -148,6 +148,7 @@ final class EventBridge: @unchecked Sendable {
     // ── Hotkey CGEventTap (main thread only — see threading contract) ─────────
     private var hotkeyTap:           CFMachPort?
     private var hotkeyRunLoopSource: CFRunLoopSource?
+    private var startupContextRefreshItems: [DispatchWorkItem] = []
 
     // Hotkey detection parameters — initialized to Phase 16 hardcoded defaults.
     // Updated from ConfigSync (Rust → Swift) at session open via updateHotkeyConfig(_:).
@@ -194,13 +195,10 @@ final class EventBridge: @unchecked Sendable {
         startHotkeyTap()
         startClipboardPolling()
 
-        if AXIsProcessTrustedWithOptions(nil) {
-            // Observe the currently frontmost app immediately on session start.
-            if let frontmost = NSWorkspace.shared.frontmostApplication {
-                startAXObservation(for: frontmost.processIdentifier)
-                emitAppFocused(app: frontmost, queryElement: true)
-            }
-        } else {
+        emitCurrentFrontmostAppContext()
+        scheduleStartupContextRefresh()
+
+        if !AXIsProcessTrustedWithOptions(nil) {
             print("[EventBridge] AX permission not granted — element observation disabled")
         }
     }
@@ -241,6 +239,30 @@ final class EventBridge: @unchecked Sendable {
         }
 
         workspaceTokens = [activated, deactivated]
+    }
+
+    private func emitCurrentFrontmostAppContext() {
+        let axTrusted = AXIsProcessTrustedWithOptions(nil)
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return }
+
+        if axTrusted {
+            startAXObservation(for: frontmost.processIdentifier)
+        }
+        // Always emit app/window context. AX permission only gates the focused
+        // element details; app identity and CGWindow snapshots still work and
+        // are enough for Dexter to know which window is in front.
+        emitAppFocused(app: frontmost, queryElement: axTrusted)
+    }
+
+    private func scheduleStartupContextRefresh() {
+        startupContextRefreshItems.forEach { $0.cancel() }
+        startupContextRefreshItems = [0.25, 1.0].map { delay in
+            let item = DispatchWorkItem { [weak self] in
+                self?.emitCurrentFrontmostAppContext()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            return item
+        }
     }
 
     // ── Screen lock observers ─────────────────────────────────────────────────
@@ -402,6 +424,8 @@ final class EventBridge: @unchecked Sendable {
     private func performStop() {
         debounceWorkItem?.cancel()
         debounceWorkItem = nil
+        startupContextRefreshItems.forEach { $0.cancel() }
+        startupContextRefreshItems = []
 
         stopClipboardPolling()
         stopHotkeyTap()

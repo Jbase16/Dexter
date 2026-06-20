@@ -34,6 +34,7 @@ scraper      = "0.22"                                        # HTML5 parsing for
 base64       = "0.22"                                        # PNG → base64 encoding for Ollama vision API (Phase 20)
 regex        = "1"                                           # Implicit fact extraction patterns in memory/extractor.rs (Phase 22)
 libc         = "0.2"                                         # statvfs disk-space diagnostics for daemon health/doctor
+blake3       = "1"                                           # Stable context fingerprints for diagnostics and replay ledgers
 # Phase 38: dexter-cli (src/bin/dexter-cli.rs) needs the same UDS-over-gRPC
 # connector pattern as the integration tests. Promoted from dev-dependencies
 # so the binary can be built via `cargo build --bin dexter-cli` (release-mode).

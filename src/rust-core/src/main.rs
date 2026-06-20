@@ -5,6 +5,7 @@ mod ambient;
 mod browser;
 mod config;
 mod constants;
+mod context;
 mod context_observer;
 mod diagnostics;
 mod humor;

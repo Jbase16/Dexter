@@ -52,6 +52,15 @@ use crate::{
         PREFILL_DEBOUNCE_SECS, PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE,
         RETRIEVAL_ACKNOWLEDGMENT, SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
     },
+    context::{
+        diagnostics::CompiledContextDiagnostics,
+        turn_record::{TurnCloseReason, TurnDispatchInput, TurnRecordAggregator},
+    },
+    context::{
+        CandidateFeatures, CandidateRepresentation, ContextCandidate, ContextCompiler,
+        ContextCompilerConfig, ContextInjectionTarget, ContextPriority, ContextRiskClass,
+        ContextSourceKind, RepresentationKind, RepresentationSelectionPolicy, TaskClass,
+    },
     context_observer::{ContextObserver, ContextSnapshot},
     inference::{
         engine::{GenerationRequest, InferenceEngine},
@@ -97,6 +106,14 @@ const BRIDGING_PHRASES: &[&str] = &[
 /// image attachment, barge-in cancellation target), use [`is_tool_result_content`] to skip
 /// over synthetic injections and land on the operator's actual question.
 const TOOL_RESULT_PREFIXES: &[&str] = &["[Retrieved", "[Action result", "[Action FAILED"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexicalReferenceTarget {
+    Clipboard,
+    FocusedElement,
+    Shell,
+    Unknown,
+}
 
 /// Returns `true` if `content` begins with any prefix in [`TOOL_RESULT_PREFIXES`].
 ///
@@ -761,6 +778,8 @@ pub struct CoreOrchestrator {
     /// to resolve `ModelId` → Ollama model tag via `ModelId::ollama_name(&model_config)`.
     model_config: ModelConfig,
     session_mgr: SessionStateManager,
+    turn_records: TurnRecordAggregator,
+    latest_context_diagnostics: Option<CompiledContextDiagnostics>,
     context_observer: ContextObserver, // Phase 7 — machine context aggregator
     shared: SharedDaemonState,         // Daemon-lifetime shared status/context state
     action_engine: ActionEngine,       // Phase 8 — system action execution
@@ -1013,6 +1032,8 @@ impl CoreOrchestrator {
             model_config: cfg.models.clone(),
             residency_mode: cfg.residency.mode,
             session_mgr,
+            turn_records: TurnRecordAggregator::new(&cfg.core.state_dir),
+            latest_context_diagnostics: None,
             context_observer: ContextObserver::new(),
             shared: shared.clone(),
             // Phase 38c: ActionEngine receives the shared BrowserCoordinator clone
@@ -1564,6 +1585,13 @@ impl CoreOrchestrator {
         // for an aborted generation — leaving PRIMARY cold for the next chat
         // turn after every HEAVY barge-in.
         if was_in_flight {
+            if let Err(e) = self.turn_records.close_all_open(TurnCloseReason::BargeIn) {
+                warn!(
+                    session = %self.session_id,
+                    error = %e,
+                    "Context turn record close-on-barge-in failed"
+                );
+            }
             self.maybe_rewarm_primary(true, &trace_id);
         }
         match self.current_state {
@@ -1795,6 +1823,30 @@ impl CoreOrchestrator {
         }
 
         if result.cancelled {
+            if let Err(e) = self.turn_records.attach_generation(
+                &result.trace_id,
+                &result.telemetry,
+                &result.full_response,
+                None,
+            ) {
+                debug!(
+                    session = %self.session_id,
+                    trace_id = %result.trace_id,
+                    error = %e,
+                    "Context turn record cancelled generation attachment skipped"
+                );
+            }
+            if let Err(e) = self
+                .turn_records
+                .close_turn(&result.trace_id, TurnCloseReason::BargeIn)
+            {
+                debug!(
+                    session = %self.session_id,
+                    trace_id = %result.trace_id,
+                    error = %e,
+                    "Context turn record cancelled close skipped"
+                );
+            }
             info!(
                 session  = %self.session_id,
                 trace_id = %result.trace_id,
@@ -1803,6 +1855,7 @@ impl CoreOrchestrator {
             return Ok(());
         }
 
+        let telemetry = result.telemetry.clone();
         let mut full_response = result.full_response;
         let intercepted_q = result.intercepted_q;
         let tts_was_active = result.tts_was_active;
@@ -1915,6 +1968,19 @@ impl CoreOrchestrator {
 
         // 7c. Scan the full response for an embedded action block.
         let (display_text, action_spec) = extract_action_block(&full_response);
+        if let Err(e) = self.turn_records.attach_generation(
+            &trace_id,
+            &telemetry,
+            &full_response,
+            action_spec.as_ref(),
+        ) {
+            debug!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %e,
+                "Context turn record generation attachment skipped"
+            );
+        }
         let record_text = if display_text.is_empty() {
             &full_response
         } else {
@@ -2706,6 +2772,17 @@ impl CoreOrchestrator {
         }
 
         if !action_is_pending && !action_dispatched && !tts_was_active {
+            if let Err(e) = self
+                .turn_records
+                .close_turn(&trace_id, TurnCloseReason::AnsweredNoAction)
+            {
+                debug!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %e,
+                    "Context turn record answered close skipped"
+                );
+            }
             self.send_state(EntityState::Idle, &trace_id).await?;
         }
 
@@ -2854,6 +2931,16 @@ impl CoreOrchestrator {
         // is wasted work. Ollama's keep_alive TTL governs eviction after exit
         // anyway.
         let _ = self.abort_active_generation();
+        if let Err(e) = self
+            .turn_records
+            .close_all_open(TurnCloseReason::DaemonShutdown)
+        {
+            warn!(
+                session = %self.session_id,
+                error = %e,
+                "Context turn record shutdown close failed"
+            );
+        }
 
         // Phase 38c: do NOT shut down voice or browser here — they're shared
         // across sessions and owned by `CoreService`. Daemon shutdown is the
@@ -4000,6 +4087,27 @@ impl CoreOrchestrator {
             );
         }
 
+        if let Some(context_diagnostics) = self.latest_context_diagnostics.clone() {
+            let dispatch_input = TurnDispatchInput {
+                session_id: self.session_id.clone(),
+                trace_id: trace_id.clone(),
+                turn_id: trace_id.clone(),
+                task_class: self.infer_context_task_class(&content),
+                route_category: Some(format!("{:?}", decision.category)),
+                model: Some(model_name.clone()),
+                user_text: content.clone(),
+                context_diagnostics,
+            };
+            if let Err(e) = self.turn_records.start_turn(dispatch_input) {
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %e,
+                    "Context turn record start failed"
+                );
+            }
+        }
+
         self.generation_handle = Some(tokio::spawn(run_generation_background(
             engine,
             tx_bg,
@@ -4647,6 +4755,19 @@ impl CoreOrchestrator {
             .as_ref()
             .map(|metadata| metadata.category)
             .unwrap_or("destructive");
+        if let Err(e) = self.turn_records.attach_action_result(
+            trace_id,
+            action_type,
+            Some(action_category),
+            &outcome,
+        ) {
+            debug!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %e,
+                "Context turn record approved action attachment skipped"
+            );
+        }
 
         // Speak a brief result to the operator and, when TTS is available, let
         // AUDIO_PLAYBACK_COMPLETE drive the IDLE transition (same as regular TTS).
@@ -4732,6 +4853,21 @@ impl CoreOrchestrator {
         &mut self,
         result: ActionResult,
     ) -> Result<(), OrchestratorError> {
+        if let Err(e) = self.turn_records.attach_action_result(
+            &result.trace_id,
+            &result.action_type,
+            Some(&result.category),
+            &result.outcome,
+        ) {
+            debug!(
+                session = %self.session_id,
+                trace_id = %result.trace_id,
+                action_id = %result.action_id,
+                error = %e,
+                "Context turn record action attachment skipped"
+            );
+        }
+
         // Phase 38 / Codex finding [10]: action completed naturally — drop its
         // tracked JoinHandle from the in-flight map. A subsequent cancel won't
         // try to abort a finished task. Action handles for unknown interactions
@@ -5016,6 +5152,289 @@ impl CoreOrchestrator {
 
     // ── Phase 19 helpers ──────────────────────────────────────────────────────
 
+    fn build_context_candidates(
+        &self,
+        query_hint: Option<&str>,
+        comedy_mode_active: bool,
+    ) -> Vec<ContextCandidate> {
+        let query = query_hint.unwrap_or_default();
+        let query_lower = query.to_lowercase();
+        let task_class = self.infer_context_task_class(query);
+        let indexical_target = self.infer_indexical_reference_target(&query_lower);
+        let mut candidates = Vec::new();
+
+        if let Some(summary) = self.context_observer.context_summary() {
+            let fingerprint = crate::context::representation::fingerprint(&summary);
+            let app_bundle_id = self.context_observer.snapshot().app_bundle_id.clone();
+            let mut features = CandidateFeatures {
+                source_weight: 80.0,
+                fresh: true,
+                recency_boost: 12.0,
+                ..CandidateFeatures::default()
+            };
+            if query_lower.contains("screen")
+                || query_lower.contains("window")
+                || query_lower.contains("app")
+                || query_lower.contains("this")
+                || query_lower.contains("that")
+            {
+                features.user_referenced = true;
+                features.task_affinity = 18.0;
+            }
+
+            candidates.push(
+                ContextCandidate::new(
+                    "focused_app_context",
+                    ContextSourceKind::FocusedApp,
+                    ContextInjectionTarget::SystemMessage,
+                    ContextPriority::High,
+                    ContextRiskClass::Public,
+                    fingerprint,
+                    features,
+                    vec![CandidateRepresentation::new(
+                        RepresentationKind::KeyValue,
+                        format!("Context: {summary}"),
+                        1.0,
+                    )],
+                )
+                .with_app_bundle_id(app_bundle_id)
+                .with_task_class(Some(task_class))
+                .with_representation_policy(
+                    RepresentationSelectionPolicy::PreferHighestUtilityThatFits,
+                ),
+            );
+        }
+
+        if comedy_mode_active {
+            debug!(
+                session = %self.session_id,
+                "Comedy mode active - skipping clipboard and shell context candidates"
+            );
+            return candidates;
+        }
+
+        let user_references_clipboard = indexical_target == IndexicalReferenceTarget::Clipboard;
+        let clipboard_is_fresh = self
+            .context_observer
+            .snapshot()
+            .clipboard_changed_at
+            .map(|t| {
+                (chrono::Utc::now() - t).num_seconds() < crate::constants::CLIPBOARD_RECENCY_SECS
+            })
+            .unwrap_or(false);
+
+        if let Some(raw_clip) = self.context_observer.clipboard_summary() {
+            if user_references_clipboard || clipboard_is_fresh {
+                let fingerprint = crate::context::representation::fingerprint(raw_clip);
+                let mut features = CandidateFeatures {
+                    source_weight: 48.0,
+                    fresh: clipboard_is_fresh,
+                    user_referenced: user_references_clipboard,
+                    recency_boost: if clipboard_is_fresh { 20.0 } else { 0.0 },
+                    task_affinity: if task_class == TaskClass::ClipboardReference {
+                        40.0
+                    } else {
+                        0.0
+                    },
+                    ..CandidateFeatures::default()
+                };
+                if raw_clip.contains("error") || raw_clip.contains("failed") {
+                    features.error_present = true;
+                }
+
+                let representations = crate::context::representation::clipboard_representations(
+                    raw_clip,
+                    user_references_clipboard,
+                )
+                .into_iter()
+                .map(|r| {
+                    CandidateRepresentation::new(
+                        r.kind,
+                        format!("[Env · clipboard: {}]", r.payload),
+                        r.utility_multiplier,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+                candidates.push(
+                    ContextCandidate::new(
+                        "clipboard_context",
+                        ContextSourceKind::Clipboard,
+                        ContextInjectionTarget::UserTurnPrefix,
+                        if user_references_clipboard {
+                            ContextPriority::High
+                        } else {
+                            ContextPriority::Normal
+                        },
+                        ContextRiskClass::OperatorPrivate,
+                        fingerprint,
+                        features,
+                        representations,
+                    )
+                    .with_task_class(Some(task_class))
+                    .with_representation_policy(if user_references_clipboard {
+                        RepresentationSelectionPolicy::ForceRaw
+                    } else {
+                        RepresentationSelectionPolicy::PreferSummaryUnlessReferenced
+                    }),
+                );
+            } else {
+                debug!(
+                    session = %self.session_id,
+                    "Clipboard available but stale and user did not reference it - skipping candidate"
+                );
+            }
+        }
+
+        if let Some(shell) = self
+            .context_observer
+            .snapshot()
+            .last_shell_command
+            .as_ref()
+            .filter(|shell| {
+                let age_secs = (chrono::Utc::now() - shell.received_at).num_seconds();
+                age_secs < crate::constants::SHELL_CONTEXT_MAX_AGE_SECS as i64
+            })
+        {
+            let exit_str = shell
+                .exit_code
+                .map_or_else(|| "?".to_string(), |c| c.to_string());
+            let shell_text = format!("$ {} → exit {} in {}", shell.command, exit_str, shell.cwd);
+            let fingerprint = crate::context::representation::fingerprint(&shell_text);
+            let error_present = shell.exit_code.map(|c| c != 0).unwrap_or(false);
+            let features = CandidateFeatures {
+                source_weight: 95.0,
+                fresh: true,
+                error_present,
+                recency_boost: 25.0,
+                task_affinity: if task_class == TaskClass::DebugShellFailure {
+                    65.0
+                } else {
+                    0.0
+                },
+                ..CandidateFeatures::default()
+            };
+            let representation = RepresentationKind::CommandStatus;
+
+            candidates.push(
+                ContextCandidate::new(
+                    "shell_context",
+                    ContextSourceKind::LastShellCommand,
+                    ContextInjectionTarget::UserTurnPrefix,
+                    if error_present {
+                        ContextPriority::High
+                    } else {
+                        ContextPriority::Normal
+                    },
+                    ContextRiskClass::OperatorPrivate,
+                    fingerprint,
+                    features,
+                    vec![CandidateRepresentation::new(
+                        representation,
+                        format!("[Env · shell: {shell_text}]"),
+                        1.0,
+                    )],
+                )
+                .with_task_class(Some(task_class))
+                .with_representation_policy(
+                    RepresentationSelectionPolicy::PreferHighestUtilityThatFits,
+                ),
+            );
+        }
+
+        candidates
+    }
+
+    fn infer_context_task_class(&self, query: &str) -> TaskClass {
+        let q = query.to_lowercase();
+        if self.infer_indexical_reference_target(&q) == IndexicalReferenceTarget::Clipboard {
+            return TaskClass::ClipboardReference;
+        }
+        if q.contains("why did this fail")
+            || q.contains("why did that fail")
+            || q.contains("what failed")
+            || q.contains("error")
+            || q.contains("exit code")
+        {
+            return TaskClass::DebugShellFailure;
+        }
+        if q.contains("click")
+            || q.contains("type")
+            || q.contains("open")
+            || q.contains("close")
+            || q.contains("move")
+        {
+            return TaskClass::UiAction;
+        }
+        if is_joke_request(query) || is_joke_followup_reference(query) {
+            return TaskClass::Humor;
+        }
+        TaskClass::Chat
+    }
+
+    fn infer_indexical_reference_target(&self, query_lower: &str) -> IndexicalReferenceTarget {
+        if query_lower.contains("clipboard")
+            || query_lower.contains("copied")
+            || query_lower.contains("copy")
+            || query_lower.contains("paste")
+            || query_lower.contains("what i just")
+            || query_lower.contains("what did i")
+        {
+            return IndexicalReferenceTarget::Clipboard;
+        }
+
+        let shell_recent_failure = self
+            .context_observer
+            .snapshot()
+            .last_shell_command
+            .as_ref()
+            .filter(|shell| {
+                let age_secs = (chrono::Utc::now() - shell.received_at).num_seconds();
+                age_secs < crate::constants::SHELL_CONTEXT_MAX_AGE_SECS as i64
+            })
+            .and_then(|shell| shell.exit_code)
+            .map(|code| code != 0)
+            .unwrap_or(false);
+        if shell_recent_failure
+            && (query_lower.contains("what happened")
+                || query_lower.contains("why did that fail")
+                || query_lower.contains("why did this fail")
+                || query_lower.contains("what failed")
+                || query_lower.contains("did it work"))
+        {
+            return IndexicalReferenceTarget::Shell;
+        }
+
+        let clipboard_is_fresh = self
+            .context_observer
+            .snapshot()
+            .clipboard_changed_at
+            .map(|t| {
+                (chrono::Utc::now() - t).num_seconds() < crate::constants::CLIPBOARD_RECENCY_SECS
+            })
+            .unwrap_or(false);
+        let asks_about_this = query_lower.contains("explain this")
+            || query_lower.contains("what is this")
+            || query_lower.contains("why is this broken")
+            || query_lower.contains("what does this")
+            || query_lower.contains("fix this")
+            || query_lower.contains("this code")
+            || query_lower.contains("this function");
+        if clipboard_is_fresh && asks_about_this {
+            return IndexicalReferenceTarget::Clipboard;
+        }
+
+        if query_lower.contains("on screen")
+            || query_lower.contains("this window")
+            || query_lower.contains("this app")
+            || query_lower.contains("what am i looking at")
+        {
+            return IndexicalReferenceTarget::FocusedElement;
+        }
+
+        IndexicalReferenceTarget::Unknown
+    }
+
     /// Build the complete message list for a `generate_stream` call.
     ///
     /// Applies (in order):
@@ -5030,7 +5449,7 @@ impl CoreOrchestrator {
     /// skips steps 1 and 2, producing an out-of-persona response that lacks the
     /// uncertainty protocol instructions and current machine context.
     pub(crate) fn prepare_messages_for_inference(
-        &self,
+        &mut self,
         recall: &[crate::retrieval::store::MemoryEntry],
     ) -> Vec<crate::inference::engine::Message> {
         // Round 3 / T1.2: extract the last genuine user message to drive domain-block
@@ -5099,29 +5518,7 @@ impl CoreOrchestrator {
             );
         }
 
-        // Step 2b: inject Phase 16 context snapshot (app / element) after the DateTime line.
-        if let Some(summary) = self.context_observer.context_summary() {
-            let insert_pos = if messages
-                .first()
-                .map(|m| m.role.as_str() == "system")
-                .unwrap_or(false)
-            {
-                1
-            } else {
-                0
-            };
-            messages.insert(
-                insert_pos,
-                crate::inference::engine::Message::system(format!("Context: {summary}")),
-            );
-            debug!(
-                session = %self.session_id,
-                context = %summary,
-                "Context snapshot injected into inference request"
-            );
-        }
-
-        // Step 2c: turn-scoped comedy instruction.
+        // Step 2b: turn-scoped comedy instruction.
         //
         // The core personality already says not to refuse, but aligned local
         // models still reflexively refuse or sanitize identity-themed joke
@@ -5157,7 +5554,64 @@ impl CoreOrchestrator {
             );
         }
 
-        // Step 2d (Round 3 / T0.5): clipboard + shell injection as user-turn prefix.
+        // Step 2c: compile ambient machine context.
+        //
+        // Context Compiler v1 keeps the live path deterministic: it converts
+        // observer state into candidates, chooses compact representations, packs
+        // by explainable ROI, then emits include/drop diagnostics without sending
+        // private payloads to logs.
+        let context_candidates = self.build_context_candidates(query_hint, comedy_mode_active);
+        let compiled_context =
+            ContextCompiler::new(ContextCompilerConfig::default()).compile(context_candidates);
+        self.latest_context_diagnostics = Some(compiled_context.diagnostics.clone());
+        for block in compiled_context.system_messages() {
+            let insert_pos = messages
+                .iter()
+                .take_while(|m| m.role.as_str() == "system")
+                .count();
+            messages.insert(insert_pos, crate::inference::engine::Message::system(block));
+        }
+        if let Some(prefix) = compiled_context.user_prefix() {
+            let target = messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
+            if let Some(user_msg) = target {
+                user_msg.content = format!("{prefix}\n\n{}", user_msg.content);
+                debug!(
+                    session = %self.session_id,
+                    "Compiled env context folded into user-turn prefix"
+                );
+            } else {
+                debug!(
+                    session = %self.session_id,
+                    "Compiled env context available but no genuine user message to attach to"
+                );
+            }
+        }
+        match serde_json::to_string(&compiled_context.diagnostics) {
+            Ok(diagnostics_json) => {
+                info!(
+                    session        = %self.session_id,
+                    compiler       = %compiled_context.diagnostics.compiler_version,
+                    included_count = compiled_context.diagnostics.included.len(),
+                    dropped_count  = compiled_context.diagnostics.dropped_count(),
+                    estimated_used_tokens = compiled_context.diagnostics.estimated_used_tokens,
+                    diagnostics    = %diagnostics_json,
+                    "Context Compiler diagnostics"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    session = %self.session_id,
+                    error = %e,
+                    "Context Compiler diagnostics serialization failed"
+                );
+            }
+        }
+
+        // Round 3 / T0.5 retained invariant: clipboard + shell context are folded
+        // into the last genuine user turn, not injected as standalone system labels.
         //
         // Prior implementation injected these as labelled system messages:
         //   ["Clipboard: ...", "Shell: $ cmd → exit 0 in /dir"]
@@ -5182,107 +5636,6 @@ impl CoreOrchestrator {
         // Without this gate, stale clipboard content (e.g. 926 chars of browser cookies
         // from hours ago) is prepended to every query, overwhelming small models into
         // treating the clipboard as the answer to unrelated questions like "my messages".
-        let clipboard_opt = {
-            if comedy_mode_active {
-                debug!(
-                    session = %self.session_id,
-                    "Comedy mode active — skipping clipboard injection"
-                );
-                None
-            } else {
-                let raw_clip = self.context_observer.clipboard_summary();
-                let query_lower = messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
-                    .map(|m| m.content.to_lowercase())
-                    .unwrap_or_default();
-                let user_references_clipboard = query_lower.contains("clipboard")
-                    || query_lower.contains("copied")
-                    || query_lower.contains("copy")
-                    || query_lower.contains("paste")
-                    || query_lower.contains("what i just")
-                    || query_lower.contains("what did i");
-                let clipboard_is_fresh = self
-                    .context_observer
-                    .snapshot()
-                    .clipboard_changed_at
-                    .map(|t| {
-                        (chrono::Utc::now() - t).num_seconds()
-                            < crate::constants::CLIPBOARD_RECENCY_SECS
-                    })
-                    .unwrap_or(false);
-                if user_references_clipboard || clipboard_is_fresh {
-                    raw_clip
-                } else {
-                    if raw_clip.is_some() {
-                        debug!(
-                            session = %self.session_id,
-                            "Clipboard available but stale and user didn't reference it — skipping injection"
-                        );
-                    }
-                    None
-                }
-            }
-        };
-        let shell_opt = if comedy_mode_active {
-            debug!(
-                session = %self.session_id,
-                "Comedy mode active — skipping shell injection"
-            );
-            None
-        } else {
-            self.context_observer
-                .snapshot()
-                .last_shell_command
-                .as_ref()
-                .filter(|shell| {
-                    let age_secs = (chrono::Utc::now() - shell.received_at).num_seconds();
-                    age_secs < crate::constants::SHELL_CONTEXT_MAX_AGE_SECS as i64
-                })
-                .map(|shell| {
-                    let exit_str = shell
-                        .exit_code
-                        .map_or_else(|| "?".to_string(), |c| c.to_string());
-                    format!(
-                        "$ {} \u{2192} exit {} in {}",
-                        shell.command, exit_str, shell.cwd
-                    )
-                })
-        };
-
-        if clipboard_opt.is_some() || shell_opt.is_some() {
-            let target = messages
-                .iter_mut()
-                .rev()
-                .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
-            if let Some(user_msg) = target {
-                let mut prefix_parts: Vec<String> = Vec::with_capacity(2);
-                if let Some(ref clip) = clipboard_opt {
-                    prefix_parts.push(format!("[Env · clipboard: {clip}]"));
-                }
-                if let Some(ref sh) = shell_opt {
-                    prefix_parts.push(format!("[Env · shell: {sh}]"));
-                }
-                let prefix = prefix_parts.join("\n");
-                // Prepend with a blank line before the operator's actual turn so
-                // the model sees a visible separation between ambient context and
-                // the actual question.
-                user_msg.content = format!("{prefix}\n\n{}", user_msg.content);
-
-                debug!(
-                    session       = %self.session_id,
-                    clipboard_len = clipboard_opt.as_ref().map(|c| c.chars().count()).unwrap_or(0),
-                    shell_present = shell_opt.is_some(),
-                    "Env context folded into user-turn prefix"
-                );
-            } else {
-                debug!(
-                    session = %self.session_id,
-                    "Env context available but no genuine user message to attach to — skipping"
-                );
-            }
-        }
 
         // Phase 21 — Recall injection.
         // Phase 37.8 — cross-session leak fix.
@@ -11269,6 +11622,70 @@ end tell"#;
     }
 
     #[tokio::test]
+    async fn explicit_clipboard_reference_forces_raw_clipboard_representation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("what did I copy?".to_string());
+        let clipboard_event = SystemEvent {
+            r#type: crate::ipc::proto::SystemEventType::ClipboardChanged.into(),
+            payload: r#"{"text":"RAW_CLIPBOARD_SENTINEL_42\nline two\nline three"}"#.to_string(),
+        };
+        orch.handle_system_event(clipboard_event, new_trace())
+            .await
+            .expect("handle_system_event must succeed for CLIPBOARD_CHANGED");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("user message must be present");
+
+        assert!(
+            user_msg.content.contains("RAW_CLIPBOARD_SENTINEL_42"),
+            "explicit clipboard reference must include raw copied text"
+        );
+        assert!(
+            !user_msg.content.contains("copied_text.kind="),
+            "explicit clipboard reference must not downgrade to summary metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_this_code_uses_raw_fresh_clipboard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+
+        orch.context.push_user("explain this code".to_string());
+        let clipboard_event = SystemEvent {
+            r#type: crate::ipc::proto::SystemEventType::ClipboardChanged.into(),
+            payload:
+                r#"{"text":"func rawSentinelFunction() {\n    print(\"RAW_CODE_SENTINEL\")\n}"}"#
+                    .to_string(),
+        };
+        orch.handle_system_event(clipboard_event, new_trace())
+            .await
+            .expect("handle_system_event must succeed for CLIPBOARD_CHANGED");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .expect("user message must be present");
+
+        assert!(
+            user_msg.content.contains("RAW_CODE_SENTINEL"),
+            "indexical code request must include raw copied code when it fits"
+        );
+        assert!(
+            !user_msg.content.contains("copied_text.kind="),
+            "indexical code request must not collapse fresh copied code to summary"
+        );
+    }
+
+    #[tokio::test]
     async fn memory_injection_remains_system_message_after_env_refactor() {
         // Round 3 / T0.5: clipboard moved from system-role to user-turn prefix.
         // Memory (Phase 21) must continue to ride on a system-role "Memory:" message —
@@ -11690,7 +12107,7 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(
+        let mut orch = CoreOrchestrator::new(
             &cfg,
             "test-session".to_string(),
             tx,
@@ -11944,7 +12361,7 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(
+        let mut orch = CoreOrchestrator::new(
             &cfg,
             "test-session".to_string(),
             tx,
@@ -12004,7 +12421,7 @@ end tell"#;
         let (tx, _) = tokio::sync::mpsc::channel(1);
         let (action_tx, _) = tokio::sync::mpsc::channel(8);
         let (generation_tx, _) = tokio::sync::mpsc::channel(4);
-        let orch = CoreOrchestrator::new(
+        let mut orch = CoreOrchestrator::new(
             &cfg,
             "test-session".to_string(),
             tx,

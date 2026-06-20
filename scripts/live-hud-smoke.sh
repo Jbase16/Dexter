@@ -199,6 +199,33 @@ assert_log_contains() {
     return 0
 }
 
+wait_for_core_pattern() {
+    local pattern="$1"
+    local timeout_secs="$2"
+    local waited=0
+    while [[ "$waited" -lt "$timeout_secs" ]]; do
+        if grep -Fq "$pattern" "$CORE_LOG"; then
+            return 0
+        fi
+        if [[ -n "$CORE_PID" ]] && ! kill -0 "$CORE_PID" >/dev/null 2>&1; then
+            grep -Fq "$pattern" "$CORE_LOG" && return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+assert_core_log_contains() {
+    local label="$1"
+    local pattern="$2"
+    if ! wait_for_core_pattern "$pattern" 1; then
+        say "$FAIL" "$label - missing core log pattern: $pattern"
+        return 1
+    fi
+    return 0
+}
+
 assert_log_count_at_least() {
     local label="$1"
     local pattern="$2"
@@ -443,6 +470,7 @@ run_placement_assertions() {
     assert_log_contains "$name" "centerHit=true" || ok=1
     assert_log_contains "$name" "movableByBackground=false" || ok=1
     assert_log_contains "$name" "ignoresMouse=false" || ok=1
+    assert_core_log_contains "$name" "Context snapshot updated (app focused)" || ok=1
     assert_log_absent "$name" "Fatal error" || ok=1
 
     if [[ "$ok" -eq 0 ]]; then

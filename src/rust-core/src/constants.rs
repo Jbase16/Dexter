@@ -668,6 +668,28 @@ pub const SCREEN_CAPTURE_TIMEOUT_SECS: u64 = 5;
 /// the two sides from drifting independently.
 pub const CLIPBOARD_MAX_CHARS: usize = 4_000;
 
+/// Version tag emitted with every Context Compiler diagnostic record.
+///
+/// v1 is deliberately boring: deterministic candidates, representation-aware
+/// greedy ROI packing, and forensic diagnostics. Shadow-model scoring and
+/// counterfactual replay are offline follow-ups, not live-turn latency.
+pub const CONTEXT_COMPILER_VERSION: &str = "context_compiler_v1";
+
+/// Prompt budget reserved for live ambient context candidates.
+///
+/// This budget covers only context injected by `ContextObserver` (focused app,
+/// clipboard, shell state). Conversation history, retrieval, personality, and
+/// action tool-result messages retain their existing caps until they are moved
+/// behind the compiler in later phases.
+pub const CONTEXT_COMPILER_BUDGET_TOKENS: usize = 1_200;
+
+/// Output/safety reserve inside the ambient-context budget.
+///
+/// Keeping a reserve means a large clipboard cannot consume the entire ambient
+/// context allowance. The compiler drops or summarizes optional context before
+/// it pressures generation output.
+pub const CONTEXT_COMPILER_RESERVED_OUTPUT_TOKENS: usize = 256;
+
 /// Clipboard content is only auto-injected into inference context when the
 /// clipboard was updated within this many seconds. Beyond this window, clipboard
 /// is only injected when the user explicitly references it (keywords like "copy",
