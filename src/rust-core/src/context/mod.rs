@@ -9,6 +9,7 @@ pub mod candidate;
 pub mod compiler;
 pub mod diagnostics;
 pub mod ledger;
+pub mod prompt_manifest;
 pub mod representation;
 pub mod turn_record;
 
@@ -17,4 +18,5 @@ pub(crate) use candidate::{
     ContextSourceKind, RepresentationSelectionPolicy, TaskClass,
 };
 pub(crate) use compiler::{ContextCompiler, ContextCompilerConfig};
+pub(crate) use prompt_manifest::PromptAssemblyDiagnostics;
 pub(crate) use representation::{CandidateRepresentation, RepresentationKind};

@@ -235,6 +235,14 @@ fn audit_receipt_summary(
     output_preview: Option<&str>,
     error: Option<&str>,
 ) -> String {
+    if matches!(outcome, "failure" | "timeout") {
+        if let Some(error) = clean_line(error) {
+            if let Some(summary) = browser_failure_summary(&error) {
+                return summary;
+            }
+        }
+    }
+
     match outcome {
         "success" => match clean_line(output_preview) {
             Some(output) if output != "Done." => format!("Succeeded: {output}"),
@@ -265,6 +273,13 @@ fn audit_receipt_summary(
             None => "Failed.".to_string(),
         },
     }
+}
+
+fn browser_failure_summary(error: &str) -> Option<String> {
+    let prefix = "Browser failure [";
+    let rest = error.strip_prefix(prefix)?;
+    let (kind, detail) = rest.split_once("]: ")?;
+    Some(format!("Browser failed ({kind}): {detail}"))
 }
 
 fn is_approval_expired_error(error: &str) -> bool {
@@ -546,6 +561,41 @@ mod tests {
         assert_eq!(receipts[0].summary, "Approval expired before execution.");
         assert_eq!(receipts[1].action_id, "id-1");
         assert_eq!(receipts[1].outcome, "executed");
+    }
+
+    #[test]
+    fn recent_action_receipts_preserve_browser_failure_kind_and_recovery() {
+        let tmp = tempdir().unwrap();
+        let log = AuditLog::new(tmp.path());
+        let entry = AuditEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            action_id: "browser-1",
+            r#type: "browser",
+            category: "cautious",
+            spec_json: serde_json::json!({
+                "action": "navigate",
+                "url": "https://example.com"
+            }),
+            outcome: "failure",
+            exit_code: None,
+            output_preview: None,
+            error: Some(
+                "Browser failure [browser_launch_failed]: Executable doesn't exist. Recovery: Install Playwright Chromium with `src/python-workers/.venv/bin/python3 -m playwright install chromium`, then restart the browser worker."
+                    .to_string(),
+            ),
+            duration_ms: Some(10),
+            operator_approved: None,
+        };
+        log.append(&entry).unwrap();
+
+        let (_path, receipts) = recent_action_receipts(tmp.path(), 10).unwrap();
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].outcome, "failed");
+        assert!(receipts[0]
+            .summary
+            .contains("Browser failed (browser_launch_failed)"));
+        assert!(receipts[0].summary.contains("playwright install chromium"));
     }
 
     #[test]

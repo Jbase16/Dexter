@@ -13,4 +13,6 @@
 pub mod layer;
 
 #[allow(unused_imports)]
-pub use layer::{PersonalityError, PersonalityLayer, PersonalityProfile, ResponseStyle};
+pub use layer::{
+    PersonalityError, PersonalityLayer, PersonalityProfile, PromptProfile, ResponseStyle,
+};

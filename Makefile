@@ -27,7 +27,7 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-cli live-smoke-action-matrix live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -385,6 +385,32 @@ live-smoke-action-matrix: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-cli-smoke.sh --start-core --action-matrix
 
+## live-smoke-browser-recovery: verify browser failures carry recovery evidence
+##
+## Starts a fresh release core, drives a local browser selector failure through
+## the exact ActionSpec path, and verifies the receipt includes page context,
+## replan_page_state, and a recovery directive without degrading browser health.
+live-smoke-browser-recovery: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-cli-smoke.sh --start-core --browser-recovery
+
+## live-smoke-browser-recovery-model: verify model-driven browser selector recovery
+##
+## Focused opt-in smoke. This exercises the local model, so keep it out of broad
+## acceptance until it has proven stable: bad selector -> recovery evidence ->
+## real selector -> confirmation extract -> clean stop.
+live-smoke-browser-recovery-model: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-cli-smoke.sh --start-core --browser-recovery-model
+
+## live-smoke-browser-recovery-model-stability: repeat the model-driven browser recovery smoke
+##
+## Opt-in promotion evidence. Defaults to 5 runs and writes a receipt under
+## docs/live-smoke-results/browser-recovery-model-stability/. Override with:
+## DEXTER_BROWSER_RECOVERY_MODEL_STABILITY_RUNS=10 make live-smoke-browser-recovery-model-stability
+live-smoke-browser-recovery-model-stability:
+	bash scripts/live-browser-recovery-model-stability.sh
+
 ## live-smoke-action-receipts: run live audit receipt regression (starts Rust core, no Swift UI)
 ##
 ## Drives safe, denied, and approved synthetic actions, then asserts
@@ -553,6 +579,7 @@ live-smoke-all:
 	$(MAKE) live-smoke-ui-pick
 	$(MAKE) live-smoke-cli
 	$(MAKE) live-smoke-action-matrix
+	$(MAKE) live-smoke-browser-recovery
 	$(MAKE) live-smoke-action-receipts
 	$(MAKE) live-smoke-approval-lifecycle
 	$(MAKE) live-smoke-hud
@@ -607,12 +634,48 @@ live-smoke-runtime-health:
 		live-smoke-hud-health \
 		live-smoke-hud-unavailable-health
 
-## live-smoke-action-safety: run the focused action policy/receipt/HUD acceptance slice
+## live-smoke-action-safety: run the focused action safety slice, fail-fast
 ##
 ## Verifies action policy gates, external failure handling, local action
-## diagnostics, audit receipts, approval lifecycle, HUD action history/Why,
-## visible HUD approval denial, and long-lived subprocess cancellation.
+## diagnostics, structured app/window/UI action lanes, deterministic browser
+## recovery evidence, audit receipts, approval lifecycle, and subprocess
+## cancellation. This target stops on the first failure so interactive runs do
+## not keep burning warmup time after an actionable break.
 live-smoke-action-safety:
+	bash scripts/live-smoke-summary.sh --fail-fast \
+		live-smoke-external-failures \
+		live-smoke-action-diagnostic \
+		live-smoke-shortcut-action \
+		live-smoke-window-focus \
+		live-smoke-window-inspect \
+		live-smoke-ui-snapshot \
+		live-smoke-ui-click \
+		live-smoke-ui-type \
+		live-smoke-ui-select \
+		live-smoke-ui-toggle \
+		live-smoke-ui-pick \
+		live-smoke-action-matrix \
+		live-smoke-browser-recovery \
+		live-smoke-action-receipts \
+		live-smoke-approval-lifecycle \
+		live-smoke-action-cancel
+
+## live-smoke-action-safety-shared: run a faster shared-core action safety slice
+##
+## Starts one release core and runs the compatible CLI/action checks against it.
+## This is the fast day-to-day signal for policy, receipts, approval lifecycle,
+## browser recovery evidence, and action cancellation. Use live-smoke-action-safety
+## for the isolated release-grade sweep that also proves each target can own a
+## fresh daemon independently.
+live-smoke-action-safety-shared:
+	bash scripts/live-action-safety-shared-smoke.sh
+
+## live-smoke-action-safety-full: run the full action safety + HUD/model sweep
+##
+## Runs the fast action-safety slice plus the focused model-driven browser
+## recovery check and Swift HUD action surfaces. This intentionally continues
+## after failures to produce a complete receipt for promotion or release checks.
+live-smoke-action-safety-full:
 	bash scripts/live-smoke-summary.sh \
 		live-smoke-external-failures \
 		live-smoke-action-diagnostic \
@@ -626,6 +689,8 @@ live-smoke-action-safety:
 		live-smoke-ui-toggle \
 		live-smoke-ui-pick \
 		live-smoke-action-matrix \
+		live-smoke-browser-recovery \
+		live-smoke-browser-recovery-model \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
 		live-smoke-hud-action-history \
@@ -664,6 +729,7 @@ live-smoke-acceptance:
 		live-smoke-ui-toggle \
 		live-smoke-ui-pick \
 		live-smoke-action-matrix \
+		live-smoke-browser-recovery \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
 		live-smoke-hud-action-history \
@@ -724,7 +790,7 @@ wait-for-ready:
 	exit 1
 
 ## run: start both processes (requires Ollama to be running for inference). Swift waits for
-##      the core socket and then doctor-clean daemon readiness before launching.
+##      the core socket, then shows pending/ready health from the daemon in-app.
 ##      Ctrl-C kills both processes.
 run: ensure-core-not-running
 	@core_pid=""; ui_pid=""; \
@@ -738,7 +804,7 @@ run: ensure-core-not-running
 	}; \
 	trap cleanup INT TERM EXIT; \
 	$(MAKE) run-core & core_pid=$$!; \
-	($(MAKE) wait-for-core && $(MAKE) wait-for-ready && $(MAKE) run-swift) & ui_pid=$$!; \
+	($(MAKE) wait-for-core && $(MAKE) run-swift) & ui_pid=$$!; \
 	wait
 
 ## stop: terminate any running Dexter UI/core processes and remove stale sockets

@@ -167,6 +167,8 @@ To run one fresh main acceptance receipt:
 Focused acceptance slices:
   make live-smoke-operator-controls
   make live-smoke-runtime-health
+  make live-smoke-action-safety-shared
   make live-smoke-action-safety
+  make live-smoke-action-safety-full
 
 TEXT

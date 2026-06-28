@@ -169,7 +169,7 @@ make setup-python
 # Regenerate proto artifacts (after proto changes only)
 make proto
 
-# Run (starts release Rust core + Swift UI, waits for doctor-ready health before launching Swift)
+# Run (starts release Rust core + Swift UI after the core socket is available)
 make run
 
 # Prepare this Mac for Dexter after model-storage or launcher changes
@@ -202,10 +202,11 @@ Stop the existing core/UI first so the Swift UI and `dexter-cli` talk to the sam
 freshly built daemon.
 
 The Dock wrapper is documented in `docs/DEXTER_OPERATOR_CONTROLS.md`. `make run`
-waits for the socket and then doctor-clean daemon health before launching Swift.
-If startup health is queried during warmup, FAST/PRIMARY/EMBED rows should say
-`warming`. After warmup completes, non-warm active models are a real health
-issue.
+waits for the core socket, launches Swift, and lets the daemon report
+pending/ready startup health in-app. Use `make wait-for-ready` when a script
+needs doctor-clean model/worker readiness before continuing. If startup health
+is queried during warmup, FAST/PRIMARY/EMBED rows should say `warming`. After
+warmup completes, non-warm active models are a real health issue.
 
 Operator controls are covered by `make live-smoke-hud-new-session`,
 `make live-smoke-hud-lifecycle`, `make live-smoke-process-control`, and
@@ -214,9 +215,10 @@ Operator controls are covered by `make live-smoke-hud-new-session`,
 exercise the actual New Session, Restart, Quit, external Stop, stale SwiftPM
 cleanup, consolidated readiness, diagnostic capture, and Dock launcher paths.
 
-Startup gating is covered by `make live-smoke-startup-readiness`, which verifies
-the socket appears first, then `make wait-for-ready` waits for doctor-clean
-worker/model health before the Swift UI is allowed to launch.
+Startup readiness is covered by `make live-smoke-startup-readiness`, which
+verifies the socket appears first, pending health uses warming language, and
+`make wait-for-ready` still waits for doctor-clean worker/model health when a
+strict readiness gate is needed.
 
 **Dev tool** — `dexter-cli` sends typed input to the running daemon without the Swift UI:
 

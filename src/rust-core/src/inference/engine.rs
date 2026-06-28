@@ -254,6 +254,26 @@ pub struct TokenChunk {
     ///
     /// `None` on intermediate chunks; `Some(ms)` on the final chunk.
     pub load_duration_ms: Option<u64>,
+
+    /// Prompt prefill duration in milliseconds, populated only on `done == true`.
+    ///
+    /// This is the model-side cost of evaluating the input tokens before generation
+    /// starts. Warmup paths use it to separate "model load is slow" from "prompt
+    /// prefill is slow" instead of collapsing both into perceived startup delay.
+    pub prompt_eval_duration_ms: Option<u64>,
+
+    /// Prompt token count reported by Ollama, populated only on `done == true`.
+    ///
+    /// This is the calibration source for Dexter's char-heuristic prompt estimates.
+    /// If estimated tokens diverge badly from this value, the context compiler is
+    /// packing against bad weights and needs tokenizer-backed accounting.
+    pub prompt_eval_count: Option<u64>,
+
+    /// Response generation duration in milliseconds, populated only on `done == true`.
+    ///
+    /// For warmup requests this should stay tiny because `num_predict=1`; if it does
+    /// not, the issue is generation latency rather than residency or prompt prefill.
+    pub eval_duration_ms: Option<u64>,
 }
 
 /// Phase 38 / Codex finding [7]: a streaming generation handle that exposes
@@ -413,6 +433,9 @@ struct OllamaChatChunk {
     done: bool,
     #[serde(default)]
     eval_count: Option<u64>,
+    /// Number of prompt tokens evaluated. Present only on Ollama's final chunk.
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
     /// Nanoseconds Ollama spent loading the model weights for this request.
     /// `0` when the model was already warm; large when cold-loaded from disk.
     #[serde(default)]
@@ -797,6 +820,8 @@ impl InferenceEngine {
                                             if chunk.done {
                                                 let ld_ms =
                                                     chunk.load_duration.unwrap_or(0) / 1_000_000;
+                                                let prompt_eval_count =
+                                                    chunk.prompt_eval_count.unwrap_or(0);
                                                 let ped_ms =
                                                     chunk.prompt_eval_duration.unwrap_or(0)
                                                         / 1_000_000;
@@ -810,6 +835,7 @@ impl InferenceEngine {
                                                 info!(
                                                     model             = %model_name,
                                                     load_ms           = ld_ms,
+                                                    prompt_eval_count  = prompt_eval_count,
                                                     prompt_eval_ms    = ped_ms,
                                                     eval_ms           = ed_ms,
                                                     eval_tokens       = eval_count,
@@ -817,20 +843,41 @@ impl InferenceEngine {
                                                     "Generation complete — Ollama timing report"
                                                 );
                                             }
-                                            // Surface load_duration_ms only on the final
-                                            // chunk — matches the source-of-truth Ollama
-                                            // timing report above. Intermediate chunks
-                                            // always carry `None`.
-                                            let load_duration_ms = if chunk.done {
-                                                chunk.load_duration.map(|ns| ns / 1_000_000)
-                                            } else {
-                                                None
-                                            };
+                                            // Surface Ollama timing fields only on the final
+                                            // chunk — matches the source-of-truth timing report
+                                            // above. Intermediate chunks always carry `None`.
+                                            let load_duration_ms = chunk
+                                                .done
+                                                .then(|| {
+                                                    chunk.load_duration.map(|ns| ns / 1_000_000)
+                                                })
+                                                .flatten();
+                                            let prompt_eval_duration_ms = chunk
+                                                .done
+                                                .then(|| {
+                                                    chunk
+                                                        .prompt_eval_duration
+                                                        .map(|ns| ns / 1_000_000)
+                                                })
+                                                .flatten();
+                                            let prompt_eval_count = chunk
+                                                .done
+                                                .then_some(chunk.prompt_eval_count)
+                                                .flatten();
+                                            let eval_duration_ms = chunk
+                                                .done
+                                                .then(|| {
+                                                    chunk.eval_duration.map(|ns| ns / 1_000_000)
+                                                })
+                                                .flatten();
                                             let token = TokenChunk {
                                                 content,
                                                 done: chunk.done,
                                                 eval_count,
                                                 load_duration_ms,
+                                                prompt_eval_duration_ms,
+                                                prompt_eval_count,
+                                                eval_duration_ms,
                                             };
                                             // If the receiver was dropped, the caller
                                             // cancelled — exit silently.

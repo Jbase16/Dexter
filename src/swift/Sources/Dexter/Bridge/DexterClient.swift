@@ -1589,7 +1589,7 @@ extension DexterClient {
         lines.append("Workers")
         lines.append("- STT: \(cleanStatus(health.sttWorker))")
         lines.append("- TTS: \(cleanStatus(health.ttsWorker))")
-        lines.append("- Browser: \(cleanStatus(health.browserWorker))")
+        lines.append("- Browser: \(browserWorkerLine(health))")
 
         lines.append("")
         lines.append("Models")
@@ -1732,7 +1732,7 @@ extension DexterClient {
         lines.append("Workers")
         lines.append("- STT: \(cleanStatus(health.sttWorker))")
         lines.append("- TTS: \(cleanStatus(health.ttsWorker))")
-        lines.append("- Browser: \(cleanStatus(health.browserWorker))")
+        lines.append("- Browser: \(browserWorkerLine(health))")
 
         lines.append("")
         lines.append("Disk")
@@ -1768,6 +1768,11 @@ extension DexterClient {
             lines.append("Recovery: use the restart buttons below for \(names).")
         }
 
+        let browserRecovery = health.browserWorkerRecoveryHint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !browserRecovery.isEmpty {
+            lines.append("Browser recovery: \(browserRecovery)")
+        }
+
         if hasNonWarmRequiredModel(health) {
             lines.append("Recovery: run `make operator-ready`, then restart Dexter from the app menu or with `make restart`.")
         }
@@ -1781,6 +1786,15 @@ extension DexterClient {
 
     private static func hasNonWarmRequiredModel(_ health: Dexter_V1_HealthResponse) -> Bool {
         !health.fastModelWarm || !health.primaryModelWarm || !health.embedModelWarm
+    }
+
+    private static func browserWorkerLine(_ health: Dexter_V1_HealthResponse) -> String {
+        let status = cleanStatus(health.browserWorker)
+        let detail = health.browserWorkerDetail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if detail.isEmpty {
+            return status
+        }
+        return "\(status) - \(detail)"
     }
 
     private static func restartTargets(for health: Dexter_V1_HealthResponse) -> [DexterWorkerRestartTarget] {

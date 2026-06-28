@@ -6,63 +6,36 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::{
     diagnostics::CompiledContextDiagnostics, ledger::TurnOutcomeLabel, representation::fingerprint,
     TaskClass,
 };
-use crate::{
-    action::{ActionOutcome, ActionSpec},
-    orchestrator::GenerationTelemetry,
-};
+use crate::action::{ActionOutcome, ActionSpec};
 
 const SCHEMA_VERSION: &str = "context_turn_record_v1";
 const USER_PREVIEW_CHARS: usize = 180;
 const OUTPUT_PREVIEW_CHARS: usize = 240;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum TurnRecordError {
+    #[error("turn record IO failed at {path}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
-    Serialize(serde_json::Error),
+    #[error("turn record serialization failed: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("turn record trace_id not found: {0}")]
     MissingTrace(String),
-}
-
-impl std::fmt::Display for TurnRecordError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "turn record IO failed at {}: {source}", path.display())
-            }
-            Self::Serialize(source) => write!(f, "turn record serialization failed: {source}"),
-            Self::MissingTrace(trace_id) => {
-                write!(f, "turn record trace_id not found: {trace_id}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for TurnRecordError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Serialize(source) => Some(source),
-            Self::MissingTrace(_) => None,
-        }
-    }
-}
-
-impl From<serde_json::Error> for TurnRecordError {
-    fn from(source: serde_json::Error) -> Self {
-        Self::Serialize(source)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextTurnRecord {
     pub schema_version: String,
+    pub privacy_mode: TurnRecordPrivacyMode,
     pub session_id: String,
     pub trace_id: String,
     pub turn_id: String,
@@ -80,6 +53,25 @@ pub struct ContextTurnRecord {
     pub close_reason: TurnCloseReason,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnRecordPrivacyMode {
+    RedactedPreviewV1,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerationRecordInput {
+    pub first_token_ms: Option<u64>,
+    pub total_ms: u64,
+    pub token_count: u32,
+    pub cancelled: bool,
+    pub response_len: usize,
+    pub prompt_eval_count: Option<u64>,
+    pub prompt_eval_ms: Option<u64>,
+    pub load_ms: Option<u64>,
+    pub eval_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationRecord {
     pub first_token_ms: Option<u64>,
@@ -87,6 +79,10 @@ pub struct GenerationRecord {
     pub token_count: u32,
     pub cancelled: bool,
     pub response_len: usize,
+    pub prompt_eval_count: Option<u64>,
+    pub prompt_eval_ms: Option<u64>,
+    pub load_ms: Option<u64>,
+    pub eval_ms: Option<u64>,
     pub output_hash: String,
     pub output_preview: String,
     pub parsed_action_kind: Option<String>,
@@ -135,7 +131,6 @@ pub struct TurnDispatchInput {
 
 pub struct TurnRecordAggregator {
     records: HashMap<String, ContextTurnRecord>,
-    action_trace_index: HashMap<String, String>,
     state_dir: PathBuf,
 }
 
@@ -143,7 +138,6 @@ impl TurnRecordAggregator {
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
         Self {
             records: HashMap::new(),
-            action_trace_index: HashMap::new(),
             state_dir: state_dir.into(),
         }
     }
@@ -152,6 +146,7 @@ impl TurnRecordAggregator {
         let now = Utc::now();
         let record = ContextTurnRecord {
             schema_version: SCHEMA_VERSION.to_string(),
+            privacy_mode: TurnRecordPrivacyMode::RedactedPreviewV1,
             session_id: input.session_id,
             trace_id: input.trace_id.clone(),
             turn_id: input.turn_id,
@@ -176,7 +171,7 @@ impl TurnRecordAggregator {
     pub fn attach_generation(
         &mut self,
         trace_id: &str,
-        telemetry: &GenerationTelemetry,
+        telemetry: &GenerationRecordInput,
         output: &str,
         parsed_action: Option<&ActionSpec>,
     ) -> Result<(), TurnRecordError> {
@@ -191,6 +186,10 @@ impl TurnRecordAggregator {
             token_count: telemetry.token_count,
             cancelled: telemetry.cancelled,
             response_len: telemetry.response_len,
+            prompt_eval_count: telemetry.prompt_eval_count,
+            prompt_eval_ms: telemetry.prompt_eval_ms,
+            load_ms: telemetry.load_ms,
+            eval_ms: telemetry.eval_ms,
             output_hash: fingerprint(output),
             output_preview: preview(output, OUTPUT_PREVIEW_CHARS),
             parsed_action_kind: parsed_action.map(action_kind).map(ToOwned::to_owned),
@@ -217,10 +216,6 @@ impl TurnRecordAggregator {
         record.updated_at = Utc::now();
         let (action_id, stdout_hash, stderr_hash, error_kind, outcome_label, close_reason) =
             action_summary(outcome);
-        if let Some(action_id) = action_id.as_deref() {
-            self.action_trace_index
-                .insert(action_id.to_string(), trace_id.to_string());
-        }
         record.action = Some(ActionRecord {
             action_id,
             receipt_id: None,
@@ -268,7 +263,12 @@ impl TurnRecordAggregator {
     }
 
     pub fn close_all_open(&mut self, close_reason: TurnCloseReason) -> Result<(), TurnRecordError> {
-        let trace_ids = self.records.keys().cloned().collect::<Vec<_>>();
+        let trace_ids = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.close_reason == TurnCloseReason::Open)
+            .map(|(trace_id, _)| trace_id.clone())
+            .collect::<Vec<_>>();
         for trace_id in trace_ids {
             self.close_turn(&trace_id, close_reason)?;
         }
@@ -285,7 +285,7 @@ impl TurnRecordAggregator {
         self.state_dir
             .join("context_turns")
             .join(date)
-            .join(format!("{}.json", sanitize_trace_id(trace_id)))
+            .join(format!("{}.json", trace_record_filename_stem(trace_id)))
     }
 
     fn write_record(&self, record: &ContextTurnRecord) -> Result<(), TurnRecordError> {
@@ -336,6 +336,12 @@ fn sanitize_trace_id(trace_id: &str) -> String {
     }
 }
 
+fn trace_record_filename_stem(trace_id: &str) -> String {
+    let hash = fingerprint(trace_id);
+    let short_hash = &hash[..12];
+    format!("{}-{}", sanitize_trace_id(trace_id), short_hash)
+}
+
 fn action_kind(spec: &ActionSpec) -> &'static str {
     match spec {
         ActionSpec::Shell { .. } => "shell",
@@ -369,14 +375,19 @@ fn action_summary(
     match outcome {
         ActionOutcome::Completed {
             action_id, output, ..
-        } => (
-            Some(action_id.clone()),
-            Some(fingerprint(output)),
-            None,
-            None,
-            TurnOutcomeLabel::ActionExecutedSuccessfully,
-            TurnCloseReason::ActionCompleted,
-        ),
+        } => {
+            // ActionEngine uses `Completed` for semantically successful actions.
+            // If future executors distinguish non-zero process exits inside this
+            // variant, ledger learning must stop treating this as a success label.
+            (
+                Some(action_id.clone()),
+                Some(fingerprint(output)),
+                None,
+                None,
+                TurnOutcomeLabel::ActionExecutedSuccessfully,
+                TurnCloseReason::ActionCompleted,
+            )
+        }
         ActionOutcome::Rejected { action_id, error } => (
             Some(action_id.clone()),
             None,
@@ -465,6 +476,10 @@ mod tests {
         let path = recorder.record_path_for_trace("trace-start");
         let record: ContextTurnRecord = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(record.trace_id, "trace-start");
+        assert_eq!(
+            record.privacy_mode,
+            TurnRecordPrivacyMode::RedactedPreviewV1
+        );
         assert_eq!(record.close_reason, TurnCloseReason::Open);
         assert!(record.generation.is_none());
     }
@@ -474,14 +489,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut recorder = TurnRecordAggregator::new(tmp.path());
         recorder.start_turn(dispatch_input("trace-gen")).unwrap();
-        let telemetry = GenerationTelemetry {
-            model: "qwen3:8b".to_string(),
+        let telemetry = GenerationRecordInput {
             first_token_ms: Some(12),
             total_ms: 34,
             token_count: 5,
             cancelled: false,
             response_len: 11,
-            agentic_depth: 0,
+            prompt_eval_count: Some(42),
+            prompt_eval_ms: Some(250),
+            load_ms: Some(10),
+            eval_ms: Some(20),
         };
 
         recorder
@@ -493,6 +510,8 @@ mod tests {
                 .unwrap();
         let generation = record.generation.expect("generation must be attached");
         assert_eq!(generation.first_token_ms, Some(12));
+        assert_eq!(generation.prompt_eval_count, Some(42));
+        assert_eq!(generation.prompt_eval_ms, Some(250));
         assert_eq!(generation.output_hash, fingerprint("hello world"));
     }
 
@@ -564,7 +583,19 @@ mod tests {
         let path = recorder.record_path_for_trace("trace/with:bad chars");
 
         assert!(path.starts_with(tmp.path()));
-        assert!(path.ends_with("trace_with_bad_chars.json"));
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        assert!(file_name.starts_with("trace_with_bad_chars-"));
+        assert!(file_name.ends_with(".json"));
+    }
+
+    #[test]
+    fn sanitized_trace_filename_includes_hash_suffix_to_avoid_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recorder = TurnRecordAggregator::new(tmp.path());
+        let path_a = recorder.record_path_for_trace("trace/with:bad chars");
+        let path_b = recorder.record_path_for_trace("trace:with/bad chars");
+
+        assert_ne!(path_a, path_b);
     }
 
     #[test]
@@ -584,6 +615,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.close_reason, TurnCloseReason::DaemonShutdown);
+    }
+
+    #[test]
+    fn shutdown_does_not_overwrite_already_closed_action_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = TurnRecordAggregator::new(tmp.path());
+        recorder
+            .start_turn(dispatch_input("trace-action-closed"))
+            .unwrap();
+        let outcome = ActionOutcome::Completed {
+            action_id: "action-closed".to_string(),
+            output: "done".to_string(),
+            rewritten_to: None,
+        };
+        recorder
+            .attach_action_result("trace-action-closed", "shell", Some("safe"), &outcome)
+            .unwrap();
+
+        recorder
+            .close_all_open(TurnCloseReason::DaemonShutdown)
+            .unwrap();
+
+        let record: ContextTurnRecord = serde_json::from_slice(
+            &fs::read(recorder.record_path_for_trace("trace-action-closed")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.close_reason, TurnCloseReason::ActionCompleted);
+        assert_eq!(
+            record.outcome_label,
+            TurnOutcomeLabel::ActionExecutedSuccessfully
+        );
     }
 
     #[test]

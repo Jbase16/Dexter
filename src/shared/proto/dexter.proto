@@ -80,6 +80,8 @@ message HealthResponse {
   string stt_worker = 17;      // ready | degraded | pending
   string tts_worker = 18;      // ready | degraded | pending
   string browser_worker = 19;  // ready | degraded | pending
+  string browser_worker_detail = 26;         // Classified browser startup/action failure, if degraded.
+  string browser_worker_recovery_hint = 27;  // Operator-facing recovery hint for browser_worker_detail.
 
   repeated DiskHealth disk = 20;
 

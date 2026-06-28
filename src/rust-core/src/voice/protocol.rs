@@ -79,6 +79,11 @@ pub fn parse_handshake(line: &str) -> Result<WorkerHandshake, String> {
             "Protocol version mismatch: expected {VOICE_PROTOCOL_VERSION}, got {version}"
         ));
     }
+    if json["status"].as_str() == Some("error") {
+        let kind = json["error_kind"].as_str().unwrap_or("startup_failed");
+        let error = json["error"].as_str().unwrap_or("worker startup failed");
+        return Err(format!("Worker startup error ({kind}): {error}"));
+    }
     let wt = match json["worker_type"].as_str().ok_or("Missing worker_type")? {
         "stt" => WorkerType::Stt,
         "tts" => WorkerType::Tts,
@@ -182,5 +187,16 @@ mod tests {
         let hs = parse_handshake(line).unwrap();
         assert_eq!(hs.worker_type, WorkerType::Browser);
         assert_eq!(hs.protocol_version, 1);
+    }
+
+    #[test]
+    fn parse_handshake_startup_error_preserves_detail() {
+        let line = r#"{"protocol_version":1,"worker_type":"browser","status":"error","error_kind":"browser_launch_failed","error":"BrowserType.launch: Executable doesn't exist"}"#;
+        let result = parse_handshake(line);
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.contains("browser_launch_failed"));
+        assert!(error.contains("Executable doesn't exist"));
     }
 }

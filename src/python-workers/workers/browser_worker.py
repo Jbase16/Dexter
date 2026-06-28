@@ -12,11 +12,12 @@ Playwright's internal asyncio timers can run while waiting for commands.
 import asyncio
 import json
 import sys
+import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from workers.protocol import (
     MSG_BROWSER_CLICK,
@@ -31,6 +32,7 @@ from workers.protocol import (
     read_frame,
     send_frame,
     write_handshake,
+    write_startup_error_handshake,
 )
 
 # Screenshots are saved here; directory is created on first use.
@@ -38,13 +40,185 @@ from workers.protocol import (
 # without hunting through /tmp. Desktop always exists on macOS; mkdir(exist_ok=True)
 # is harmless if the directory pre-exists.
 SCREENSHOT_DIR = Path.home() / "Desktop"
+SELECTOR_CANDIDATE_MAX_COUNT = 30
+SELECTOR_CANDIDATE_LABEL_MAX_CHARS = 80
+
+
+async def browser_result(
+    *,
+    success: bool,
+    output: str = "",
+    error: str = "",
+    error_kind: str | None = None,
+    page: Page | None = None,
+    selector: str | None = None,
+) -> dict:
+    """Build a browser result with optional page-state diagnostics."""
+    result = {"success": success, "output": output, "error": error}
+    if error_kind:
+        result["error_kind"] = error_kind
+    if selector:
+        result["selector"] = selector
+    if page is not None:
+        try:
+            result["page_url"] = page.url
+        except Exception:
+            pass
+        try:
+            title = await page.title()
+            if title:
+                result["page_title"] = title
+        except Exception:
+            pass
+    return result
+
+
+def classify_navigation_error(error: Exception) -> str:
+    detail = str(error).lower()
+    if isinstance(error, PlaywrightTimeoutError) or "timeout" in detail:
+        return "navigation_timeout"
+    if (
+        "net::err_file_not_found" in detail
+        or "net::err_name_not_resolved" in detail
+        or "net::err_connection_refused" in detail
+        or "net::err_connection_timed_out" in detail
+        or "net::err_internet_disconnected" in detail
+        or "net::err_aborted" in detail
+    ):
+        return "navigation_failed"
+    if "page" in detail and "closed" in detail:
+        return "page_not_ready"
+    return "navigation_failed"
+
+
+def classify_page_action_error(error: Exception, fallback: str) -> str:
+    detail = str(error).lower()
+    if isinstance(error, PlaywrightTimeoutError) or "timeout" in detail:
+        return fallback
+    if "page" in detail and "closed" in detail:
+        return "page_not_ready"
+    if "target closed" in detail or "browser has been closed" in detail:
+        return "page_not_ready"
+    return fallback
+
+
+def _compact_selector_label(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) > SELECTOR_CANDIDATE_LABEL_MAX_CHARS:
+        return text[:SELECTOR_CANDIDATE_LABEL_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _format_selector_candidates(rows: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for row in rows[:SELECTOR_CANDIDATE_MAX_COUNT]:
+        selectors = row.get("selectors")
+        if not isinstance(selectors, list):
+            continue
+        selector_text = " / ".join(str(selector) for selector in selectors[:3] if selector)
+        if not selector_text:
+            continue
+        tag = _compact_selector_label(row.get("tag"))
+        label = _compact_selector_label(row.get("label"))
+        if label:
+            lines.append(f"- {selector_text} ({tag}, text={label!r})")
+        else:
+            lines.append(f"- {selector_text} ({tag})")
+
+    if not lines:
+        return ""
+    return "Candidate selectors:\n" + "\n".join(lines)
+
+
+async def extract_selector_candidates(page: Page) -> str:
+    """Return a bounded list of visible selectors useful for browser replanning."""
+    try:
+        rows = await page.evaluate(
+            """() => {
+                const maxCount = 30;
+                const maxLabel = 80;
+                const clean = (value) => String(value || "")
+                    .replace(/\\s+/g, " ")
+                    .trim()
+                    .slice(0, maxLabel);
+                const attr = (name, value) => {
+                    if (!value) return null;
+                    return `[${name}="${String(value).replace(/\\\\/g, "\\\\\\\\").replace(/"/g, "\\\\\\"")}"]`;
+                };
+                const idSelector = (id) => {
+                    if (!id) return null;
+                    if (window.CSS && CSS.escape) return `#${CSS.escape(id)}`;
+                    return attr("id", id);
+                };
+                const isVisible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== "hidden"
+                        && style.display !== "none"
+                        && rect.width > 0
+                        && rect.height > 0;
+                };
+                const selectorFor = (el) => {
+                    const tag = el.tagName.toLowerCase();
+                    const selectors = [];
+                    const push = (selector) => {
+                        if (selector && !selectors.includes(selector)) selectors.push(selector);
+                    };
+                    const id = idSelector(el.id);
+                    if (id) {
+                        push(id);
+                        push(`${tag}${id}`);
+                    }
+                    const testId = attr("data-testid", el.getAttribute("data-testid"));
+                    if (testId) {
+                        push(testId);
+                        push(`${tag}${testId}`);
+                    }
+                    const name = attr("name", el.getAttribute("name"));
+                    if (name) push(`${tag}${name}`);
+                    const aria = attr("aria-label", el.getAttribute("aria-label"));
+                    if (aria) push(`${tag}${aria}`);
+                    const role = attr("role", el.getAttribute("role"));
+                    if (role) push(`${tag}${role}`);
+                    const href = attr("href", el.getAttribute("href"));
+                    if (href && tag === "a") push(`${tag}${href}`);
+                    return selectors.slice(0, 3);
+                };
+                const elements = Array.from(document.querySelectorAll(
+                    "button, a[href], input, textarea, select, [role], [onclick], [id], [data-testid], [aria-label]"
+                ));
+                const rows = [];
+                for (const el of elements) {
+                    if (!isVisible(el)) continue;
+                    const selectors = selectorFor(el);
+                    if (!selectors.length) continue;
+                    const tag = el.tagName.toLowerCase();
+                    const label = clean(
+                        el.innerText
+                        || el.value
+                        || el.getAttribute("aria-label")
+                        || el.getAttribute("title")
+                        || el.getAttribute("name")
+                        || el.id
+                    );
+                    rows.push({ tag, label, selectors });
+                    if (rows.length >= maxCount) break;
+                }
+                return rows;
+            }"""
+        )
+        if not isinstance(rows, list):
+            return ""
+        return _format_selector_candidates(rows)
+    except Exception:
+        return ""
 
 
 # ── Command handlers ──────────────────────────────────────────────────────────
-# Each handler returns (success: bool, output: str, error: str).
+# Each handler returns a JSON-serializable dict.
 # Exceptions are caught internally — no handler raises.
 
-async def handle_navigate(page: Page, payload: bytes) -> tuple[bool, str, str]:
+async def handle_navigate(page: Page, payload: bytes) -> dict:
     """Navigate to a URL. Returns the final URL and page title on success.
 
     The page title is included so the model immediately knows what actually
@@ -60,12 +234,17 @@ async def handle_navigate(page: Page, payload: bytes) -> tuple[bool, str, str]:
         output = f"{page.url}"
         if title:
             output += f"\nPage title: {title}"
-        return True, output, ""
+        return await browser_result(success=True, output=output, page=page)
     except Exception as e:
-        return False, "", str(e)
+        return await browser_result(
+            success=False,
+            error=str(e),
+            error_kind=classify_navigation_error(e),
+            page=page,
+        )
 
 
-async def handle_click(page: Page, payload: bytes) -> tuple[bool, str, str]:
+async def handle_click(page: Page, payload: bytes) -> dict:
     """Click an element by CSS selector."""
     cmd = json.loads(payload)
     selector = cmd["selector"]
@@ -77,21 +256,30 @@ async def handle_click(page: Page, payload: bytes) -> tuple[bool, str, str]:
         # gives us an informative diagnostic immediately.
         count = await page.locator(selector).count()
         if count == 0:
-            title = await page.title()
-            return (
-                True,
-                f"[element not found: {selector!r} — page title is '{title}'. "
-                f"The page may be showing an age gate, CAPTCHA, or different structure. "
-                f"Do a null-selector extract to see what is actually on the page.]",
-                "",
+            return await browser_result(
+                success=False,
+                error=(
+                    f"element not found: {selector!r}. "
+                    "The page may be showing an age gate, CAPTCHA, or different structure. "
+                    "Run a null-selector extract to inspect the current page."
+                ),
+                error_kind="selector_not_found",
+                page=page,
+                selector=selector,
             )
         await page.click(selector, timeout=timeout_ms)
-        return True, f"clicked: {selector}", ""
+        return await browser_result(success=True, output=f"clicked: {selector}", page=page)
     except Exception as e:
-        return False, "", str(e)
+        return await browser_result(
+            success=False,
+            error=str(e),
+            error_kind=classify_page_action_error(e, "click_failed"),
+            page=page,
+            selector=selector,
+        )
 
 
-async def handle_type(page: Page, payload: bytes) -> tuple[bool, str, str]:
+async def handle_type(page: Page, payload: bytes) -> dict:
     """Fill an input element with text. Uses fill() which clears existing content first."""
     cmd = json.loads(payload)
     selector = cmd["selector"]
@@ -102,21 +290,30 @@ async def handle_type(page: Page, payload: bytes) -> tuple[bool, str, str]:
         # polls up to timeout_ms when the element doesn't exist.
         count = await page.locator(selector).count()
         if count == 0:
-            title = await page.title()
-            return (
-                True,
-                f"[element not found: {selector!r} — page title is '{title}'. "
-                f"Cannot type into a missing element. Do a null-selector extract "
-                f"to see the actual page content.]",
-                "",
+            return await browser_result(
+                success=False,
+                error=(
+                    f"element not found: {selector!r}. "
+                    "Cannot type into a missing element. Run a null-selector extract "
+                    "to inspect the current page."
+                ),
+                error_kind="selector_not_found",
+                page=page,
+                selector=selector,
             )
         await page.fill(selector, text, timeout=timeout_ms)
-        return True, f"typed into: {selector}", ""
+        return await browser_result(success=True, output=f"typed into: {selector}", page=page)
     except Exception as e:
-        return False, "", str(e)
+        return await browser_result(
+            success=False,
+            error=str(e),
+            error_kind=classify_page_action_error(e, "typing_failed"),
+            page=page,
+            selector=selector,
+        )
 
 
-async def handle_extract(page: Page, payload: bytes) -> tuple[bool, str, str]:
+async def handle_extract(page: Page, payload: bytes) -> dict:
     """Extract content from the current page.
 
     When a selector is given:
@@ -140,7 +337,17 @@ async def handle_extract(page: Page, payload: bytes) -> tuple[bool, str, str]:
                 # converts empty output to "Done." which completely hides the
                 # failure from the model and causes it to loop (e.g. trying to
                 # click elements that never loaded).
-                return True, f"[no elements found for selector: {selector!r} — the page may not have loaded correctly, or may be showing an age gate/CAPTCHA. Try null-selector extract to see the full page.]", ""
+                return await browser_result(
+                    success=False,
+                    error=(
+                        f"no elements found for selector: {selector!r}. "
+                        "The page may not have loaded correctly, or may be showing an age gate/CAPTCHA. "
+                        "Run a null-selector extract to inspect the full page."
+                    ),
+                    error_kind="selector_not_found",
+                    page=page,
+                    selector=selector,
+                )
             parts: list[str] = []
             for el in elements:
                 # Prefer links over bare text — links carry the actionable URL.
@@ -162,6 +369,7 @@ async def handle_extract(page: Page, payload: bytes) -> tuple[bool, str, str]:
             result = "\n".join(parts)
         else:
             # Full-page link extraction first; fall back to body text.
+            selector_summary = await extract_selector_candidates(page)
             anchors = await page.query_selector_all("a[href]")
             if anchors:
                 parts = []
@@ -176,13 +384,21 @@ async def handle_extract(page: Page, payload: bytes) -> tuple[bool, str, str]:
                 result = "\n".join(parts)
             else:
                 result = await page.inner_text("body")
+            if selector_summary:
+                result = f"{selector_summary}\n\nVisible text:\n{result}"
         # 10k char cap prevents runaway payloads from large pages.
-        return True, result[:10_000], ""
+        return await browser_result(success=True, output=result[:10_000], page=page)
     except Exception as e:
-        return False, "", str(e)
+        return await browser_result(
+            success=False,
+            error=str(e),
+            error_kind=classify_page_action_error(e, "extraction_failed"),
+            page=page,
+            selector=selector,
+        )
 
 
-async def handle_screenshot(page: Page, _payload: bytes) -> tuple[bool, str, str]:
+async def handle_screenshot(page: Page, _payload: bytes) -> dict:
     """Save a screenshot to /tmp/dexter-screenshots/ and return the path."""
     try:
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -190,39 +406,53 @@ async def handle_screenshot(page: Page, _payload: bytes) -> tuple[bool, str, str
         ts = int(time.time() * 1000)
         path = SCREENSHOT_DIR / f"screenshot_{ts}.png"
         await page.screenshot(path=str(path))
-        return True, str(path), ""
+        return await browser_result(success=True, output=str(path), page=page)
     except Exception as e:
-        return False, "", str(e)
+        return await browser_result(
+            success=False,
+            error=str(e),
+            error_kind=classify_page_action_error(e, "screenshot_failed"),
+            page=page,
+        )
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 async def run(stdin, stdout) -> None:
-    write_handshake(stdout, "browser")
-
     async with async_playwright() as pw:
-        # Launch with AutomationControlled disabled so sites don't fingerprint us as
-        # headless automation via the navigator.webdriver property or the
-        # "HeadlessChrome" user-agent token.
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-        )
-        page = await context.new_page()
-        # Belt-and-suspenders: override the webdriver property at the JS layer so
-        # even scripts that check navigator.webdriver directly get undefined.
-        await page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        try:
+            # Launch with AutomationControlled disabled so sites don't fingerprint us as
+            # headless automation via the navigator.webdriver property or the
+            # "HeadlessChrome" user-agent token.
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+            )
+            page = await context.new_page()
+            # Belt-and-suspenders: override the webdriver property at the JS layer so
+            # even scripts that check navigator.webdriver directly get undefined.
+            await page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+        except Exception as e:
+            write_startup_error_handshake(
+                stdout,
+                "browser",
+                "browser_launch_failed",
+                str(e),
+            )
+            return
+
+        write_handshake(stdout, "browser")
 
         dispatch = {
             MSG_BROWSER_NAVIGATE:   handle_navigate,
@@ -249,8 +479,7 @@ async def run(stdin, stdout) -> None:
             elif msg_type == MSG_HEALTH_PING:
                 send_frame(stdout, MSG_HEALTH_PONG, b"")
             elif msg_type in dispatch:
-                success, output, error = await dispatch[msg_type](page, payload or b"")
-                result = json.dumps({"success": success, "output": output, "error": error})
+                result = json.dumps(await dispatch[msg_type](page, payload or b""))
                 send_frame(stdout, MSG_BROWSER_RESULT, result.encode())
             # Unknown message types are silently dropped — forward protocol compat.
 

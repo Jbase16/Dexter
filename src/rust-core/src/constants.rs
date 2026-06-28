@@ -183,6 +183,16 @@ pub const PRIMARY_MODEL_KEEP_ALIVE: &str = "30m";
 /// `/api/show` call would inform Ollama but not touch the weight pages.
 pub const PRIMARY_KEEPALIVE_PING_INTERVAL_SECS: u64 = 30;
 
+/// Seconds after a foreground generation completes before PRIMARY keepalive may
+/// run again.
+///
+/// The keepalive loop is opportunistic: it should preserve model residency, not
+/// contend with user-visible work or MLX post-request cleanup. Set to half the
+/// current keepalive cadence so a normal turn gets one quiet settling window,
+/// while still allowing the next scheduled ping to keep PRIMARY warm.
+pub const PRIMARY_KEEPALIVE_RECENT_FOREGROUND_SKIP_SECS: u64 =
+    PRIMARY_KEEPALIVE_PING_INTERVAL_SECS / 2;
+
 /// Minimum seconds between KV cache prefill requests (debounce).
 ///
 /// AXElementChanged fires on every keystroke in a text editor. Without debounce,
@@ -571,12 +581,46 @@ pub const VM_STAT_CMD: &str = "vm_stat";
 /// proportionally. Tune up (16,384) only if a concrete prompt is observed to
 /// truncate.
 ///
-/// Applied to any tier where `ModelId::needs_context_cap()` is true — currently
-/// Heavy (deepseek-r1:32b, 131k native) and Code (deepseek-coder-v2:16b, 163k
-/// native). FAST and PRIMARY retain Ollama's model-trained default. Phase 37.7:
-/// renamed from HEAVY_NUM_CTX when the predicate for applying the cap was
-/// decoupled from `unload_after` (which covers only Heavy).
+/// Applied to large-context specialist tiers through `ModelId::num_ctx_override()`
+/// — currently Heavy (deepseek-r1:32b, 131k native) and Code
+/// (deepseek-coder-v2:16b, 163k native). PRIMARY/VISION have their own cap
+/// constant because their MLX latency failure mode is a separate policy decision.
+/// Phase 37.7 renamed this from HEAVY_NUM_CTX when the predicate for applying the
+/// cap was decoupled from `unload_after` (which covers only Heavy).
 pub const LARGE_MODEL_NUM_CTX: u32 = 8_192;
+
+/// Maximum context window (tokens) for normal PRIMARY/VISION requests.
+///
+/// Live measurement on 2026-06-22 showed `gemma4:26b-mlx` startup warmup was not
+/// dominated by model loading (`load_ms=125`) or generation (`eval_ms=3`), but by
+/// prompt/context prefill (`prompt_eval_ms≈149s`) plus additional unreported wall
+/// time when Ollama advertised a 262,144-token context. Startup warmup only asks
+/// for one output token from a tiny prompt, so paying native-context setup cost at
+/// daemon boot is pure latency tax.
+///
+/// The same cap is used for live PRIMARY/VISION turns so startup readiness does not
+/// lie: if warmup is capped but live requests are not, the first real PRIMARY query
+/// can rediscover the native-context prefill penalty. 8,192 is enough for normal
+/// high-quality interaction because C3/context packing keeps ambient context compact;
+/// explicit long-context modes can use a separate route later if concrete evidence
+/// requires it.
+pub const PRIMARY_NUM_CTX: u32 = 8_192;
+
+/// Maximum context window (tokens) for PRIMARY/VISION requests that need the
+/// full action-capable prompt contract.
+///
+/// Normal PRIMARY stays at 8,192 because that fixed the MLX native-context
+/// startup tax without bloating routine chat. A live model-driven browser
+/// recovery attempt on 2026-06-26 exposed the other side of that policy:
+/// `PrimaryFull` action prompts can carry ~7,600 estimated system/operator
+/// tokens before the user turn, leaving too little room inside 8k and causing
+/// Ollama to return no response headers for 120s. This cap is deliberately
+/// narrower than native 262k and only applies after prompt-profile selection
+/// chooses the full action contract.
+pub const PRIMARY_FULL_NUM_CTX: u32 = 16_384;
+
+/// Startup warmup uses the same context policy as live PRIMARY requests.
+pub const PRIMARY_WARMUP_NUM_CTX: u32 = PRIMARY_NUM_CTX;
 
 /// Minimum available (free + inactive) headroom in GiB before a HEAVY model
 /// inference request triggers a warning log entry.

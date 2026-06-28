@@ -28,7 +28,7 @@
 /// that indicates an unrecoverable session state — it means the gRPC send channel to
 /// Swift has been dropped, and the reader task will exit and call `shutdown()`.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
@@ -41,29 +41,37 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     action::{
-        engine::ActionReceiptMetadata, ActionEngine, ActionOutcome, ActionResult, ActionSpec,
-        ExecutorHandle, PolicyEngine,
+        engine::{ActionReceiptMetadata, BrowserActionKind},
+        ActionEngine, ActionOutcome, ActionResult, ActionSpec, ExecutorHandle, PolicyEngine,
+    },
+    browser::diagnostics::{
+        classify_worker_error_kind, BrowserFailureKind, BrowserRecoveryDirective,
     },
     config::{DexterConfig, ModelConfig},
     constants::{
         ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_BLOCK_CLOSE, ACTION_BLOCK_OPEN, AGENTIC_MAX_DEPTH,
         CONVERSATION_MAX_TURNS, FAST_MODEL_KEEP_ALIVE, GENERATION_HARD_TIMEOUT_SECS,
-        GENERATION_WALL_TIMEOUT_SECS, LARGE_MODEL_NUM_CTX, MEMORY_DB_FILENAME,
-        PREFILL_DEBOUNCE_SECS, PRIMARY_KEEPALIVE_PING_INTERVAL_SECS, PRIMARY_MODEL_KEEP_ALIVE,
-        RETRIEVAL_ACKNOWLEDGMENT, SCREEN_CAPTURE_PATH_PREFIX, SCREEN_CAPTURE_TIMEOUT_SECS,
+        GENERATION_WALL_TIMEOUT_SECS, MEMORY_DB_FILENAME, PREFILL_DEBOUNCE_SECS,
+        PRIMARY_FULL_NUM_CTX, PRIMARY_KEEPALIVE_PING_INTERVAL_SECS,
+        PRIMARY_KEEPALIVE_RECENT_FOREGROUND_SKIP_SECS, PRIMARY_MODEL_KEEP_ALIVE, PRIMARY_NUM_CTX,
+        PRIMARY_WARMUP_NUM_CTX, RETRIEVAL_ACKNOWLEDGMENT, SCREEN_CAPTURE_PATH_PREFIX,
+        SCREEN_CAPTURE_TIMEOUT_SECS,
     },
     context::{
         diagnostics::CompiledContextDiagnostics,
-        turn_record::{TurnCloseReason, TurnDispatchInput, TurnRecordAggregator},
+        turn_record::{
+            GenerationRecordInput, TurnCloseReason, TurnDispatchInput, TurnRecordAggregator,
+        },
     },
     context::{
         CandidateFeatures, CandidateRepresentation, ContextCandidate, ContextCompiler,
         ContextCompilerConfig, ContextInjectionTarget, ContextPriority, ContextRiskClass,
-        ContextSourceKind, RepresentationKind, RepresentationSelectionPolicy, TaskClass,
+        ContextSourceKind, PromptAssemblyDiagnostics, RepresentationKind,
+        RepresentationSelectionPolicy, TaskClass,
     },
     context_observer::{ContextObserver, ContextSnapshot},
     inference::{
-        engine::{GenerationRequest, InferenceEngine},
+        engine::{GenerationRequest, InferenceEngine, TokenChunk},
         error::InferenceError,
         models::ModelId,
         retrieval_classifier::is_retrieval_first_query,
@@ -75,7 +83,7 @@ use crate::{
         TextResponse, UiAction,
     },
     memory::{detect_memory_command, extract_facts, slug_id, MemoryCommand},
-    personality::PersonalityLayer,
+    personality::{PersonalityLayer, PromptProfile},
     proactive::ProactiveEngine,
     retrieval::RetrievalPipeline,
     session::SessionStateManager,
@@ -313,9 +321,33 @@ pub struct GenerationTelemetry {
     pub cancelled: bool,
     /// Character length of `full_response` at termination.
     pub response_len: usize,
+    /// Ollama-reported prompt token count from the final stream chunk.
+    pub prompt_eval_count: Option<u64>,
+    /// Ollama-reported prompt prefill duration from the final stream chunk.
+    pub prompt_eval_ms: Option<u64>,
+    /// Ollama-reported model load duration from the final stream chunk.
+    pub load_ms: Option<u64>,
+    /// Ollama-reported response generation duration from the final stream chunk.
+    pub eval_ms: Option<u64>,
     /// Depth in the agentic chain (0 = user-initiated). Duplicated here so the
     /// log line stands alone without having to look at the outer GenerationResult.
     pub agentic_depth: u8,
+}
+
+impl From<&GenerationTelemetry> for GenerationRecordInput {
+    fn from(telemetry: &GenerationTelemetry) -> Self {
+        Self {
+            first_token_ms: telemetry.first_token_ms,
+            total_ms: telemetry.total_ms,
+            token_count: telemetry.token_count,
+            cancelled: telemetry.cancelled,
+            response_len: telemetry.response_len,
+            prompt_eval_count: telemetry.prompt_eval_count,
+            prompt_eval_ms: telemetry.prompt_eval_ms,
+            load_ms: telemetry.load_ms,
+            eval_ms: telemetry.eval_ms,
+        }
+    }
 }
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -375,6 +407,12 @@ pub struct Interaction {
     /// Threaded through all continuation steps so memory embedding stays tied to the
     /// root request rather than intermediate action results.
     pub original_content: String,
+    /// Original action spec for action-result recovery policy.
+    ///
+    /// The background ActionResult intentionally carries only audit-safe text, but
+    /// browser recovery guards need the exact selector/action that failed so a
+    /// continuation cannot repeat it blindly.
+    pub action_spec: Option<ActionSpec>,
     /// Phase 36: true when this action is a *terminal* workflow step — a successful
     /// outcome means the operator's request is fulfilled and no continuation is
     /// needed. Currently detected for iMessage send-via-AppleScript: after a Messages
@@ -383,6 +421,16 @@ pub struct Interaction {
     /// unrelated query. Setting this flag at dispatch time short-circuits the
     /// continuation after a successful completion, returning "Sent." directly.
     pub is_terminal_workflow: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserRecoveryGuard {
+    action_kind: &'static str,
+    selector: String,
+    page_url: Option<String>,
+    failure_kind: BrowserFailureKind,
+    directive: BrowserRecoveryDirective,
+    replacement_action_succeeded: bool,
 }
 
 /// Phase 36: detect whether `spec` represents a terminal iMessage send workflow.
@@ -415,6 +463,126 @@ fn is_terminal_send_action(spec: &ActionSpec) -> bool {
             s.split_ascii_whitespace().any(|tok| tok == "send")
         }
         _ => false,
+    }
+}
+
+fn browser_recovery_guard_from_failure(
+    spec: &ActionSpec,
+    error: &str,
+) -> Option<BrowserRecoveryGuard> {
+    let ActionSpec::Browser { action, .. } = spec else {
+        return None;
+    };
+    let (action_kind, selector) = browser_action_selector(action)?;
+    let failure_kind = browser_failure_kind_from_error(error)?;
+    let directive = browser_recovery_directive_from_error(error)?;
+    if directive != BrowserRecoveryDirective::ExtractPageThenReplan {
+        return None;
+    }
+    Some(BrowserRecoveryGuard {
+        action_kind,
+        selector: selector.to_string(),
+        page_url: browser_error_field(error, "page_url"),
+        failure_kind,
+        directive,
+        replacement_action_succeeded: false,
+    })
+}
+
+fn browser_recovery_guard_correction(
+    guard: Option<&BrowserRecoveryGuard>,
+    spec: &ActionSpec,
+) -> Option<String> {
+    let guard = guard?;
+    if guard.directive != BrowserRecoveryDirective::ExtractPageThenReplan {
+        return None;
+    }
+    let ActionSpec::Browser { action, .. } = spec else {
+        return None;
+    };
+    let (action_kind, selector) = browser_action_selector(action)?;
+    if action_kind != guard.action_kind || selector != guard.selector {
+        return None;
+    }
+
+    let page = guard
+        .page_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("the same browser page");
+    Some(format!(
+        "Blocked repeated browser selector after {}. Repeating {action_kind} on selector `{}` at {page} will not help. Use the supplied replan_page_state to choose a different selector, run a null-selector extract, or ask for clarification.",
+        guard.failure_kind.as_str(),
+        guard.selector
+    ))
+}
+
+fn browser_action_selector(action: &BrowserActionKind) -> Option<(&'static str, &str)> {
+    match action {
+        BrowserActionKind::Click { selector } => Some(("click", selector.as_str())),
+        BrowserActionKind::Type { selector, .. } => Some(("type", selector.as_str())),
+        BrowserActionKind::Extract {
+            selector: Some(selector),
+        } => Some(("extract", selector.as_str())),
+        BrowserActionKind::Extract { selector: None }
+        | BrowserActionKind::Navigate { .. }
+        | BrowserActionKind::Screenshot => None,
+    }
+}
+
+fn browser_recovery_observe_success(
+    guard: Option<&mut BrowserRecoveryGuard>,
+    spec: &ActionSpec,
+) -> bool {
+    let Some(guard) = guard else {
+        return false;
+    };
+    if guard.directive != BrowserRecoveryDirective::ExtractPageThenReplan {
+        return false;
+    }
+    let ActionSpec::Browser { action, .. } = spec else {
+        return false;
+    };
+
+    match browser_action_selector(action) {
+        Some((action_kind, selector))
+            if action_kind == guard.action_kind && selector != guard.selector =>
+        {
+            guard.replacement_action_succeeded = true;
+            false
+        }
+        Some(("extract", _)) if guard.replacement_action_succeeded => true,
+        _ => false,
+    }
+}
+
+fn browser_failure_kind_from_error(error: &str) -> Option<BrowserFailureKind> {
+    let rest = error.strip_prefix("Browser failure [")?;
+    let (kind, _) = rest.split_once(']')?;
+    classify_worker_error_kind(kind)
+}
+
+fn browser_recovery_directive_from_error(error: &str) -> Option<BrowserRecoveryDirective> {
+    let marker = "Next [";
+    let start = error.find(marker)? + marker.len();
+    let rest = &error[start..];
+    let (directive, _) = rest.split_once(']')?;
+    BrowserRecoveryDirective::from_str(directive)
+}
+
+fn browser_error_field(error: &str, field: &str) -> Option<String> {
+    let marker = format!("{field}=");
+    let start = error.find(&marker)? + marker.len();
+    let rest = &error[start..];
+    let end = rest
+        .find("; ")
+        .or_else(|| rest.find(" Recovery:"))
+        .unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -489,6 +657,9 @@ pub struct SharedDaemonState {
     pub embed_model_warm: Arc<AtomicBool>,
     pub startup_warmup_complete: Arc<AtomicBool>,
     pub startup_greeting_sent: Arc<AtomicBool>,
+    pub foreground_generation_count: Arc<AtomicU32>,
+    pub primary_keepalive_in_flight: Arc<AtomicBool>,
+    pub last_foreground_generation_completed_at: Arc<StdMutex<Option<Instant>>>,
     pub operator_context_snapshot: Arc<StdMutex<Option<ContextSnapshot>>>,
     /// Cross-process weight-residency pinner. Wires PRIMARY's GGUF page-cache
     /// pages resident so macOS cannot reclaim them — replacing the reactive
@@ -514,8 +685,37 @@ impl SharedDaemonState {
             embed_model_warm: Arc::new(AtomicBool::new(false)),
             startup_warmup_complete: Arc::new(AtomicBool::new(false)),
             startup_greeting_sent: Arc::new(AtomicBool::new(false)),
+            foreground_generation_count: Arc::new(AtomicU32::new(0)),
+            primary_keepalive_in_flight: Arc::new(AtomicBool::new(false)),
+            last_foreground_generation_completed_at: Arc::new(StdMutex::new(None)),
             operator_context_snapshot: Arc::new(StdMutex::new(None)),
             residency: crate::system::residency::ResidencyManager::from_env(),
+        }
+    }
+
+    fn begin_foreground_generation(&self) -> ForegroundGenerationGuard {
+        self.foreground_generation_count
+            .fetch_add(1, Ordering::SeqCst);
+        ForegroundGenerationGuard {
+            count: self.foreground_generation_count.clone(),
+            last_completed_at: self.last_foreground_generation_completed_at.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn recently_completed_foreground_generation(&self, within: std::time::Duration) -> bool {
+        match self.last_foreground_generation_completed_at.lock() {
+            Ok(guard) => guard
+                .as_ref()
+                .map(|completed_at| completed_at.elapsed() <= within)
+                .unwrap_or(false),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Foreground generation timestamp lock poisoned — keepalive recent-completion skip disabled"
+                );
+                false
+            }
         }
     }
 
@@ -668,12 +868,52 @@ impl SharedDaemonState {
                     engine.clone(),
                     cfg.models.primary.clone(),
                     self.primary_model_warm.clone(),
+                    self.foreground_generation_count.clone(),
+                    self.primary_keepalive_in_flight.clone(),
+                    self.last_foreground_generation_completed_at.clone(),
                 );
             }
         }
 
         self.startup_warmup_complete.store(true, Ordering::SeqCst);
         info!("Daemon startup warmup complete — sessions can connect with no warmup tax");
+    }
+}
+
+struct ForegroundGenerationGuard {
+    count: Arc<AtomicU32>,
+    last_completed_at: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl Drop for ForegroundGenerationGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                Some(value.saturating_sub(1))
+            });
+
+        match self.last_completed_at.lock() {
+            Ok(mut guard) => {
+                *guard = Some(Instant::now());
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Foreground generation timestamp lock poisoned — completion time not recorded"
+                );
+            }
+        }
+    }
+}
+
+struct KeepaliveInFlightGuard {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl Drop for KeepaliveInFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::SeqCst);
     }
 }
 
@@ -702,6 +942,67 @@ fn spawn_embed_warmup(
     });
 }
 
+#[derive(Debug, Default)]
+struct WarmupTiming {
+    first_chunk_ms: Option<u64>,
+    total_ms: u64,
+    load_ms: Option<u64>,
+    prompt_eval_count: Option<u64>,
+    prompt_eval_ms: Option<u64>,
+    eval_ms: Option<u64>,
+    eval_tokens: u64,
+}
+
+impl WarmupTiming {
+    fn unreported_ms(&self) -> u64 {
+        let reported_ms = self
+            .load_ms
+            .unwrap_or(0)
+            .saturating_add(self.prompt_eval_ms.unwrap_or(0))
+            .saturating_add(self.eval_ms.unwrap_or(0));
+        self.total_ms.saturating_sub(reported_ms)
+    }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    match u64::try_from(started_at.elapsed().as_millis()) {
+        Ok(ms) => ms,
+        Err(_) => u64::MAX,
+    }
+}
+
+async fn drain_warmup_stream(
+    mut rx: mpsc::Receiver<Result<TokenChunk, InferenceError>>,
+    started_at: Instant,
+) -> Result<WarmupTiming, InferenceError> {
+    let mut timing = WarmupTiming::default();
+    let mut saw_final_chunk = false;
+
+    while let Some(chunk_result) = rx.recv().await {
+        let chunk = chunk_result?;
+        if timing.first_chunk_ms.is_none() {
+            timing.first_chunk_ms = Some(elapsed_ms(started_at));
+        }
+        if chunk.done {
+            saw_final_chunk = true;
+            timing.load_ms = chunk.load_duration_ms;
+            timing.prompt_eval_count = chunk.prompt_eval_count;
+            timing.prompt_eval_ms = chunk.prompt_eval_duration_ms;
+            timing.eval_ms = chunk.eval_duration_ms;
+            timing.eval_tokens = chunk.eval_count;
+        }
+    }
+
+    timing.total_ms = elapsed_ms(started_at);
+    if saw_final_chunk {
+        Ok(timing)
+    } else {
+        Err(InferenceError::StreamInterrupted(
+            "warmup stream ended before Ollama final timing chunk".to_string(),
+        ))
+    }
+}
+
 /// Phase 38c helper — sequential FAST model warmup. Awaited by daemon-startup.
 async fn warm_fast_model_inline(
     engine: &crate::inference::engine::InferenceEngine,
@@ -709,6 +1010,7 @@ async fn warm_fast_model_inline(
     warm_flag: &Arc<AtomicBool>,
 ) {
     info!("Warming up FAST model: {model}");
+    let started_at = Instant::now();
     let req = GenerationRequest {
         model_name: model.to_string(),
         messages: vec![crate::inference::engine::Message::user("hi".to_string())],
@@ -721,13 +1023,33 @@ async fn warm_fast_model_inline(
         num_ctx_override: None,
     };
     match engine.generate_stream(req).await {
-        Ok(mut rx) => {
-            while rx.recv().await.is_some() {}
-            warm_flag.store(true, Ordering::SeqCst);
-            info!("FAST model warm: {model}");
-        }
+        Ok(rx) => match drain_warmup_stream(rx, started_at).await {
+            Ok(timing) => {
+                warm_flag.store(true, Ordering::SeqCst);
+                info!(
+                    model = %model,
+                    total_ms = timing.total_ms,
+                    first_chunk_ms = ?timing.first_chunk_ms,
+                    load_ms = ?timing.load_ms,
+                    prompt_eval_count = ?timing.prompt_eval_count,
+                    prompt_eval_ms = ?timing.prompt_eval_ms,
+                    eval_ms = ?timing.eval_ms,
+                    unreported_ms = timing.unreported_ms(),
+                    eval_tokens = timing.eval_tokens,
+                    "FAST model warm"
+                );
+            }
+            Err(e) => warn!(
+                error = %e,
+                model = %model,
+                total_ms = elapsed_ms(started_at),
+                "FAST model warmup stream failed — first query may be slow"
+            ),
+        },
         Err(e) => warn!(
             error = %e,
+            model = %model,
+            total_ms = elapsed_ms(started_at),
             "FAST model warmup failed — first query may be slow"
         ),
     }
@@ -740,6 +1062,7 @@ async fn warm_primary_model_inline(
     warm_flag: &Arc<AtomicBool>,
 ) {
     info!("Warming up PRIMARY model: {model}");
+    let started_at = Instant::now();
     let req = GenerationRequest {
         model_name: model.to_string(),
         messages: vec![crate::inference::engine::Message::user("hi".to_string())],
@@ -749,17 +1072,37 @@ async fn warm_primary_model_inline(
         num_predict: Some(1),
         // 300s window covers worst-case cold-loads on USB-SSD.
         inactivity_timeout_override_secs: Some(300),
-        num_ctx_override: None,
+        num_ctx_override: Some(PRIMARY_WARMUP_NUM_CTX),
     };
     match engine.generate_stream(req).await {
-        Ok(mut rx) => {
-            while rx.recv().await.is_some() {}
-            warm_flag.store(true, Ordering::SeqCst);
-            info!("PRIMARY model warm: {model}");
-        }
+        Ok(rx) => match drain_warmup_stream(rx, started_at).await {
+            Ok(timing) => {
+                warm_flag.store(true, Ordering::SeqCst);
+                info!(
+                    model = %model,
+                    total_ms = timing.total_ms,
+                    first_chunk_ms = ?timing.first_chunk_ms,
+                    load_ms = ?timing.load_ms,
+                    prompt_eval_count = ?timing.prompt_eval_count,
+                    prompt_eval_ms = ?timing.prompt_eval_ms,
+                    eval_ms = ?timing.eval_ms,
+                    unreported_ms = timing.unreported_ms(),
+                    num_ctx = PRIMARY_WARMUP_NUM_CTX,
+                    eval_tokens = timing.eval_tokens,
+                    "PRIMARY model warm"
+                );
+            }
+            Err(e) => warn!(
+                error = %e,
+                model = %model,
+                total_ms = elapsed_ms(started_at),
+                "PRIMARY model warmup stream failed — first PRIMARY-routed query may stall"
+            ),
+        },
         Err(e) => warn!(
             error = %e,
             model = %model,
+            total_ms = elapsed_ms(started_at),
             "PRIMARY model warmup failed — first PRIMARY-routed query may stall. \
              Confirm the model is pulled in Ollama (`ollama list`)."
         ),
@@ -946,6 +1289,10 @@ pub struct CoreOrchestrator {
     /// same action spec as the previous step, the chain is stopped immediately with an
     /// error message rather than re-dispatching the identical failing action.
     last_agentic_action_json: Option<String>,
+    /// Browser-specific recovery guard armed by failed browser actions that return
+    /// `Next [extract_page_then_replan]`. Blocks the continuation from repeating
+    /// the same selector/action on the same page before it reaches Playwright.
+    last_browser_recovery_guard: Option<BrowserRecoveryGuard>,
     /// Residency policy (off / pin+keepalive / pin-retire-keepalive). Read by
     /// `maybe_rewarm_primary` to decide whether to re-pin PRIMARY after a HEAVY
     /// swap. Sourced from `[residency]` in config; defaults to `pin_keepalive`.
@@ -1074,7 +1421,8 @@ impl CoreOrchestrator {
             embed_model_warm: shared.embed_model_warm.clone(),
             voice_mode: false,              // Phase 34
             last_agentic_action_json: None, // Phase 35
-            pending_primary_rewarm: false,  // Phase 37.5 / B5
+            last_browser_recovery_guard: None,
+            pending_primary_rewarm: false, // Phase 37.5 / B5
         })
     }
 
@@ -1157,6 +1505,9 @@ impl CoreOrchestrator {
         engine: InferenceEngine,
         model: String,
         warm_flag: Arc<AtomicBool>,
+        foreground_generation_count: Arc<AtomicU32>,
+        keepalive_in_flight: Arc<AtomicBool>,
+        last_foreground_generation_completed_at: Arc<StdMutex<Option<Instant>>>,
     ) {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
@@ -1174,6 +1525,54 @@ impl CoreOrchestrator {
                     // we'll resume pinging on the next tick.
                     continue;
                 }
+                let active_foreground = foreground_generation_count.load(Ordering::SeqCst);
+                if active_foreground > 0 {
+                    debug!(
+                        model = %model,
+                        active_foreground_generations = active_foreground,
+                        "PRIMARY keepalive skipped — foreground generation active"
+                    );
+                    continue;
+                }
+                let recent_foreground = match last_foreground_generation_completed_at.lock() {
+                    Ok(guard) => guard
+                        .as_ref()
+                        .map(|completed_at| {
+                            completed_at.elapsed()
+                                <= std::time::Duration::from_secs(
+                                    PRIMARY_KEEPALIVE_RECENT_FOREGROUND_SKIP_SECS,
+                                )
+                        })
+                        .unwrap_or(false),
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "PRIMARY keepalive recent-foreground check failed — continuing without recent-completion skip"
+                        );
+                        false
+                    }
+                };
+                if recent_foreground {
+                    debug!(
+                        model = %model,
+                        recent_skip_secs = PRIMARY_KEEPALIVE_RECENT_FOREGROUND_SKIP_SECS,
+                        "PRIMARY keepalive skipped — foreground generation completed recently"
+                    );
+                    continue;
+                }
+                if keepalive_in_flight
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    debug!(
+                        model = %model,
+                        "PRIMARY keepalive skipped — previous keepalive still in flight"
+                    );
+                    continue;
+                }
+                let _keepalive_guard = KeepaliveInFlightGuard {
+                    in_flight: keepalive_in_flight.clone(),
+                };
 
                 let req = GenerationRequest {
                     model_name: model.clone(),
@@ -1187,9 +1586,11 @@ impl CoreOrchestrator {
                     // 60 s, the model is in bad shape (unloaded, OOM, etc.) —
                     // bail rather than hanging the ping loop.
                     inactivity_timeout_override_secs: Some(60),
-                    num_ctx_override: None,
+                    num_ctx_override: Some(PRIMARY_NUM_CTX),
                 };
-                match engine.generate_stream(req).await {
+                let started_at = Instant::now();
+                let keepalive_result = engine.generate_stream(req).await;
+                match keepalive_result {
                     Ok(mut rx) => {
                         // Drain the token stream. Inspect the final chunk's
                         // load_duration_ms as the proof-of-work signal: a
@@ -1199,30 +1600,69 @@ impl CoreOrchestrator {
                         // ticks). Surfacing the duration at info! level is
                         // what makes the keepalive fix verifiable from the log
                         // rather than only from operator-perceived latency.
+                        let mut first_chunk_ms: Option<u64> = None;
                         let mut final_ld_ms: Option<u64> = None;
+                        let mut final_prompt_eval_count: Option<u64> = None;
+                        let mut final_prompt_eval_ms: Option<u64> = None;
+                        let mut final_eval_ms: Option<u64> = None;
+                        let mut final_eval_tokens: u64 = 0;
                         while let Some(chunk) = rx.recv().await {
                             if let Ok(c) = chunk {
+                                if first_chunk_ms.is_none() {
+                                    first_chunk_ms = Some(elapsed_ms(started_at));
+                                }
                                 if c.done {
                                     final_ld_ms = c.load_duration_ms;
+                                    final_prompt_eval_count = c.prompt_eval_count;
+                                    final_prompt_eval_ms = c.prompt_eval_duration_ms;
+                                    final_eval_ms = c.eval_duration_ms;
+                                    final_eval_tokens = c.eval_count;
                                 }
                             }
                         }
+                        let total_ms = elapsed_ms(started_at);
+                        let reported_ms = final_ld_ms
+                            .unwrap_or(0)
+                            .saturating_add(final_prompt_eval_ms.unwrap_or(0))
+                            .saturating_add(final_eval_ms.unwrap_or(0));
+                        let unreported_ms = total_ms.saturating_sub(reported_ms);
                         match final_ld_ms {
                             Some(ms) if ms > 5_000 => warn!(
-                                model   = %model,
+                                model = %model,
+                                total_ms,
+                                first_chunk_ms = ?first_chunk_ms,
                                 load_ms = ms,
+                                prompt_eval_count = ?final_prompt_eval_count,
+                                prompt_eval_ms = ?final_prompt_eval_ms,
+                                eval_ms = ?final_eval_ms,
+                                eval_tokens = final_eval_tokens,
+                                unreported_ms,
                                 "PRIMARY keepalive ping took a cold-load — OS reclaimed \
                                  pages between pings; consider shortening \
                                  PRIMARY_KEEPALIVE_PING_INTERVAL_SECS if this recurs"
                             ),
                             Some(ms) => info!(
-                                model   = %model,
+                                model = %model,
+                                total_ms,
+                                first_chunk_ms = ?first_chunk_ms,
                                 load_ms = ms,
+                                prompt_eval_count = ?final_prompt_eval_count,
+                                prompt_eval_ms = ?final_prompt_eval_ms,
+                                eval_ms = ?final_eval_ms,
+                                eval_tokens = final_eval_tokens,
+                                unreported_ms,
                                 "PRIMARY keepalive ping ok"
                             ),
-                            None => info!(
+                            None => warn!(
                                 model = %model,
-                                "PRIMARY keepalive ping ok (no timing reported)"
+                                total_ms,
+                                first_chunk_ms = ?first_chunk_ms,
+                                primary_keepalive_timeout_stage = if first_chunk_ms.is_none() {
+                                    "before_first_chunk"
+                                } else {
+                                    "after_first_chunk"
+                                },
+                                "PRIMARY keepalive ping ended without Ollama final timing chunk"
                             ),
                         }
                     }
@@ -1233,6 +1673,8 @@ impl CoreOrchestrator {
                         warn!(
                             error = %e,
                             model = %model,
+                            total_ms = elapsed_ms(started_at),
+                            primary_keepalive_timeout_stage = "before_first_chunk",
                             "PRIMARY keepalive ping failed — will retry on next tick"
                         );
                     }
@@ -1298,7 +1740,10 @@ impl CoreOrchestrator {
         // Build the invariant prefix: system prompt + context snapshot.
         // No recall entries — we don't have a query yet.
         let recall_entries = vec![];
-        let messages = self.prepare_messages_for_inference(&recall_entries);
+        let messages = self.prepare_messages_for_inference_with_profile(
+            &recall_entries,
+            PromptProfile::FastMinimal,
+        );
 
         let engine = self.engine.clone();
         let model_name = self.model_config.fast.clone();
@@ -1727,7 +2172,7 @@ impl CoreOrchestrator {
                 keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
                 num_predict: Some(1),
                 inactivity_timeout_override_secs: Some(300),
-                num_ctx_override: None,
+                num_ctx_override: Some(PRIMARY_NUM_CTX),
             };
             match engine.generate_stream(req).await {
                 Ok(mut rx) => {
@@ -1825,7 +2270,7 @@ impl CoreOrchestrator {
         if result.cancelled {
             if let Err(e) = self.turn_records.attach_generation(
                 &result.trace_id,
-                &result.telemetry,
+                &GenerationRecordInput::from(&result.telemetry),
                 &result.full_response,
                 None,
             ) {
@@ -1912,10 +2357,18 @@ impl CoreOrchestrator {
 
             self.context.push_tool_result(&tool_content);
 
-            let reprompt_messages = self.prepare_messages_for_inference(&[]);
+            let reprompt_messages =
+                self.prepare_messages_for_inference_with_profile(&[], PromptProfile::PrimarySlim);
             let reprompt_model = self.model_config.primary.clone();
             let reprompt_response = self
-                .generate_and_stream(&reprompt_model, reprompt_messages, &trace_id, false, None)
+                .generate_and_stream(
+                    &reprompt_model,
+                    reprompt_messages,
+                    &trace_id,
+                    false,
+                    Some(PRIMARY_NUM_CTX),
+                    None,
+                )
                 .await?;
 
             full_response.push_str(&reprompt_response);
@@ -1942,13 +2395,17 @@ impl CoreOrchestrator {
                         self.context.push_user(tool_msg.clone());
                         self.session_mgr.push_turn("retrieval", &tool_msg);
                         let follow_model = self.model_config.primary.clone();
-                        let follow_messages = self.prepare_messages_for_inference(&[]);
+                        let follow_messages = self.prepare_messages_for_inference_with_profile(
+                            &[],
+                            PromptProfile::PrimarySlim,
+                        );
                         let follow_response = self
                             .generate_and_stream(
                                 &follow_model,
                                 follow_messages,
                                 &trace_id,
                                 false,
+                                Some(PRIMARY_NUM_CTX),
                                 None,
                             )
                             .await?;
@@ -1970,7 +2427,7 @@ impl CoreOrchestrator {
         let (display_text, action_spec) = extract_action_block(&full_response);
         if let Err(e) = self.turn_records.attach_generation(
             &trace_id,
-            &telemetry,
+            &GenerationRecordInput::from(&telemetry),
             &full_response,
             action_spec.as_ref(),
         ) {
@@ -2553,6 +3010,29 @@ impl CoreOrchestrator {
             // stop the chain and surface the failure rather than re-running the same operation.
             // `last_agentic_action_json` is reset to None on every user-initiated turn
             // (depth == 0) so it never bleeds across unrelated turns.
+            if result.agentic_depth == 0 {
+                self.last_browser_recovery_guard = None;
+            } else if let Some(correction) =
+                browser_recovery_guard_correction(self.last_browser_recovery_guard.as_ref(), &spec)
+            {
+                warn!(
+                    session       = %self.session_id,
+                    trace_id      = %trace_id,
+                    agentic_depth = result.agentic_depth,
+                    correction    = %correction,
+                    "Browser recovery guard blocked repeated failed selector action"
+                );
+                self.inject_action_status_context("Action FAILED", &correction, &trace_id);
+                self.send_text(&correction, false, &trace_id).await?;
+                return self
+                    .spawn_agentic_continuation(
+                        &trace_id,
+                        result.agentic_depth.saturating_add(1),
+                        content.clone(),
+                    )
+                    .await;
+            }
+
             if result.agentic_depth > 0 {
                 let spec_json = serde_json::to_string(&spec).unwrap_or_default();
                 if self.last_agentic_action_json.as_deref() == Some(spec_json.as_str()) {
@@ -2687,6 +3167,7 @@ impl CoreOrchestrator {
                         // enforce AGENTIC_MAX_DEPTH and pass it to the next continuation.
                         agentic_depth: result.agentic_depth + 1,
                         original_content: content.clone(),
+                        action_spec: Some(spec.clone()),
                         is_terminal_workflow,
                     },
                 );
@@ -3403,6 +3884,7 @@ impl CoreOrchestrator {
             self.last_joke_turn_at = Some(Instant::now());
             self.generation_handle = Some(tokio::spawn(run_humor_generation_background(
                 engine,
+                self.shared.clone(),
                 tx_bg,
                 session_id_bg,
                 model_name,
@@ -3606,14 +4088,37 @@ impl CoreOrchestrator {
         // `Some(cat)` means the routed category was inherited from a prior turn
         // because the current utterance was ambiguous; `None` means direct
         // classification was used (no-op inheritance is intentionally suppressed).
+        let matched_domains = self.matching_domain_names_for_query(Some(content.as_str()));
+        let prompt_profile = Self::prompt_profile_for_turn(
+            decision.model,
+            &decision.category,
+            &matched_domains,
+            &content,
+        );
+        let generation_model =
+            Self::generation_model_for_prompt(decision.model, prompt_profile, &content);
+        let mut routing_reasoning = decision.reasoning.clone();
+        if generation_model != decision.model {
+            routing_reasoning = format!(
+                "{} [browser action planner: {} → {} with {} contract]",
+                routing_reasoning,
+                decision.model.tier_name(),
+                generation_model.tier_name(),
+                prompt_profile.label()
+            );
+        }
+        let num_ctx_override = Self::num_ctx_override_for_prompt(generation_model, prompt_profile);
         info!(
             session           = %self.session_id,
             trace_id          = %trace_id,
-            model             = decision.model.tier_name(),
+            model             = generation_model.tier_name(),
+            routed_model      = decision.model.tier_name(),
             category          = ?decision.category,
             complexity        = decision.complexity.0,
             inherited_category = ?decision.inherited_category,
-            reasoning         = %decision.reasoning,
+            num_ctx_override  = ?num_ctx_override,
+            prompt_profile    = %prompt_profile.label(),
+            reasoning         = %routing_reasoning,
             "Routing decision"
         );
 
@@ -3929,7 +4434,8 @@ impl CoreOrchestrator {
         // Both the original generation call and any re-prompt after retrieval MUST use
         // this helper — calling generate_stream with raw context skips personality and
         // context snapshot injection.
-        let mut messages = self.prepare_messages_for_inference(&recall_entries);
+        let mut messages =
+            self.prepare_messages_for_inference_with_profile(&recall_entries, prompt_profile);
 
         // 4c. [Phase 9] Inject Phase 9 retrieval context AFTER personality + context.
         //
@@ -4018,9 +4524,8 @@ impl CoreOrchestrator {
         //    ModelId::ollama_name() resolves the tier to the operator-configured Ollama tag.
         //    ModelId::unload_after_use() is true for Heavy, and for Vision when Vision
         //    resolves to a different model than PRIMARY (see unload_after_use docs).
-        let model_name = decision.model.ollama_name(&self.model_config).to_string();
-        let unload_after = decision.model.unload_after_use(&self.model_config);
-        let needs_context_cap = decision.model.needs_context_cap();
+        let model_name = generation_model.ollama_name(&self.model_config).to_string();
+        let unload_after = generation_model.unload_after_use(&self.model_config);
 
         // Phase 10 — TTS: if available, spawn a concurrent synthesis task and wire
         // sentence detection into the generation loop via the unbounded channel.
@@ -4051,40 +4556,53 @@ impl CoreOrchestrator {
         // after engine.generate_stream_cancellable returns Ok, drained by abort_active_generation.
         let producer_abort_bg = self.generation_producer_abort.clone();
 
-        // Phase 0 (Adaptive Context Compiler): pre-build prompt-size telemetry.
+        // Prompt Manifest: inspect the fully assembled request before dispatch.
         //
-        // Measures the exact size of the assembled `messages` vector immediately
-        // before dispatch — the only point where ALL context injection (system
-        // prompt, conversation history, [Context:] / [Clipboard:] / [Memory:] /
-        // [Shell:] blocks, retrieval, action schemas, etc.) is finalized.
-        //
-        // Goal: prove or disprove the prompt-bloat hypothesis BEFORE building
-        // the context compiler. If FAST/PRIMARY prompts routinely exceed the
-        // budget thresholds (FAST >1500, PRIMARY >3000, CODE/HEAVY >4000), the
-        // compiler is mandatory. If they're consistently lean, the 20s prompt
-        // eval observed on HEAVY is compute-bound and the compiler won't fix it.
-        //
-        // Char-count / 4 is a rough estimator; real tokenizer integration lands
-        // in PR 2. Image payloads are excluded because Ollama processes them
-        // separately and base64 length doesn't correspond to token cost.
-        // Remove or downgrade to debug! once baseline data is collected.
-        {
-            let mut prompt_chars: usize = 0;
-            for m in &messages {
-                prompt_chars += m.role.chars().count() + m.content.chars().count() + 4;
-                // role wrappers
+        // ContextCompiler diagnostics explain only the ambient OS context. This
+        // manifest accounts for the whole prompt — personality/system text,
+        // wall-clock injection, retrieved memory, synthetic action results,
+        // conversation history, and the current user turn. It is intentionally
+        // diagnostic-only; prompt slimming happens in a later pass after the
+        // manifest identifies the largest sections.
+        let prompt_manifest = PromptAssemblyDiagnostics::from_messages(
+            format!("{:?}", decision.category),
+            model_name.clone(),
+            prompt_profile.label(),
+            num_ctx_override,
+            &messages,
+        );
+        if let Some(num_ctx) = num_ctx_override {
+            let system_operator_tokens = prompt_manifest.system_operator_estimated_tokens();
+            if system_operator_tokens > (num_ctx as usize / 2) {
+                warn!(
+                    trace_id = %trace_id,
+                    model = %model_name,
+                    prompt_profile = %prompt_profile.label(),
+                    system_operator_estimated_tokens = system_operator_tokens,
+                    num_ctx_override = num_ctx,
+                    "Prompt system/operator context consumes more than half of the context window"
+                );
             }
-            let prompt_estimated_tokens = (prompt_chars / 4).max(1);
-            info!(
+        }
+        match serde_json::to_string(&prompt_manifest) {
+            Ok(manifest_json) => info!(
                 trace_id                = %trace_id,
                 model                   = %model_name,
                 category                = ?decision.category,
                 complexity              = ?decision.complexity,
-                message_count           = messages.len(),
-                prompt_chars            = prompt_chars,
-                prompt_estimated_tokens = prompt_estimated_tokens,
-                "PHASE0 prompt size pre-dispatch"
-            );
+                prompt_profile          = %prompt_profile.label(),
+                num_ctx_override        = ?num_ctx_override,
+                message_count           = prompt_manifest.message_count,
+                prompt_chars            = prompt_manifest.total_chars,
+                prompt_estimated_tokens = prompt_manifest.total_estimated_tokens,
+                manifest                = %manifest_json,
+                "Prompt Assembly diagnostics"
+            ),
+            Err(e) => warn!(
+                trace_id = %trace_id,
+                error = %e,
+                "Prompt Assembly diagnostics serialization failed"
+            ),
         }
 
         if let Some(context_diagnostics) = self.latest_context_diagnostics.clone() {
@@ -4110,13 +4628,14 @@ impl CoreOrchestrator {
 
         self.generation_handle = Some(tokio::spawn(run_generation_background(
             engine,
+            self.shared.clone(),
             tx_bg,
             session_id_bg,
             model_name,
             messages,
             trace_id,
             unload_after,
-            needs_context_cap,
+            num_ctx_override,
             tts_tx_opt,
             tts_join_handle,
             tts_stream_id,
@@ -4159,8 +4678,10 @@ impl CoreOrchestrator {
         messages: Vec<crate::inference::engine::Message>,
         trace_id: &str,
         unload_after: bool,
+        num_ctx_override: Option<u32>,
         tts_tx: Option<UnboundedSender<String>>, // MOVED in; dropped when fn returns
     ) -> Result<String, OrchestratorError> {
+        let _foreground_guard = self.shared.begin_foreground_generation();
         let req = GenerationRequest {
             model_name: model_name.to_string(),
             messages,
@@ -4173,11 +4694,7 @@ impl CoreOrchestrator {
             },
             num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override: if unload_after {
-                Some(LARGE_MODEL_NUM_CTX)
-            } else {
-                None
-            },
+            num_ctx_override,
         };
 
         let mut full_response = String::new();
@@ -4562,6 +5079,27 @@ impl CoreOrchestrator {
         );
     }
 
+    fn update_browser_recovery_guard(
+        &mut self,
+        action_spec: Option<&ActionSpec>,
+        outcome: &ActionOutcome,
+    ) {
+        let Some(spec) = action_spec else {
+            return;
+        };
+        if !matches!(spec, ActionSpec::Browser { .. }) {
+            return;
+        }
+
+        match outcome {
+            ActionOutcome::Completed { .. } => {}
+            ActionOutcome::Rejected { error, .. } => {
+                self.last_browser_recovery_guard = browser_recovery_guard_from_failure(spec, error);
+            }
+            ActionOutcome::PendingApproval { .. } => {}
+        }
+    }
+
     /// Submit an exact ActionSpec from the dexter-cli synthetic action path.
     ///
     /// This is intentionally not exposed through the Swift UI. It exists so live
@@ -4943,7 +5481,15 @@ impl CoreOrchestrator {
         let agentic_depth = interaction.agentic_depth;
         let original_content = interaction.original_content.clone();
         let is_terminal_workflow = interaction.is_terminal_workflow;
+        let attempted_action_spec = interaction.action_spec.clone();
         interaction.stage = InteractionStage::Complete;
+        let browser_recovery_confirmed = match (&attempted_action_spec, &result.outcome) {
+            (Some(spec), ActionOutcome::Completed { .. }) => {
+                browser_recovery_observe_success(self.last_browser_recovery_guard.as_mut(), spec)
+            }
+            _ => false,
+        };
+        self.update_browser_recovery_guard(attempted_action_spec.as_ref(), &result.outcome);
 
         // Inject the action outcome into conversation context so the model knows
         // what happened on the next turn. Without this, every subsequent turn
@@ -5029,6 +5575,35 @@ impl CoreOrchestrator {
             }
         }
 
+        if browser_recovery_confirmed {
+            info!(
+                session   = %self.session_id,
+                action_id = %result.action_id,
+                trace_id  = %result.trace_id,
+                "Browser recovery confirmed — skipping continuation"
+            );
+            self.last_browser_recovery_guard = None;
+            let operator_status = action_result_status_text(
+                &result.outcome,
+                result.description.as_deref(),
+                &feedback_text,
+            );
+            self.send_text(&operator_status, false, &result.trace_id)
+                .await?;
+            self.send_action_receipt_for_outcome(
+                &result.outcome,
+                &result.action_type,
+                &result.category,
+                result.description.as_deref(),
+                &feedback_text,
+                None,
+                &result.trace_id,
+            )
+            .await?;
+            self.send_state(EntityState::Idle, &result.trace_id).await?;
+            return Ok(());
+        }
+
         let operator_status = action_result_status_text(
             &result.outcome,
             result.description.as_deref(),
@@ -5054,32 +5629,50 @@ impl CoreOrchestrator {
             "Action result surfaced to operator"
         );
 
+        self.spawn_agentic_continuation(&result.trace_id, agentic_depth, original_content)
+            .await
+    }
+
+    async fn spawn_agentic_continuation(
+        &mut self,
+        trace_id: &str,
+        agentic_depth: u8,
+        original_content: String,
+    ) -> Result<(), OrchestratorError> {
         if agentic_depth >= AGENTIC_MAX_DEPTH {
             warn!(
                 session       = %self.session_id,
+                trace_id      = %trace_id,
                 agentic_depth = agentic_depth,
                 max           = AGENTIC_MAX_DEPTH,
                 "Agentic chain exceeded max depth — stopping"
             );
             let msg = "I've taken several steps but couldn't finish. Let me know how you'd like to proceed.";
-            let spoke = self.speak_action_feedback(msg, &result.trace_id).await?;
+            let spoke = self.speak_action_feedback(msg, trace_id).await?;
             if !spoke {
-                self.send_state(EntityState::Idle, &result.trace_id).await?;
+                self.send_state(EntityState::Idle, trace_id).await?;
             }
             return Ok(());
         }
 
+        info!(
+            session       = %self.session_id,
+            trace_id      = %trace_id,
+            agentic_depth = agentic_depth,
+            "Spawning agentic continuation generation"
+        );
+
         // Build continuation message list — context now includes all prior action
         // results and assistant turns from this chain. No extra user message is
         // appended: the model sees the tool result at the tail and continues naturally.
-        let messages = self.prepare_messages_for_inference(&[]);
+        let messages =
+            self.prepare_messages_for_inference_with_profile(&[], PromptProfile::PrimaryFull);
 
-        self.send_state(EntityState::Thinking, &result.trace_id)
-            .await?;
+        self.send_state(EntityState::Thinking, trace_id).await?;
 
         let (tts_tx_opt, tts_join_handle, tts_stream_id) = self.make_tts_channel();
         if tts_tx_opt.is_some() {
-            self.arm_audio_playback_wait(&result.trace_id);
+            self.arm_audio_playback_wait(trace_id);
         }
         let cancel_token = self.cancel_token.clone();
         let gen_tx = self.generation_tx.clone();
@@ -5096,13 +5689,14 @@ impl CoreOrchestrator {
 
         self.generation_handle = Some(tokio::spawn(run_generation_background(
             engine,
+            self.shared.clone(),
             tx_bg,
             session_id_bg,
             model_name,
             messages,
-            result.trace_id.clone(),
+            trace_id.to_string(),
             false, // unload_after: FAST model stays pinned
-            false, // needs_context_cap: FAST fits in VRAM at native context
+            None,  // num_ctx_override: FAST fits in VRAM at native context
             tts_tx_opt,
             tts_join_handle,
             tts_stream_id,
@@ -5448,23 +6042,16 @@ impl CoreOrchestrator {
     /// this helper. Calling `generate_stream` with `&self.context.messages()` directly
     /// skips steps 1 and 2, producing an out-of-persona response that lacks the
     /// uncertainty protocol instructions and current machine context.
+    #[cfg(test)]
     pub(crate) fn prepare_messages_for_inference(
         &mut self,
         recall: &[crate::retrieval::store::MemoryEntry],
     ) -> Vec<crate::inference::engine::Message> {
-        // Round 3 / T1.2: extract the last genuine user message to drive domain-block
-        // selection in the personality layer. Tool-result injections (identified by
-        // is_tool_result_content) are skipped — they don't represent operator intent.
-        // For an agentic continuation with no trailing genuine query, we fall back to
-        // the Interaction's `original_content` (the query that started the chain).
-        let query_hint: Option<&str> = self
-            .context
-            .messages()
-            .iter()
-            .rev()
-            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
-            .map(|m| m.content.as_str());
-        let matched = query_hint
+        self.prepare_messages_for_inference_with_profile(recall, PromptProfile::PrimaryFull)
+    }
+
+    fn matching_domain_names_for_query(&self, query_hint: Option<&str>) -> Vec<String> {
+        query_hint
             .map(|q| {
                 self.personality
                     .profile()
@@ -5479,19 +6066,157 @@ impl CoreOrchestrator {
                     .map(|d| d.name.clone())
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn prompt_profile_for_turn(
+        model: ModelId,
+        category: &Category,
+        matched_domains: &[String],
+        user_text: &str,
+    ) -> PromptProfile {
+        match model {
+            ModelId::Heavy => PromptProfile::HeavyReasoning,
+            ModelId::Code => PromptProfile::CodeFull,
+            ModelId::Fast => PromptProfile::FastMinimal,
+            ModelId::Embed => PromptProfile::FastMinimal,
+            ModelId::Primary | ModelId::Vision => {
+                if matches!(category, Category::Code) {
+                    PromptProfile::CodeFull
+                } else if !matched_domains.is_empty()
+                    || Self::looks_action_capable_request(user_text)
+                {
+                    PromptProfile::PrimaryFull
+                } else {
+                    PromptProfile::PrimarySlim
+                }
+            }
+        }
+    }
+
+    fn looks_action_capable_request(user_text: &str) -> bool {
+        let lower = user_text.to_lowercase();
+        const ACTION_MARKERS: &[&str] = &[
+            "open ",
+            "close ",
+            "click ",
+            "tap ",
+            "type ",
+            "press ",
+            "drag ",
+            "run ",
+            "execute ",
+            "send ",
+            "text ",
+            "message ",
+            "email ",
+            "write ",
+            "create ",
+            "delete ",
+            "remove ",
+            "move ",
+            "rename ",
+            "copy ",
+            "paste ",
+            "download ",
+            "install ",
+            "restart ",
+            "kill ",
+            "terminal",
+            "shell",
+            "applescript",
+            "safari",
+            "chrome",
+            "finder",
+            "messages",
+            "contacts",
+            "click on",
+            "on my screen",
+        ];
+
+        ACTION_MARKERS.iter().any(|marker| lower.contains(marker))
+    }
+
+    fn num_ctx_override_for_prompt(model: ModelId, prompt_profile: PromptProfile) -> Option<u32> {
+        match (model, prompt_profile) {
+            (ModelId::Primary | ModelId::Vision, PromptProfile::PrimaryFull) => {
+                Some(PRIMARY_FULL_NUM_CTX)
+            }
+            _ => model.num_ctx_override(),
+        }
+    }
+
+    fn generation_model_for_prompt(
+        routed_model: ModelId,
+        prompt_profile: PromptProfile,
+        user_text: &str,
+    ) -> ModelId {
+        if matches!(routed_model, ModelId::Primary | ModelId::Vision)
+            && prompt_profile == PromptProfile::PrimaryFull
+            && Self::looks_browser_action_request(user_text)
+        {
+            ModelId::Fast
+        } else {
+            routed_model
+        }
+    }
+
+    fn looks_browser_action_request(user_text: &str) -> bool {
+        let lower = user_text.to_lowercase();
+        const BROWSER_ACTION_MARKERS: &[&str] = &[
+            "browser action",
+            "browser actions",
+            "open in the browser",
+            "use the browser",
+            "navigate to",
+            "click selector",
+            "click exactly this selector",
+            "extract selector",
+            "extract exactly this selector",
+            "page title",
+            "current page",
+            "safari",
+            "chrome",
+        ];
+
+        BROWSER_ACTION_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+    }
+
+    pub(crate) fn prepare_messages_for_inference_with_profile(
+        &mut self,
+        recall: &[crate::retrieval::store::MemoryEntry],
+        prompt_profile: PromptProfile,
+    ) -> Vec<crate::inference::engine::Message> {
+        // Round 3 / T1.2: extract the last genuine user message to drive domain-block
+        // selection in the personality layer. Tool-result injections (identified by
+        // is_tool_result_content) are skipped — they don't represent operator intent.
+        // For an agentic continuation with no trailing genuine query, we fall back to
+        // the Interaction's `original_content` (the query that started the chain).
+        let query_hint: Option<&str> = self
+            .context
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !is_tool_result_content(&m.content))
+            .map(|m| m.content.as_str());
+        let matched = self.matching_domain_names_for_query(query_hint);
         if !matched.is_empty() {
             debug!(
                 session    = %self.session_id,
                 domains    = ?matched,
+                prompt_profile = %prompt_profile.label(),
                 "Domain blocks loaded for this turn"
             );
         }
         // Step 1: apply personality — returns a new Vec with system prompt at index 0.
         //         The hint conditionally injects matching domain blocks (T1.2).
-        let mut messages = self
-            .personality
-            .apply_to_messages_for(self.context.messages(), query_hint);
+        let mut messages = self.personality.apply_to_messages_for_profile(
+            self.context.messages(),
+            query_hint,
+            prompt_profile,
+        );
 
         // Step 2a: always inject the current wall-clock time.
         // qwen3 has no real-time clock — without this it confidently hallucinates the time
@@ -6580,7 +7305,7 @@ async fn collect_humor_candidate(
         keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
         num_predict: Some(if count > 1 { 500 } else { 180 }),
         inactivity_timeout_override_secs: None,
-        num_ctx_override: None,
+        num_ctx_override: Some(PRIMARY_NUM_CTX),
     };
 
     let started = std::time::Instant::now();
@@ -6648,6 +7373,7 @@ async fn collect_humor_candidate(
 
 async fn run_humor_generation_background(
     engine: InferenceEngine,
+    shared: SharedDaemonState,
     tx: mpsc::Sender<Result<ServerEvent, Status>>,
     session_id: String,
     model_name: String,
@@ -6659,6 +7385,7 @@ async fn run_humor_generation_background(
     embed_model: String,
     producer_abort_slot: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
 ) {
+    let _foreground_guard = shared.begin_foreground_generation();
     let effective_content = crate::humor::effective_request_for_generation(&content, &history);
     let plan = crate::humor::build_humor_plan(&effective_content);
     let recent = crate::humor::recent_jokes_from_messages(&history);
@@ -6675,6 +7402,7 @@ async fn run_humor_generation_background(
         requested_count         = plan.count,
         prompt_chars            = prompt_chars,
         prompt_estimated_tokens = (prompt_chars / 4).max(1),
+        num_ctx_override        = PRIMARY_NUM_CTX,
         "Humor Engine dispatch"
     );
 
@@ -6861,6 +7589,10 @@ async fn run_humor_generation_background(
         token_count: total_tokens,
         cancelled,
         response_len: final_output.len(),
+        prompt_eval_count: None,
+        prompt_eval_ms: None,
+        load_ms: None,
+        eval_ms: None,
         agentic_depth: 0,
     };
     info!(
@@ -6911,18 +7643,19 @@ async fn run_humor_generation_background(
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_background(
     engine: crate::inference::engine::InferenceEngine,
+    shared: SharedDaemonState,
     tx: mpsc::Sender<Result<ServerEvent, Status>>,
     session_id: String,
     model_name: String,
     messages: Vec<crate::inference::engine::Message>,
     trace_id: String,
     unload_after: bool,
-    // Phase 37.7: orthogonal to unload_after. unload_after governs keep_alive
-    // (evict after this request); needs_context_cap governs num_ctx (cap KV
-    // cache on load). Heavy wants both; Code wants cap but stays warm; Primary
-    // wants neither. Previously conflated via `unload_after`, which left CODE
-    // queries uncapped → 128k-token KV cache → CPU spill → stuck-think timeout.
-    needs_context_cap: bool,
+    // Phase 37.7/MLX cap: orthogonal to unload_after. unload_after governs
+    // keep_alive (evict after this request); num_ctx_override governs KV/context
+    // allocation. Heavy wants both; Code/Primary/Vision want a cap but stay warm.
+    // Previously this was a bool mapped to LARGE_MODEL_NUM_CTX, which could not
+    // represent tier-specific caps.
+    num_ctx_override: Option<u32>,
     tts_tx_opt: Option<UnboundedSender<String>>,
     tts_join_handle: Option<JoinHandle<()>>,
     tts_stream_id: Option<String>,
@@ -6938,6 +7671,7 @@ async fn run_generation_background(
     // a long-finished task.
     producer_abort_slot: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
 ) {
+    let _foreground_guard = shared.begin_foreground_generation();
     use crate::inference::interceptor::{InterceptorOutput, UncertaintyInterceptor};
     use crate::ipc::proto::{server_event, AudioResponse};
     use crate::voice::sentence::SentenceSplitter;
@@ -6962,23 +7696,23 @@ async fn run_generation_background(
         // can spend 30–60s loading off the USB-SSD with zero bytes on the HTTP
         // stream. The default 30s inactivity timeout would abort the request
         // before the first token ever arrives. 120s covers realistic worst
-        // cases for both. Keyed on `needs_context_cap` rather than `unload_after`
-        // because CODE stays warm after first load but still pays the initial
-        // cold-load tax. GENERATION_WALL_TIMEOUT_SECS (90s, stuck-think) and
-        // GENERATION_HARD_TIMEOUT_SECS (180s) still bound the whole request.
-        inactivity_timeout_override_secs: if needs_context_cap { Some(120) } else { None },
+        // cases for both. Keyed on `num_ctx_override` rather than `unload_after`
+        // because capped tiers can stay warm after first load but still pay the
+        // initial cold-load or context-setup tax. GENERATION_WALL_TIMEOUT_SECS
+        // and GENERATION_HARD_TIMEOUT_SECS still bound the whole request.
+        inactivity_timeout_override_secs: if num_ctx_override.is_some() {
+            Some(120)
+        } else {
+            None
+        },
         // Phase 37.6 / Cluster-E (B15), extended Phase 37.7: cap KV-cache
         // context window for tiers with huge native contexts. deepseek-r1:32b
         // (131k native) and deepseek-coder-v2:16b (163k native) would each
         // allocate 20–32 GiB KV cache without this cap, CPU-spilling and
         // making first-token latency exceed our 90s wall timeout. 8k is
-        // plenty for Dexter's single-turn reasoning/code workloads. FAST
-        // and PRIMARY keep their model-trained defaults.
-        num_ctx_override: if needs_context_cap {
-            Some(LARGE_MODEL_NUM_CTX)
-        } else {
-            None
-        },
+        // plenty for Dexter's normal workloads. The exact tier cap is computed
+        // from ModelId before spawning this background task.
+        num_ctx_override,
     };
 
     let mut full_response = String::new();
@@ -6991,6 +7725,10 @@ async fn run_generation_background(
     let telemetry_model = req.model_name.clone();
     let mut token_count: u32 = 0;
     let mut first_token_at: Option<std::time::Instant> = None;
+    let mut final_prompt_eval_count: Option<u64> = None;
+    let mut final_prompt_eval_ms: Option<u64> = None;
+    let mut final_load_ms: Option<u64> = None;
+    let mut final_eval_ms: Option<u64> = None;
     // Wall-clock deadlines (T1.3): two distinct guards.
     //   - GENERATION_WALL_TIMEOUT_SECS: fires when full_response is still empty (stuck
     //     in silent think mode — per-chunk inactivity timer never trips because chunks
@@ -7206,6 +7944,10 @@ async fn run_generation_background(
                         }
                     }
                     Ok(done_chunk) => {
+                        final_prompt_eval_count = done_chunk.prompt_eval_count;
+                        final_prompt_eval_ms = done_chunk.prompt_eval_duration_ms;
+                        final_load_ms = done_chunk.load_duration_ms;
+                        final_eval_ms = done_chunk.eval_duration_ms;
                         // Phase 37.9 diagnostic: surface unexpected cold-loads.
                         //
                         // Ollama reports `load_duration` on the final chunk. On a model
@@ -7317,6 +8059,10 @@ async fn run_generation_background(
         token_count,
         cancelled,
         response_len: full_response.len(),
+        prompt_eval_count: final_prompt_eval_count,
+        prompt_eval_ms: final_prompt_eval_ms,
+        load_ms: final_load_ms,
+        eval_ms: final_eval_ms,
         agentic_depth,
     };
     info!(
@@ -7327,6 +8073,10 @@ async fn run_generation_background(
         total_ms       = telemetry.total_ms,
         tokens         = telemetry.token_count,
         response_len   = telemetry.response_len,
+        prompt_eval_count = ?telemetry.prompt_eval_count,
+        prompt_eval_ms = ?telemetry.prompt_eval_ms,
+        load_ms = ?telemetry.load_ms,
+        eval_ms = ?telemetry.eval_ms,
         cancelled      = telemetry.cancelled,
         agentic_depth  = telemetry.agentic_depth,
         "gen_complete"
@@ -7400,6 +8150,10 @@ async fn run_shell_error_proactive_background(
         token_count: 0,
         cancelled: false,
         response_len: len,
+        prompt_eval_count: None,
+        prompt_eval_ms: None,
+        load_ms: None,
+        eval_ms: None,
         agentic_depth: 0,
     };
 
@@ -9308,6 +10062,164 @@ mod tests {
     }
 
     #[test]
+    fn warmup_timing_unreported_ms_saturates_after_reported_fields() {
+        let timing = WarmupTiming {
+            first_chunk_ms: Some(10),
+            total_ms: 1_000,
+            load_ms: Some(100),
+            prompt_eval_count: Some(42),
+            prompt_eval_ms: Some(250),
+            eval_ms: Some(50),
+            eval_tokens: 1,
+        };
+        assert_eq!(timing.unreported_ms(), 600);
+
+        let over_reported = WarmupTiming {
+            total_ms: 100,
+            load_ms: Some(80),
+            prompt_eval_ms: Some(80),
+            eval_ms: Some(80),
+            ..WarmupTiming::default()
+        };
+        assert_eq!(over_reported.unreported_ms(), 0);
+    }
+
+    #[test]
+    fn foreground_generation_guard_tracks_count_and_recent_completion() {
+        let shared = SharedDaemonState::new_degraded();
+        assert_eq!(shared.foreground_generation_count.load(Ordering::SeqCst), 0);
+        assert!(
+            !shared.recently_completed_foreground_generation(std::time::Duration::from_secs(60))
+        );
+
+        {
+            let _guard = shared.begin_foreground_generation();
+            assert_eq!(shared.foreground_generation_count.load(Ordering::SeqCst), 1);
+        }
+
+        assert_eq!(shared.foreground_generation_count.load(Ordering::SeqCst), 0);
+        assert!(shared.recently_completed_foreground_generation(std::time::Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn keepalive_in_flight_guard_clears_flag_on_drop() {
+        let in_flight = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = KeepaliveInFlightGuard {
+                in_flight: in_flight.clone(),
+            };
+            assert!(in_flight.load(Ordering::SeqCst));
+        }
+
+        assert!(!in_flight.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn prompt_profile_primary_chat_uses_slim_contract() {
+        let profile = CoreOrchestrator::prompt_profile_for_turn(
+            ModelId::Primary,
+            &Category::Chat,
+            &[],
+            "compare mlx and gguf",
+        );
+
+        assert_eq!(profile, PromptProfile::PrimarySlim);
+    }
+
+    #[test]
+    fn prompt_profile_primary_action_markers_use_full_contract() {
+        let profile = CoreOrchestrator::prompt_profile_for_turn(
+            ModelId::Primary,
+            &Category::Chat,
+            &[],
+            "open Safari and search for local model benchmarks",
+        );
+
+        assert_eq!(profile, PromptProfile::PrimaryFull);
+    }
+
+    #[test]
+    fn primary_full_prompt_uses_larger_context_cap() {
+        assert_eq!(
+            CoreOrchestrator::num_ctx_override_for_prompt(
+                ModelId::Primary,
+                PromptProfile::PrimaryFull,
+            ),
+            Some(PRIMARY_FULL_NUM_CTX)
+        );
+        assert_eq!(
+            CoreOrchestrator::num_ctx_override_for_prompt(
+                ModelId::Primary,
+                PromptProfile::PrimarySlim,
+            ),
+            Some(PRIMARY_NUM_CTX)
+        );
+    }
+
+    #[test]
+    fn browser_action_planning_uses_fast_model_with_full_contract() {
+        assert_eq!(
+            CoreOrchestrator::generation_model_for_prompt(
+                ModelId::Primary,
+                PromptProfile::PrimaryFull,
+                "Use Dexter browser actions to navigate to a local page and click exactly this selector.",
+            ),
+            ModelId::Fast
+        );
+        assert_eq!(
+            CoreOrchestrator::generation_model_for_prompt(
+                ModelId::Primary,
+                PromptProfile::PrimaryFull,
+                "send Jason a message in Messages",
+            ),
+            ModelId::Primary
+        );
+        assert_eq!(
+            CoreOrchestrator::generation_model_for_prompt(
+                ModelId::Primary,
+                PromptProfile::PrimarySlim,
+                "compare browser automation approaches",
+            ),
+            ModelId::Primary
+        );
+    }
+
+    #[test]
+    fn prompt_profile_domain_matches_use_full_contract() {
+        let domains = vec!["imessage".to_string()];
+        let profile = CoreOrchestrator::prompt_profile_for_turn(
+            ModelId::Primary,
+            &Category::Chat,
+            &domains,
+            "send an iMessage to Jason",
+        );
+
+        assert_eq!(profile, PromptProfile::PrimaryFull);
+    }
+
+    #[test]
+    fn prompt_profile_code_and_heavy_use_specialized_contracts() {
+        assert_eq!(
+            CoreOrchestrator::prompt_profile_for_turn(
+                ModelId::Code,
+                &Category::Code,
+                &[],
+                "review this Rust function"
+            ),
+            PromptProfile::CodeFull
+        );
+        assert_eq!(
+            CoreOrchestrator::prompt_profile_for_turn(
+                ModelId::Heavy,
+                &Category::Chat,
+                &[],
+                "reason deeply about this architecture"
+            ),
+            PromptProfile::HeavyReasoning
+        );
+    }
+
+    #[test]
     fn synthetic_action_payload_ignores_regular_ui_payload() {
         assert!(
             parse_synthetic_action_payload(r#"{"kind":"drag","x":12,"y":34}"#).is_none(),
@@ -11127,6 +12039,137 @@ end tell"#;
         );
     }
 
+    #[test]
+    fn browser_recovery_guard_blocks_repeated_failed_selector() {
+        let failed_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#missing".to_string(),
+            },
+            rationale: Some("click missing button".to_string()),
+            category_override: None,
+        };
+        let error = "Browser failure [selector_not_found]: selector=#missing; page_url=file:///tmp/page.html; page_title=Example; error=element not found; replan_page_state=Real Button Recovery: Inspect or extract the page before retrying with a selector that exists. Next [extract_page_then_replan]: Do not repeat the same selector.";
+        let guard =
+            browser_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let repeated_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#missing".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+
+        let correction = browser_recovery_guard_correction(Some(&guard), &repeated_spec)
+            .expect("same selector/action must be blocked");
+
+        assert!(correction.contains("Blocked repeated browser selector"));
+        assert!(correction.contains("#missing"));
+        assert!(correction.contains("file:///tmp/page.html"));
+        assert!(correction.contains("replan_page_state"));
+    }
+
+    #[test]
+    fn browser_recovery_guard_allows_null_selector_extract_recovery() {
+        let failed_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#missing".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+        let error = "Browser failure [selector_not_found]: selector=#missing; page_url=file:///tmp/page.html; error=element not found Recovery: Inspect or extract the page before retrying with a selector that exists. Next [extract_page_then_replan]: Do not repeat the same selector.";
+        let guard =
+            browser_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let extract_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Extract { selector: None },
+            rationale: None,
+            category_override: None,
+        };
+
+        assert!(browser_recovery_guard_correction(Some(&guard), &extract_spec).is_none());
+    }
+
+    #[test]
+    fn browser_recovery_guard_ignores_different_selector() {
+        let failed_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#missing".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+        let error = "Browser failure [selector_not_found]: selector=#missing; page_url=file:///tmp/page.html; error=element not found Recovery: Inspect or extract the page before retrying with a selector that exists. Next [extract_page_then_replan]: Do not repeat the same selector.";
+        let guard =
+            browser_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let different_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#real-button".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+
+        assert!(browser_recovery_guard_correction(Some(&guard), &different_spec).is_none());
+    }
+
+    #[test]
+    fn browser_recovery_observe_success_requires_confirmation_extract() {
+        let failed_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#missing".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+        let error = "Browser failure [selector_not_found]: selector=#missing; page_url=file:///tmp/page.html; error=element not found Recovery: Inspect or extract the page before retrying with a selector that exists. Next [extract_page_then_replan]: Do not repeat the same selector.";
+        let mut guard =
+            browser_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let replacement_click = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#real-button".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+        let confirmation_extract = ActionSpec::Browser {
+            action: BrowserActionKind::Extract {
+                selector: Some("#status".to_string()),
+            },
+            rationale: None,
+            category_override: None,
+        };
+
+        assert!(
+            !browser_recovery_observe_success(Some(&mut guard), &replacement_click),
+            "replacement action success marks progress but still needs confirmation"
+        );
+        assert!(guard.replacement_action_succeeded);
+        assert!(
+            browser_recovery_observe_success(Some(&mut guard), &confirmation_extract),
+            "successful confirmation extract after replacement action completes recovery"
+        );
+    }
+
+    #[test]
+    fn browser_recovery_observe_success_ignores_original_selector() {
+        let failed_spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#missing".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+        let error = "Browser failure [selector_not_found]: selector=#missing; page_url=file:///tmp/page.html; error=element not found Recovery: Inspect or extract the page before retrying with a selector that exists. Next [extract_page_then_replan]: Do not repeat the same selector.";
+        let mut guard =
+            browser_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+
+        assert!(!browser_recovery_observe_success(
+            Some(&mut guard),
+            &failed_spec
+        ));
+        assert!(!guard.replacement_action_succeeded);
+    }
+
     // ── Phase 9: Retrieval pipeline integration tests ─────────────────────────
 
     #[tokio::test]
@@ -12571,6 +13614,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: String::new(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -12661,6 +13705,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: String::new(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -12844,6 +13889,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: "find and download the video".to_string(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -12906,6 +13952,55 @@ end tell"#;
         );
     }
 
+    /// Browser recovery guard corrections use the same continuation machinery as
+    /// normal action results. A repeated failed selector should not leave Dexter
+    /// idle after injecting the correction; it should move back to THINKING so the
+    /// FAST continuation can choose a different selector, extract the page, or ask
+    /// for clarification.
+    #[tokio::test]
+    async fn browser_recovery_correction_spawns_agentic_continuation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, mut rx, _gen_rx) = make_orchestrator_with_gen_rx(tmp.path());
+        let trace_id = new_trace();
+        let correction = "Blocked repeated browser selector after selector_not_found. Use the supplied replan_page_state to choose a different selector.";
+
+        orch.inject_action_status_context("Action FAILED", correction, &trace_id);
+        orch.spawn_agentic_continuation(&trace_id, 2, "click the real button".to_string())
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        let mut saw_thinking = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let Ok(ServerEvent {
+                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)),
+                ..
+            }) = evt
+            {
+                if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
+                    saw_thinking = true;
+                }
+            }
+        }
+        assert!(
+            saw_thinking,
+            "Browser recovery correction must re-enter THINKING for replanning"
+        );
+        assert!(
+            orch.generation_handle.is_some(),
+            "Browser recovery correction must spawn a continuation generation"
+        );
+
+        let messages = orch.context.messages();
+        let injected = messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("Action FAILED"));
+        assert!(
+            injected,
+            "Browser recovery correction must be visible to the continuation model"
+        );
+    }
+
     /// Phase 32: when agentic_depth >= AGENTIC_MAX_DEPTH, the chain stops and the
     /// orchestrator speaks an explanatory message rather than looping forever.
     #[tokio::test]
@@ -12924,6 +14019,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: AGENTIC_MAX_DEPTH,
                 original_content: "some request".to_string(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -12986,6 +14082,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: "text mom yes".to_string(),
+                action_spec: None,
                 // The key flag — simulates is_terminal_send_action() == true on dispatch.
                 is_terminal_workflow: true,
             },
@@ -13067,6 +14164,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: "text mom yes".to_string(),
+                action_spec: None,
                 is_terminal_workflow: true,
             },
         );
@@ -13136,6 +14234,7 @@ end tell"#;
                     - std::time::Duration::from_secs(INTERACTION_TTL_SECS + 1),
                 agentic_depth: 0,
                 original_content: String::new(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -13151,6 +14250,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: String::new(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -13206,6 +14306,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: String::new(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );
@@ -13339,6 +14440,7 @@ end tell"#;
                 created_at: Instant::now(),
                 agentic_depth: 0,
                 original_content: String::new(),
+                action_spec: None,
                 is_terminal_workflow: false,
             },
         );

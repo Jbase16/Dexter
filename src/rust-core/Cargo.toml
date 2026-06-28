@@ -29,6 +29,7 @@ futures-util = "0.3"   # StreamExt for reqwest's Bytes stream (.next().await)
 serde_json   = "1"     # NDJSON line parsing: serde_json::from_str per line in generate_stream
 serde_yaml   = "0.9"   # PersonalityLayer: parses config/personality/default.yaml profile
 chrono       = { version = "0.4", features = ["serde"] }  # ISO8601 timestamps in SessionStateManager
+thiserror    = "1"                                            # Typed production error enums
 rusqlite     = { version = "0.32", features = ["bundled"] } # SQLite for VectorStore; bundled avoids system SQLite dep
 scraper      = "0.22"                                        # HTML5 parsing for WebRetriever text extraction
 base64       = "0.22"                                        # PNG → base64 encoding for Ollama vision API (Phase 20)

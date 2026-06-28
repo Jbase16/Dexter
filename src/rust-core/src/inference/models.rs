@@ -13,7 +13,10 @@
 /// It mirrors the fields Ollama returns in `/api/tags` that are operationally useful —
 /// `size_bytes` for disk space accounting, `parameter_size` and `quantization` for
 /// display, `families` for capability detection (e.g., whether vision is supported).
-use crate::config::ModelConfig;
+use crate::{
+    config::ModelConfig,
+    constants::{LARGE_MODEL_NUM_CTX, PRIMARY_NUM_CTX},
+};
 
 // ── ModelId ───────────────────────────────────────────────────────────────────
 
@@ -129,15 +132,34 @@ impl ModelId {
     /// exceeded the 90 s `GENERATION_WALL_TIMEOUT_SECS` ceiling and every CODE
     /// query aborted with `stuck-think timeout`.
     ///
-    /// Returns true for tiers whose native context defaults are too large to
-    /// fit alongside the always-warm stack (FAST + PRIMARY + EMBED ≈ 24 GiB):
-    /// Heavy (deepseek-r1:32b, 131k native) and Code (deepseek-coder-v2:16b,
-    /// 163k native). Fast (qwen3:8b, 40k native) and Primary (gemma4:26b MoE,
-    /// 128k native but low active-param KV footprint) stay at Ollama's default.
+    /// Returns true for tiers whose native context defaults are too large or too
+    /// expensive to use blindly on this machine:
+    /// - Primary/Vision (`gemma4:26b-mlx`) advertise a 262k context in Ollama/MLX;
+    ///   live startup measurements showed this can turn a one-token warmup into a
+    ///   multi-minute prompt-prefill path.
+    /// - Heavy/Code have huge native windows that can allocate enough KV cache to
+    ///   CPU-spill on a 36 GiB unified-memory budget.
     ///
-    /// The cap value itself lives in `constants::LARGE_MODEL_NUM_CTX`.
+    /// Fast stays at its default because its latency is acceptable and it is used
+    /// for low-latency paths. Embed has no text-generation path.
+    ///
+    /// Prefer `num_ctx_override()` when constructing requests so tier-specific cap
+    /// values are preserved.
     pub fn needs_context_cap(&self) -> bool {
-        matches!(self, ModelId::Heavy | ModelId::Code)
+        self.num_ctx_override().is_some()
+    }
+
+    /// Return the concrete Ollama `num_ctx` override for this tier.
+    ///
+    /// Keeping the cap value here avoids old boolean plumbing where every capped
+    /// model implicitly received `LARGE_MODEL_NUM_CTX`. PRIMARY/VISION and
+    /// HEAVY/CODE currently share 8,192, but they are separate policy decisions.
+    pub fn num_ctx_override(&self) -> Option<u32> {
+        match self {
+            ModelId::Primary | ModelId::Vision => Some(PRIMARY_NUM_CTX),
+            ModelId::Heavy | ModelId::Code => Some(LARGE_MODEL_NUM_CTX),
+            ModelId::Fast | ModelId::Embed => None,
+        }
     }
 }
 
@@ -248,11 +270,18 @@ mod tests {
     }
 
     #[test]
-    fn needs_context_cap_covers_heavy_and_code() {
-        // Phase 37.7: large-native-context tiers must have num_ctx capped before
-        // dispatch or Ollama allocates 20–32 GiB of KV cache and CPU-spills.
-        // Previously the predicate was conflated with `unload_after_use`, which
-        // excluded Code (stays warm but still has a 163k native context).
+    fn needs_context_cap_covers_primary_vision_heavy_and_code() {
+        // Large-native-context tiers must have num_ctx capped before dispatch.
+        // Phase 37.7 added Heavy/Code; MLX startup measurements later proved
+        // Primary/Vision need the same protection from native 262k context setup.
+        assert!(
+            ModelId::Primary.needs_context_cap(),
+            "Primary must be capped to avoid MLX native-context prefill latency"
+        );
+        assert!(
+            ModelId::Vision.needs_context_cap(),
+            "Vision aliases Primary by default and should share the cap"
+        );
         assert!(
             ModelId::Heavy.needs_context_cap(),
             "Heavy (deepseek-r1:32b, 131k native) must be capped"
@@ -262,22 +291,18 @@ mod tests {
     }
 
     #[test]
-    fn needs_context_cap_excludes_small_context_tiers() {
-        // Fast (qwen3:8b, 40k native) and Primary (gemma4:26b MoE) fit under
-        // Ollama's default allocation. Embed has no text-generation path so
-        // num_ctx is irrelevant. Vision aliases Primary by default and must
-        // not introduce a separate cap path.
+    fn needs_context_cap_excludes_fast_and_embed() {
+        // Fast latency is acceptable at its default context. Embed has no
+        // text-generation path so num_ctx is irrelevant.
         assert!(!ModelId::Fast.needs_context_cap());
-        assert!(!ModelId::Primary.needs_context_cap());
-        assert!(!ModelId::Vision.needs_context_cap());
         assert!(!ModelId::Embed.needs_context_cap());
     }
 
     #[test]
     fn needs_context_cap_is_orthogonal_to_unload_after_use() {
-        // The whole point of Phase 37.7's split is that these two properties
-        // are independent. Heavy: both true. Code: cap but no unload. Primary/Fast:
-        // neither. Pin the full truth table so future refactors can't re-conflate.
+        // These two properties are independent. Heavy: both true. Code/Primary:
+        // cap but no unload. Fast: neither. Pin the truth table so future
+        // refactors can't re-conflate.
         let cfg = default_cfg();
         assert_eq!(
             (
@@ -298,7 +323,7 @@ mod tests {
                 ModelId::Primary.unload_after_use(&cfg),
                 ModelId::Primary.needs_context_cap()
             ),
-            (false, false)
+            (false, true)
         );
         assert_eq!(
             (
@@ -307,6 +332,16 @@ mod tests {
             ),
             (false, false)
         );
+    }
+
+    #[test]
+    fn num_ctx_override_uses_tier_specific_caps() {
+        assert_eq!(ModelId::Fast.num_ctx_override(), None);
+        assert_eq!(ModelId::Embed.num_ctx_override(), None);
+        assert_eq!(ModelId::Primary.num_ctx_override(), Some(PRIMARY_NUM_CTX));
+        assert_eq!(ModelId::Vision.num_ctx_override(), Some(PRIMARY_NUM_CTX));
+        assert_eq!(ModelId::Heavy.num_ctx_override(), Some(LARGE_MODEL_NUM_CTX));
+        assert_eq!(ModelId::Code.num_ctx_override(), Some(LARGE_MODEL_NUM_CTX));
     }
 
     #[test]

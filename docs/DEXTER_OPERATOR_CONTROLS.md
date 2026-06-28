@@ -231,26 +231,49 @@ make live-smoke-diagnostic-bundle
 
 ## Action safety acceptance
 
-When you want one focused pass over Dexter's real-world action behavior without
-running the full live suite:
+When you want the fast day-to-day action safety signal, use the shared-core
+lane:
+
+```bash
+make live-smoke-action-safety-shared
+```
+
+That target starts one release core, waits for doctor-ready health, then runs
+the compatible CLI/action checks against the shared daemon. It covers local
+action diagnostics, the synthetic action matrix, deterministic browser recovery
+evidence, action receipts, approval lifecycle, and action cancellation. It does
+not prove every individual smoke can launch and warm a fresh daemon.
+
+When you want the isolated release-grade action safety pass:
 
 ```bash
 make live-smoke-action-safety
 ```
 
 That acceptance slice verifies the parts of Dexter that sit between model text
-and side effects:
+and side effects, with a fresh daemon per target and fail-fast behavior:
 
 - external integrations fail closed and surface useful errors;
 - `dexter-cli --why` can explain the latest blocked action from local evidence;
-- shell, file, browser, and AppleScript action lanes hit the right policy gate;
+- shell, file, browser, AppleScript, window, and UI action lanes hit the right
+  policy gate;
+- deterministic browser recovery produces typed evidence instead of corrupting
+  browser health;
 - safe, denied, approved, and expired actions leave readable audit receipts;
 - typed approval responses work and stale approvals expire;
-- the HUD can show action history and explain a blocked action;
-- destructive HUD actions are visibly denied and do not execute;
 - long-lived subprocesses are cancelled when the operator interrupts.
 
-The focused target deliberately excludes the opt-in Contacts/iMessage send
+When you want the full action safety plus HUD/model-driven browser sweep:
+
+```bash
+make live-smoke-action-safety-full
+```
+
+That target adds the model-driven browser recovery check and Swift HUD action
+surfaces. It intentionally continues after failures so the receipt shows the
+whole sweep.
+
+All action safety lanes deliberately exclude the opt-in Contacts/iMessage send
 smokes. Those remain separate because they depend on local Contacts data and,
 in the approve variant, can send a real message:
 

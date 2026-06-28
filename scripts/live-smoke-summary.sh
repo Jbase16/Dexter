@@ -3,11 +3,14 @@
 #
 # Usage:
 #   scripts/live-smoke-summary.sh
+#   scripts/live-smoke-summary.sh --fail-fast
 #   scripts/live-smoke-summary.sh live-smoke-action-diagnostic live-smoke-operator-status
 #   DEXTER_SMOKE_SUMMARY_TARGETS="live-smoke-cli live-smoke-hud" scripts/live-smoke-summary.sh
 #
-# The runner intentionally continues after a failing target so the operator gets
-# one complete artifact for the whole attempted pass.
+# By default the runner intentionally continues after a failing target so the
+# operator gets one complete artifact for the whole attempted pass. Use
+# --fail-fast or DEXTER_SMOKE_SUMMARY_FAIL_FAST=1 for interactive passes where
+# the first failure should stop the suite.
 
 set -u
 set -o pipefail
@@ -60,6 +63,9 @@ DEFAULT_TARGETS=(
     live-smoke-action-cancel
     live-smoke-barge-in
 )
+
+FAIL_FAST=0
+SUMMARY_STOP_REASON="completed"
 
 say() {
     printf '[%s] %s\n' "$1" "$2"
@@ -181,8 +187,29 @@ index_file.write_text("\n".join(lines), encoding="utf-8")
 PY
 }
 
-if [[ "$#" -gt 0 ]]; then
-    TARGETS=("$@")
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --fail-fast)
+            FAIL_FAST=1
+            ;;
+        --continue-on-failure)
+            FAIL_FAST=0
+            ;;
+        --)
+            ;;
+        *)
+            ARGS+=("$arg")
+            ;;
+    esac
+done
+
+if [[ "${DEXTER_SMOKE_SUMMARY_FAIL_FAST:-}" == "1" || "${DEXTER_SMOKE_SUMMARY_FAIL_FAST:-}" == "true" ]]; then
+    FAIL_FAST=1
+fi
+
+if [[ "${#ARGS[@]}" -gt 0 ]]; then
+    TARGETS=("${ARGS[@]}")
 else
     targets_from_env
 fi
@@ -201,6 +228,9 @@ overall_status=0
 
 say INFO "writing live smoke summary to $SUMMARY_FILE"
 say INFO "logs will be stored in $LOG_DIR"
+if [[ "$FAIL_FAST" -eq 1 ]]; then
+    say INFO "fail-fast enabled; stopping after the first failing target"
+fi
 
 for target in "${TARGETS[@]}"; do
     target_start="$(date '+%s')"
@@ -209,7 +239,7 @@ for target in "${TARGETS[@]}"; do
     TARGET_LOGS+=("$log_file")
 
     (
-        cd "$ROOT_DIR" || exit 0
+        cd "$ROOT_DIR" || exit 2
         bash scripts/stop-dexter.sh --quiet >/dev/null 2>&1 || true
     )
 
@@ -231,6 +261,11 @@ for target in "${TARGETS[@]}"; do
         TARGET_STATUSES+=("FAIL")
         overall_status=1
         say FAIL "$target exited $status after $(duration_label "$duration")"
+        if [[ "$FAIL_FAST" -eq 1 ]]; then
+            SUMMARY_STOP_REASON="fail_fast_after_$target"
+            say INFO "fail-fast stopping after $target"
+            break
+        fi
     fi
 done
 
@@ -256,6 +291,8 @@ done
     echo "- Duration: \`$TOTAL_DURATION\`"
     echo "- Root: \`$ROOT_DIR\`"
     echo "- Result: \`$([[ "$overall_status" -eq 0 ]] && echo PASS || echo FAIL)\`"
+    echo "- Mode: \`$([[ "$FAIL_FAST" -eq 1 ]] && echo fail-fast || echo continue-on-failure)\`"
+    echo "- Stop Reason: \`$SUMMARY_STOP_REASON\`"
     echo "- Passed: \`$pass_count\`"
     echo "- Failed: \`$fail_count\`"
     echo "- Logs: \`$LOG_DIR\`"
@@ -295,6 +332,9 @@ done
     echo
     echo '```bash'
     printf 'bash scripts/live-smoke-summary.sh'
+    if [[ "$FAIL_FAST" -eq 1 ]]; then
+        printf ' --fail-fast'
+    fi
     printf ' %q' "${TARGETS[@]}"
     echo
     echo '```'

@@ -9,12 +9,13 @@
 /// I/O borrows stdin/stdout across await.
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex,
 };
 
 use tracing::{error, info, warn};
 
 use crate::{
+    browser::diagnostics::{classify_worker_error, BrowserDiagnostic, BrowserFailureKind},
     constants::{
         BROWSER_WORKER_PATH, BROWSER_WORKER_RESULT_TIMEOUT_SECS, VOICE_PYTHON_EXE,
         VOICE_WORKER_RESTART_BACKOFF_SECS, VOICE_WORKER_RESTART_MAX_ATTEMPTS,
@@ -34,6 +35,7 @@ pub struct BrowserCoordinator {
     client: Arc<tokio::sync::Mutex<Option<WorkerClient>>>,
     is_available: Arc<AtomicBool>,
     restart_count: Arc<AtomicU32>,
+    last_failure: Arc<StdMutex<Option<BrowserDiagnostic>>>,
 }
 
 impl BrowserCoordinator {
@@ -44,6 +46,7 @@ impl BrowserCoordinator {
             client: Arc::new(tokio::sync::Mutex::new(None)),
             is_available: Arc::new(AtomicBool::new(false)),
             restart_count: Arc::new(AtomicU32::new(0)),
+            last_failure: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -56,10 +59,18 @@ impl BrowserCoordinator {
                 *self.client.lock().await = Some(client);
                 self.is_available.store(true, Ordering::Relaxed);
                 self.restart_count.store(0, Ordering::Relaxed);
+                self.clear_last_failure();
                 info!("Browser worker started");
             }
             Err(e) => {
-                error!(error = %e, "Browser worker failed to start — browser actions degraded");
+                let diagnostic = classify_worker_error(&e);
+                self.record_failure(diagnostic.clone());
+                error!(
+                    error = %e,
+                    browser_failure_kind = diagnostic.kind.as_str(),
+                    recovery_hint = diagnostic.recovery_hint,
+                    "Browser worker failed to start — browser actions degraded"
+                );
             }
         }
     }
@@ -87,6 +98,23 @@ impl BrowserCoordinator {
         self.is_available.load(Ordering::Relaxed)
     }
 
+    pub fn last_failure(&self) -> Option<BrowserDiagnostic> {
+        self.last_failure
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| {
+                Some(BrowserDiagnostic::new(
+                    BrowserFailureKind::Unknown,
+                    "browser diagnostic state lock is poisoned",
+                ))
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_last_failure_for_test(&self, diagnostic: BrowserDiagnostic) {
+        self.record_failure(diagnostic);
+    }
+
     /// True when the browser worker has exceeded restart limits and will not be retried.
     /// The orchestrator uses this to surface a one-time TextResponse to the UI.
     pub fn is_permanently_degraded(&self) -> bool {
@@ -106,24 +134,29 @@ impl BrowserCoordinator {
         payload: &[u8],
     ) -> Result<String, crate::voice::worker_client::WorkerError> {
         if !self.is_available.load(Ordering::Relaxed) {
-            return Err(crate::voice::worker_client::WorkerError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    "browser worker unavailable",
-                ),
+            let err = crate::voice::worker_client::WorkerError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "browser worker unavailable",
             ));
+            self.record_failure(classify_worker_error(&err));
+            return Err(err);
         }
 
         // Run write+read inside an inner block so the lock guard is released
         // before we (potentially) re-acquire it on the timeout path below.
         let read_result = {
             let mut guard = self.client.lock().await;
-            let client = guard.as_mut().ok_or_else(|| {
-                crate::voice::worker_client::WorkerError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    "browser worker slot is None",
-                ))
-            })?;
+            let client = match guard.as_mut() {
+                Some(client) => client,
+                None => {
+                    let err = crate::voice::worker_client::WorkerError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "browser worker slot is None",
+                    ));
+                    self.record_failure(classify_worker_error(&err));
+                    return Err(err);
+                }
+            };
 
             client
                 .write_frame(msg_type, payload)
@@ -180,6 +213,12 @@ impl BrowserCoordinator {
                     "Browser worker command timed out — dropping client to prevent stale-result poisoning",
                 );
                 self.is_available.store(false, Ordering::Relaxed);
+                self.record_failure(BrowserDiagnostic::new(
+                    BrowserFailureKind::WorkerTimeout,
+                    format!(
+                        "browser worker command exceeded {BROWSER_WORKER_RESULT_TIMEOUT_SECS}s result timeout"
+                    ),
+                ));
                 *self.client.lock().await = None;
                 Err(crate::voice::worker_client::WorkerError::HandshakeTimeout)
             }
@@ -198,6 +237,7 @@ impl BrowserCoordinator {
             }
         };
         if healthy {
+            self.clear_last_failure();
             return;
         }
 
@@ -205,6 +245,10 @@ impl BrowserCoordinator {
         if count >= VOICE_WORKER_RESTART_MAX_ATTEMPTS {
             if count == VOICE_WORKER_RESTART_MAX_ATTEMPTS {
                 // Log only once — avoid log spam on every tick after max restarts.
+                self.record_failure(BrowserDiagnostic::new(
+                    BrowserFailureKind::WorkerNotStarted,
+                    "browser worker reached max restart attempts",
+                ));
                 error!("Browser worker reached max restart attempts — browser actions permanently degraded");
             }
             return;
@@ -222,6 +266,29 @@ impl BrowserCoordinator {
         tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
 
         self.start().await;
+    }
+
+    fn record_failure(&self, diagnostic: BrowserDiagnostic) {
+        if let Ok(mut guard) = self.last_failure.lock() {
+            if diagnostic.kind == BrowserFailureKind::WorkerNotStarted {
+                if let Some(existing) = guard.as_ref() {
+                    if existing.kind != BrowserFailureKind::WorkerNotStarted {
+                        return;
+                    }
+                }
+            }
+            *guard = Some(diagnostic);
+        } else {
+            warn!("Browser diagnostic state lock poisoned — unable to record browser failure");
+        }
+    }
+
+    fn clear_last_failure(&self) {
+        if let Ok(mut guard) = self.last_failure.lock() {
+            *guard = None;
+        } else {
+            warn!("Browser diagnostic state lock poisoned — unable to clear browser failure");
+        }
     }
 
     /// Send SHUTDOWN frame and wait for process exit.

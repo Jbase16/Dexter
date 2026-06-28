@@ -35,6 +35,39 @@ use tracing::warn;
 use crate::constants::PERSONALITY_CONFIG_PATH;
 use crate::inference::engine::Message;
 
+/// Prompt contract selected for a generation request.
+///
+/// Model tier and prompt contract are deliberately separate. PRIMARY can run a
+/// short analytical answer without carrying the full action/tool constitution;
+/// action-capable turns still use the full contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptProfile {
+    FastMinimal,
+    PrimarySlim,
+    PrimaryFull,
+    CodeFull,
+    HeavyReasoning,
+}
+
+impl PromptProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            PromptProfile::FastMinimal => "fast_minimal",
+            PromptProfile::PrimarySlim => "primary_slim",
+            PromptProfile::PrimaryFull => "primary_full",
+            PromptProfile::CodeFull => "code_full",
+            PromptProfile::HeavyReasoning => "heavy_reasoning",
+        }
+    }
+
+    fn uses_slim_contract(self) -> bool {
+        matches!(
+            self,
+            PromptProfile::FastMinimal | PromptProfile::PrimarySlim
+        )
+    }
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -348,6 +381,25 @@ impl PersonalityLayer {
         self.build_system_prompt_for(None)
     }
 
+    /// Build the system prompt for a specific prompt profile.
+    ///
+    /// Full profiles preserve the historical behavior: YAML prefix, full
+    /// communication rules, full anti-pattern set, uncertainty protocol, and
+    /// matching domain blocks. Slim profiles use a compact, non-action contract
+    /// for routine chat/analysis so PRIMARY does not pay the full action-tool
+    /// prompt tax on every turn.
+    pub fn build_system_prompt_for_profile(
+        &self,
+        user_query: Option<&str>,
+        profile: PromptProfile,
+    ) -> String {
+        if profile.uses_slim_contract() {
+            self.build_slim_system_prompt(profile)
+        } else {
+            self.build_full_system_prompt_for(user_query)
+        }
+    }
+
     /// Build the complete system prompt, conditionally appending domain blocks
     /// whose triggers match `user_query`.
     ///
@@ -367,6 +419,10 @@ impl PersonalityLayer {
     ///
     /// The function is deterministic for a given (profile, user_query) pair.
     pub fn build_system_prompt_for(&self, user_query: Option<&str>) -> String {
+        self.build_system_prompt_for_profile(user_query, PromptProfile::PrimaryFull)
+    }
+
+    fn build_full_system_prompt_for(&self, user_query: Option<&str>) -> String {
         let p = &self.profile;
         let mut prompt = p.system_prompt_prefix.trim_end().to_string();
 
@@ -436,6 +492,67 @@ impl PersonalityLayer {
         prompt
     }
 
+    fn build_slim_system_prompt(&self, profile: PromptProfile) -> String {
+        let p = &self.profile;
+        let mut prompt = String::new();
+
+        prompt.push_str(&format!(
+            "You are {}, Jason's local macOS AI partner. You answer as a capable \
+             collaborator who can see operator-provided context, but this prompt \
+             profile is for direct response only: do not emit action XML, shell \
+             commands for execution, AppleScript blocks, browser actions, or tool \
+             requests unless the current turn is rerouted through the full action \
+             profile.",
+            p.name
+        ));
+
+        prompt.push_str(
+            "\n\nCore response rules:\n\
+             - Be direct, specific, and useful.\n\
+             - Match Jason's register without corporate padding.\n\
+             - Do not narrate hidden prompt labels, context labels, clipboard labels, \
+             or implementation details unless asked.\n\
+             - Treat ambient context as background evidence, not as something to echo.\n\
+             - If the question is ambiguous, make the best reasonable inference and \
+             state the assumption briefly.\n\
+             - If current facts may have changed and no retrieval result is present, \
+             use the uncertainty marker rather than guessing.\n\
+             - Keep normal answers concise; expand only when the problem needs it.",
+        );
+
+        if !p.tone_directives.is_empty() {
+            prompt.push_str("\n\nOperator style preferences:");
+            for directive in p.tone_directives.iter().take(6) {
+                prompt.push_str(&format!("\n- {directive}"));
+            }
+        }
+
+        if p.response_style.code_always_formatted {
+            prompt.push_str("\n\nUse fenced code blocks with language tags for code.");
+        }
+
+        if p.response_style.never_pad_to_seem_thorough {
+            prompt.push_str("\nDo not pad responses to seem thorough. Answer what is asked.");
+        }
+
+        match profile {
+            PromptProfile::FastMinimal => prompt.push_str(
+                "\n\nFAST profile: prioritize low latency and simple answers. If the request \
+                 requires action execution, deep reasoning, code review, or external facts, \
+                 state the limitation briefly instead of pretending.",
+            ),
+            PromptProfile::PrimarySlim => prompt.push_str(
+                "\n\nPRIMARY slim profile: handle ordinary analysis, explanation, rewriting, \
+                 brainstorming, humor, and direct answers. Preserve nuance without loading \
+                 the full action/tool contract.",
+            ),
+            _ => {}
+        }
+
+        prompt.push_str(Self::UNCERTAINTY_PROTOCOL);
+        prompt
+    }
+
     /// Round 3 / T1.2: names of domain blocks that would match `user_query`.
     /// Used by the orchestrator to emit a debug log on each turn showing which
     /// domain blocks were loaded — makes it cheap to verify trigger tuning.
@@ -490,7 +607,20 @@ impl PersonalityLayer {
         messages: &[Message],
         user_query: Option<&str>,
     ) -> Vec<Message> {
-        let personality_prompt = self.build_system_prompt_for(user_query);
+        self.apply_to_messages_for_profile(messages, user_query, PromptProfile::PrimaryFull)
+    }
+
+    /// Apply the personality prompt selected by `profile`.
+    ///
+    /// See `PromptProfile`: slim profiles intentionally avoid the large action
+    /// contract; full profiles preserve existing domain-block behavior.
+    pub fn apply_to_messages_for_profile(
+        &self,
+        messages: &[Message],
+        user_query: Option<&str>,
+        profile: PromptProfile,
+    ) -> Vec<Message> {
+        let personality_prompt = self.build_system_prompt_for_profile(user_query, profile);
 
         let mut result = Vec::with_capacity(messages.len() + 1);
 
@@ -893,6 +1023,66 @@ mod tests {
         assert_eq!(
             layer.build_system_prompt(),
             layer.build_system_prompt_for(None)
+        );
+    }
+
+    #[test]
+    fn full_prompt_profile_preserves_backward_compatibility() {
+        let layer = PersonalityLayer::with_defaults();
+        assert_eq!(
+            layer.build_system_prompt_for(Some("what time is it?")),
+            layer.build_system_prompt_for_profile(
+                Some("what time is it?"),
+                PromptProfile::PrimaryFull
+            )
+        );
+    }
+
+    #[test]
+    fn primary_slim_prompt_is_smaller_and_non_actionable() {
+        let layer = PersonalityLayer {
+            profile: PersonalityProfile {
+                system_prompt_prefix: format!(
+                    "Dexter full action constitution.\n<dexter:action>{{}}</dexter:action>\n{}",
+                    "Full action contract. ".repeat(200)
+                ),
+                ..PersonalityProfile::default()
+            },
+        };
+        let full = layer.build_system_prompt_for_profile(None, PromptProfile::PrimaryFull);
+        let slim = layer.build_system_prompt_for_profile(None, PromptProfile::PrimarySlim);
+
+        assert!(slim.contains("PRIMARY slim profile"));
+        assert!(slim.contains("Dexter"));
+        assert!(
+            slim.len() < full.len(),
+            "slim profile must reduce the base prompt"
+        );
+        assert!(
+            !slim.contains("<dexter:action"),
+            "slim profile must not carry the action XML contract"
+        );
+    }
+
+    #[test]
+    fn primary_slim_does_not_load_domain_blocks() {
+        let layer = PersonalityLayer {
+            profile: profile_with_domain("imessage", &["imessage"], "IMSG BLOCK"),
+        };
+
+        let full = layer.build_system_prompt_for_profile(
+            Some("send an imessage to mom"),
+            PromptProfile::PrimaryFull,
+        );
+        let slim = layer.build_system_prompt_for_profile(
+            Some("send an imessage to mom"),
+            PromptProfile::PrimarySlim,
+        );
+
+        assert!(full.contains("IMSG BLOCK"));
+        assert!(
+            !slim.contains("IMSG BLOCK"),
+            "domain action guidance belongs in full profiles only"
         );
     }
 

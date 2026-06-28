@@ -62,3 +62,25 @@ def write_handshake(f: IO[bytes], worker_type: str) -> None:
     line = json.dumps({"protocol_version": PROTOCOL_VERSION, "worker_type": worker_type})
     f.write((line + '\n').encode())
     f.flush()
+
+
+def write_startup_error_handshake(
+    f: IO[bytes],
+    worker_type: str,
+    error_kind: str,
+    error: str,
+) -> None:
+    """Write a structured startup failure before exiting.
+
+    Rust treats this as a failed handshake, but unlike a raw EOF it preserves the
+    actual worker-layer failure for health diagnostics and recovery hints.
+    """
+    line = json.dumps({
+        "protocol_version": PROTOCOL_VERSION,
+        "worker_type": worker_type,
+        "status": "error",
+        "error_kind": error_kind,
+        "error": error[:4000],
+    })
+    f.write((line + '\n').encode())
+    f.flush()

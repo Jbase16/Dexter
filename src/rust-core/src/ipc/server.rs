@@ -176,6 +176,8 @@ struct StartupHealthSnapshot {
     stt_worker: ComponentStartupStatus,
     tts_worker: ComponentStartupStatus,
     browser_worker: ComponentStartupStatus,
+    browser_worker_detail: String,
+    browser_worker_recovery_hint: String,
     disk: Vec<DiskHealthSnapshot>,
 }
 
@@ -185,6 +187,22 @@ impl StartupHealthSnapshot {
         shared: &SharedDaemonState,
         stt_worker: ComponentStartupStatus,
     ) -> Self {
+        let browser_worker = worker_startup_status(
+            shared.browser.is_available(),
+            shared.startup_warmup_complete.load(Ordering::SeqCst),
+        );
+        let browser_diagnostic = shared.browser.last_failure();
+        let (browser_worker_detail, browser_worker_recovery_hint) = if browser_worker.is_ready() {
+            (String::new(), String::new())
+        } else if let Some(diagnostic) = browser_diagnostic {
+            (
+                format!("{}: {}", diagnostic.kind.as_str(), diagnostic.detail),
+                diagnostic.recovery_hint.to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
         Self {
             fast_model: cfg.models.fast.clone(),
             primary_model: cfg.models.primary.clone(),
@@ -198,10 +216,9 @@ impl StartupHealthSnapshot {
                 shared.voice.is_tts_available(),
                 shared.startup_warmup_complete.load(Ordering::SeqCst),
             ),
-            browser_worker: worker_startup_status(
-                shared.browser.is_available(),
-                shared.startup_warmup_complete.load(Ordering::SeqCst),
-            ),
+            browser_worker,
+            browser_worker_detail,
+            browser_worker_recovery_hint,
             disk: diagnostics::collect_operator_disk_health(&cfg.core.state_dir),
         }
     }
@@ -309,6 +326,8 @@ impl StartupHealthSnapshot {
             stt_worker: self.stt_worker.as_str().to_string(),
             tts_worker: self.tts_worker.as_str().to_string(),
             browser_worker: self.browser_worker.as_str().to_string(),
+            browser_worker_detail: self.browser_worker_detail,
+            browser_worker_recovery_hint: self.browser_worker_recovery_hint,
             disk: self.disk.into_iter().map(disk_health_proto).collect(),
             operator_context_markdown: String::new(),
             residency_mode: cfg.residency.mode.as_str().to_string(),
@@ -1833,6 +1852,8 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Degraded,
             browser_worker: ComponentStartupStatus::Ready,
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: Vec::new(),
         };
 
@@ -1860,6 +1881,8 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Ready,
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: Vec::new(),
         };
 
@@ -1881,6 +1904,8 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Pending,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Ready,
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: Vec::new(),
         };
 
@@ -1911,6 +1936,8 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Ready,
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: vec![DiskHealthSnapshot {
                 name: "workspace".to_string(),
                 path: "/Users/jason/Developer/Dex".to_string(),
@@ -1942,6 +1969,9 @@ mod startup_health_tests {
             stt_worker: ComponentStartupStatus::Ready,
             tts_worker: ComponentStartupStatus::Ready,
             browser_worker: ComponentStartupStatus::Degraded,
+            browser_worker_detail: "browser_launch_failed: Executable doesn't exist".to_string(),
+            browser_worker_recovery_hint:
+                "Install Playwright Chromium, then restart the browser worker.".to_string(),
             disk: Vec::new(),
         };
         let cfg = DexterConfig::default();
@@ -1965,6 +1995,13 @@ mod startup_health_tests {
         );
         assert_eq!(response.embed_model, "embed");
         assert_eq!(response.browser_worker, "degraded");
+        assert_eq!(
+            response.browser_worker_detail,
+            "browser_launch_failed: Executable doesn't exist"
+        );
+        assert!(response
+            .browser_worker_recovery_hint
+            .contains("Install Playwright Chromium"));
         assert_eq!(response.config_path, "/Users/jason/.dexter/config.toml");
         assert_eq!(response.residency_mode, "pin_keepalive");
         assert!(response.primary_residency_pinned);

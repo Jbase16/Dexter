@@ -1,11 +1,13 @@
 # Dexter Live Smoke Index
 
-- Generated: `2026-06-12T20:52:34-0700`
+- Generated: `2026-06-27T23:14:55-0700`
 - Root: `/Users/jason/Developer/Dex`
 - Entries: `20`
 
 | Summary | Started | Result | Passed | Failed | Duration | Targets |
 |---|---:|---:|---:|---:|---:|---|
+| `docs/live-smoke-results/live-smoke-20260627_224209.md` | `2026-06-27T22:42:09-0700` | PASS | `16` | `0` | `32m 46s` | `live-smoke-external-failures`, `live-smoke-action-diagnostic`, `live-smoke-shortcut-action`, `live-smoke-window-focus`, `live-smoke-window-inspect`, `live-smoke-ui-snapshot`, `live-smoke-ui-click`, `live-smoke-ui-type`, `live-smoke-ui-select`, `live-smoke-ui-toggle`, `live-smoke-ui-pick`, `live-smoke-action-matrix`, `live-smoke-browser-recovery`, `live-smoke-action-receipts`, `live-smoke-approval-lifecycle`, `live-smoke-action-cancel` |
+| `docs/live-smoke-results/live-smoke-20260627_220918.md` | `2026-06-27T22:09:18-0700` | FAIL | `10` | `1` | `17m 51s` | `live-smoke-external-failures`, `live-smoke-action-diagnostic`, `live-smoke-shortcut-action`, `live-smoke-window-focus`, `live-smoke-window-inspect`, `live-smoke-ui-snapshot`, `live-smoke-ui-click`, `live-smoke-ui-type`, `live-smoke-ui-select`, `live-smoke-ui-toggle`, `live-smoke-ui-pick` |
 | `docs/live-smoke-results/live-smoke-20260612_204007.md` | `2026-06-12T20:40:07-0700` | PASS | `22` | `0` | `12m 27s` | `live-smoke-dock-launcher`, `live-smoke-process-control`, `live-smoke-stop-report`, `live-smoke-run-loop-lifecycle`, `live-smoke-stale-swift-stop`, `live-smoke-hud-lifecycle`, `live-smoke-hud-placement`, `live-smoke-placement-command`, `live-smoke-residency-proof`, `live-smoke-startup-readiness`, `live-smoke-operator-status`, `live-smoke-hud-health`, `live-smoke-hud-unavailable-health`, `live-smoke-external-failures`, `live-smoke-action-diagnostic`, `live-smoke-action-matrix`, `live-smoke-action-receipts`, `live-smoke-approval-lifecycle`, `live-smoke-hud-action-history`, `live-smoke-hud-action-diagnostic`, `live-smoke-hud-approval`, `live-smoke-action-cancel` |
 | `docs/live-smoke-results/live-smoke-20260612_203558.md` | `2026-06-12T20:35:58-0700` | PASS | `5` | `0` | `2m 39s` | `live-smoke-residency-proof`, `live-smoke-startup-readiness`, `live-smoke-operator-status`, `live-smoke-hud-health`, `live-smoke-hud-unavailable-health` |
 | `docs/live-smoke-results/live-smoke-20260609_045936.md` | `2026-06-09T04:59:36-0700` | PASS | `21` | `0` | `12m 55s` | `live-smoke-dock-launcher`, `live-smoke-process-control`, `live-smoke-stop-report`, `live-smoke-run-loop-lifecycle`, `live-smoke-stale-swift-stop`, `live-smoke-hud-lifecycle`, `live-smoke-hud-placement`, `live-smoke-placement-command`, `live-smoke-startup-readiness`, `live-smoke-operator-status`, `live-smoke-hud-health`, `live-smoke-hud-unavailable-health`, `live-smoke-external-failures`, `live-smoke-action-diagnostic`, `live-smoke-action-matrix`, `live-smoke-action-receipts`, `live-smoke-approval-lifecycle`, `live-smoke-hud-action-history`, `live-smoke-hud-action-diagnostic`, `live-smoke-hud-approval`, `live-smoke-action-cancel` |
@@ -24,8 +26,6 @@
 | `docs/live-smoke-results/live-smoke-20260608_072355.md` | `2026-06-08T07:23:55-0700` | PASS | `2` | `0` | `30s` | `live-smoke-process-control`, `live-smoke-stale-swift-stop` |
 | `docs/live-smoke-results/live-smoke-20260608_072226.md` | `2026-06-08T07:22:26-0700` | FAIL | `1` | `1` | `47s` | `live-smoke-process-control`, `live-smoke-stale-swift-stop` |
 | `docs/live-smoke-results/live-smoke-20260608_071939.md` | `2026-06-08T07:19:39-0700` | FAIL | `4` | `1` | `2m 07s` | `live-smoke-process-control`, `live-smoke-stale-swift-stop`, `live-smoke-dock-launcher`, `live-smoke-hud`, `live-smoke-hud-action-diagnostic` |
-| `docs/live-smoke-results/live-smoke-20260608_071641.md` | `2026-06-08T07:16:41-0700` | FAIL | `4` | `1` | `2m 08s` | `live-smoke-process-control`, `live-smoke-stale-swift-stop`, `live-smoke-dock-launcher`, `live-smoke-hud`, `live-smoke-hud-action-diagnostic` |
-| `docs/live-smoke-results/live-smoke-20260608_071319.md` | `2026-06-08T07:13:19-0700` | FAIL | `4` | `1` | `2m 09s` | `live-smoke-process-control`, `live-smoke-stale-swift-stop`, `live-smoke-dock-launcher`, `live-smoke-hud`, `live-smoke-hud-action-diagnostic` |
 
 ## Latest
 

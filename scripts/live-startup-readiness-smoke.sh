@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# scripts/live-startup-readiness-smoke.sh - startup readiness gate regression.
+# scripts/live-startup-readiness-smoke.sh - startup readiness regression.
 #
 # Starts a release Dexter core without Swift, verifies the Unix socket appears
-# first, waits for doctor-clean daemon readiness through the Makefile gate, then
-# confirms cleanup removes the daemon sockets.
+# first, verifies pending health wording, waits for doctor-clean daemon readiness
+# through the Makefile gate, then confirms cleanup removes the daemon sockets.
 
 set -u
 set -o pipefail
@@ -179,7 +179,7 @@ main() {
         exit 1
     fi
     assert_core_alive || exit 1
-    say "$PASS" "socket gate passed before Swift launch"
+    say "$PASS" "socket gate passed"
     assert_pending_snapshot_is_warming || exit 1
 
     if ! make -C "$ROOT_DIR" wait-for-ready; then
@@ -188,7 +188,7 @@ main() {
         exit 1
     fi
     assert_core_alive || exit 1
-    say "$PASS" "doctor readiness gate passed before Swift launch"
+    say "$PASS" "doctor readiness gate passed"
 
     assert_doctor_clean || exit 1
     assert_cleanup_removes_sockets || exit 1

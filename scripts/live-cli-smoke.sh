@@ -21,6 +21,8 @@ SHELL_SOCKET="/tmp/dexter-shell.sock"
 LOG="/tmp/dexter-cli-smoke.log"
 START_CORE=0
 ACTION_MATRIX=0
+BROWSER_RECOVERY=0
+BROWSER_RECOVERY_MODEL=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
@@ -38,6 +40,12 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --action-matrix)
             ACTION_MATRIX=1
+            ;;
+        --browser-recovery)
+            BROWSER_RECOVERY=1
+            ;;
+        --browser-recovery-model)
+            BROWSER_RECOVERY_MODEL=1
             ;;
         *)
             LOG="$1"
@@ -334,6 +342,31 @@ prepare_browser_fixture() {
         printf '%s\n' '    });'
         printf '%s\n' '    document.querySelector("#delete-account").addEventListener("click", () => {'
         printf '%s\n' '      status.textContent = "deleted";'
+        printf '%s\n' '    });'
+        printf '%s\n' '  </script>'
+        printf '%s\n' '</body>'
+        printf '%s\n' '</html>'
+    } > "$fixture"
+}
+
+prepare_browser_model_recovery_fixture() {
+    local fixture="$1"
+    {
+        printf '%s\n' '<!doctype html>'
+        printf '%s\n' '<html lang="en">'
+        printf '%s\n' '<head>'
+        printf '%s\n' '  <meta charset="utf-8">'
+        printf '%s\n' '  <title>Dexter Model Recovery Fixture</title>'
+        printf '%s\n' '</head>'
+        printf '%s\n' '<body>'
+        printf '%s\n' '  <main>'
+        printf '%s\n' '    <h1>Browser recovery test</h1>'
+        printf '%s\n' '    <div id="status">ready</div>'
+        printf '%s\n' '    <button id="real-recovery-button" type="button">Real Recovery Button</button>'
+        printf '%s\n' '  </main>'
+        printf '%s\n' '  <script>'
+        printf '%s\n' '    document.querySelector("#real-recovery-button").addEventListener("click", () => {'
+        printf '%s\n' '      document.querySelector("#status").textContent = "clicked-real-recovery-button";'
         printf '%s\n' '    });'
         printf '%s\n' '  </script>'
         printf '%s\n' '</body>'
@@ -1355,6 +1388,156 @@ test_action_json_browser_destructive_click_auto_approved() {
     record "$name" "$ok" "exact destructive browser click ActionSpec mutated only the local fixture"
 }
 
+test_action_json_browser_selector_failure_reports_recovery() {
+    local name="action-json browser selector failure reports recovery evidence"
+    local fixture="/tmp/dexter-browser-action-json-recovery-smoke.html"
+    local file_url navigate_action click_action out receipt_out doctor_out offset ok
+    prepare_browser_fixture "$fixture"
+    file_url="$(browser_fixture_file_url "$fixture")"
+    navigate_action='{"type":"browser","action":"navigate","url":'$(json_string "$file_url" )',"rationale":"deterministic browser recovery smoke"}'
+    click_action='{"type":"browser","action":"click","selector":'$(json_string "#missing-recovery-button" )',"rationale":"deterministic browser recovery smoke"}'
+
+    offset="$(log_bytes)"
+    out="$(mktemp -t dexter-browser-action-json-recovery.XXXXXX)"
+    receipt_out="$(mktemp -t dexter-browser-recovery-receipt.XXXXXX)"
+    doctor_out="$(mktemp -t dexter-browser-recovery-doctor.XXXXXX)"
+    ok=0
+
+    if ! run_cli_action_sequence_verbose "$out" "$navigate_action" "$click_action"; then
+        say "$FAIL" "$name - dexter-cli failed"
+        cat "$out"
+        rm -f "$fixture" "$out" "$receipt_out" "$doctor_out"
+        record "$name" 1 "CLI failed"
+        return
+    fi
+
+    if ! "$CLI_BIN" --actions last > "$receipt_out" 2>&1; then
+        say "$FAIL" "$name - latest action receipt was not readable"
+        cat "$receipt_out"
+        ok=1
+    fi
+
+    assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 2 || ok=1
+    assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 2 || ok=1
+    if ! grep -Fq "Browser failure [selector_not_found]" "$receipt_out"; then
+        say "$FAIL" "$name - selector_not_found failure was not surfaced"
+        ok=1
+    fi
+    if ! grep -Fq "page_url=$file_url" "$receipt_out"; then
+        say "$FAIL" "$name - failure did not preserve page_url"
+        ok=1
+    fi
+    if ! grep -Fq "page_title=Dexter Browser Smoke Fixture" "$receipt_out"; then
+        say "$FAIL" "$name - failure did not preserve page_title"
+        ok=1
+    fi
+    if ! grep -Fq "replan_page_state=" "$receipt_out"; then
+        say "$FAIL" "$name - failure did not include replan_page_state"
+        ok=1
+    fi
+    if ! grep -Fq "#delete-account" "$receipt_out"; then
+        say "$FAIL" "$name - recovery page state did not include candidate selector"
+        ok=1
+    fi
+    if ! grep -Fq "Next [extract_page_then_replan]" "$receipt_out"; then
+        say "$FAIL" "$name - recovery directive was not surfaced"
+        ok=1
+    fi
+
+    if ! "$CLI_BIN" --doctor > "$doctor_out" 2>&1; then
+        say "$FAIL" "$name - doctor failed after selector failure"
+        cat "$doctor_out"
+        ok=1
+    elif ! grep -Eq "^(OK|PASS)[[:space:]]+browser worker[[:space:]]+ready" "$doctor_out"; then
+        say "$FAIL" "$name - browser worker was not healthy after action-local failure"
+        cat "$doctor_out"
+        ok=1
+    fi
+
+    rm -f "$fixture" "$out" "$receipt_out" "$doctor_out"
+    record "$name" "$ok" "selector failures expose recovery evidence without degrading browser health"
+}
+
+test_model_browser_selector_recovery_completes() {
+    local name="model-driven browser selector recovery completes"
+    local fixture="/tmp/dexter-browser-model-recovery-smoke.html"
+    local file_url prompt out doctor_out offset ok status_extract_count
+    prepare_browser_model_recovery_fixture "$fixture"
+    file_url="$(browser_fixture_file_url "$fixture")"
+    prompt="Use Dexter browser actions to navigate to exactly this URL: $file_url. Then intentionally try to click exactly this missing selector first: #missing-recovery-button. If that fails, use the browser recovery page evidence to choose the real button selector from the page, click it, and then extract #status. Do not repeat #missing-recovery-button after it fails."
+
+    offset="$(log_bytes)"
+    out="$(mktemp -t dexter-browser-model-recovery.XXXXXX)"
+    doctor_out="$(mktemp -t dexter-browser-model-recovery-doctor.XXXXXX)"
+    ok=0
+
+    : > "$out"
+    if ! "$CLI_BIN" --quiet --idle-timeout 240 "$prompt" > "$out" 2>&1; then
+        say "$FAIL" "$name - dexter-cli failed"
+        cat "$out"
+        rm -f "$fixture" "$out" "$doctor_out"
+        record "$name" 1 "CLI failed"
+        return
+    fi
+
+    if ! grep -Fq '"action":"navigate"' "$out"; then
+        say "$FAIL" "$name - model did not navigate to fixture"
+        ok=1
+    fi
+    if ! grep -Fq "$file_url" "$out"; then
+        say "$FAIL" "$name - output did not mention fixture URL"
+        ok=1
+    fi
+    if ! grep -Fq '"selector":"#missing-recovery-button"' "$out"; then
+        say "$FAIL" "$name - model did not attempt the intended missing selector first"
+        ok=1
+    fi
+    if ! grep -Fq "Browser failure [selector_not_found]" "$out"; then
+        say "$FAIL" "$name - missing selector failure was not surfaced"
+        ok=1
+    fi
+    if ! grep -Fq "replan_page_state=Candidate selectors:" "$out"; then
+        say "$FAIL" "$name - recovery page evidence was not injected"
+        ok=1
+    fi
+    if ! grep -Fq "#real-recovery-button" "$out"; then
+        say "$FAIL" "$name - recovery evidence did not expose the real selector"
+        ok=1
+    fi
+    if ! grep -Eq '"selector":"(#real-recovery-button|button#real-recovery-button)"' "$out"; then
+        say "$FAIL" "$name - model did not choose a real selector from recovery evidence"
+        ok=1
+    fi
+    if ! grep -Fq "clicked-real-recovery-button" "$out"; then
+        say "$FAIL" "$name - confirmation extract did not show recovered state"
+        ok=1
+    fi
+    if grep -Fq "Blocked repeated browser selector" "$out"; then
+        say "$FAIL" "$name - repeated-selector guard had to block the model"
+        ok=1
+    fi
+    status_extract_count="$(grep -F -c '"action":"extract","selector":"#status"' "$out" 2>/dev/null || true)"
+    if [[ "$status_extract_count" -ne 1 ]]; then
+        say "$FAIL" "$name - expected exactly one #status confirmation extract, saw $status_extract_count"
+        ok=1
+    fi
+
+    assert_count_at_least "$name" "$offset" "Browser recovery confirmed — skipping continuation" 1 || ok=1
+
+    if ! "$CLI_BIN" --doctor > "$doctor_out" 2>&1; then
+        say "$FAIL" "$name - doctor failed after model recovery"
+        cat "$doctor_out"
+        ok=1
+    elif ! grep -Eq "^(OK|PASS)[[:space:]]+browser worker[[:space:]]+ready" "$doctor_out"; then
+        say "$FAIL" "$name - browser worker was not healthy after model recovery"
+        cat "$doctor_out"
+        ok=1
+    fi
+
+    rm -f "$fixture" "$out" "$doctor_out"
+    record "$name" "$ok" "model used recovery evidence, confirmed state, and stopped"
+}
+
 test_terminal_context_scrubbing() {
     local name="terminal AX value_preview is scrubbed"
     local secret="TERMINAL_SCROLLBACK_SECRET_DO_NOT_INJECT"
@@ -1528,12 +1711,24 @@ run_action_matrix_suite() {
     test_destructive_applescript_auto_approved
 }
 
+run_browser_recovery_suite() {
+    test_action_json_browser_selector_failure_reports_recovery
+}
+
+run_browser_recovery_model_suite() {
+    test_model_browser_selector_recovery_completes
+}
+
 main() {
     require_bins
     start_core_if_requested
 
     say "$INFO" "using log: $LOG"
-    if [[ "$ACTION_MATRIX" -eq 1 ]]; then
+    if [[ "$BROWSER_RECOVERY_MODEL" -eq 1 ]]; then
+        run_browser_recovery_model_suite
+    elif [[ "$BROWSER_RECOVERY" -eq 1 ]]; then
+        run_browser_recovery_suite
+    elif [[ "$ACTION_MATRIX" -eq 1 ]]; then
         run_action_matrix_suite
     else
         run_standard_suite

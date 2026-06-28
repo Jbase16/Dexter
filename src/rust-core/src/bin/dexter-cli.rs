@@ -2484,9 +2484,11 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
     checks.push(model_residency_check(&health));
     checks.push(component_health_check("STT worker", &health.stt_worker));
     checks.push(component_health_check("TTS worker", &health.tts_worker));
-    checks.push(component_health_check(
+    checks.push(component_health_check_with_detail(
         "browser worker",
         &health.browser_worker,
+        &health.browser_worker_detail,
+        &health.browser_worker_recovery_hint,
     ));
     checks.extend(health.disk.into_iter().map(disk_health_check));
     checks.push(DoctorCheck::ok(
@@ -2531,6 +2533,26 @@ fn doctor_status_for_component_status(status: &str) -> DoctorStatus {
         "degraded" => DoctorStatus::Fail,
         _ => DoctorStatus::Warn,
     }
+}
+
+fn component_health_check_with_detail(
+    name: &str,
+    status: &str,
+    detail: &str,
+    recovery_hint: &str,
+) -> DoctorCheck {
+    let mut check = component_health_check(name, status);
+    let detail = detail.trim();
+    let recovery_hint = recovery_hint.trim();
+    if !detail.is_empty() {
+        check.detail.push_str("; ");
+        check.detail.push_str(detail);
+    }
+    if !recovery_hint.is_empty() {
+        check.detail.push_str("; recovery: ");
+        check.detail.push_str(recovery_hint);
+    }
+    check
 }
 
 fn doctor_status_for_disk_status(status: &str) -> DoctorStatus {
@@ -2588,6 +2610,14 @@ fn model_residency_check(health: &HealthResponse) -> DoctorCheck {
             format!("mode {mode}; PRIMARY pinned ({wired} wired)"),
         )
     } else if health.primary_model_warm {
+        if primary_uses_tensor_shards(&health.primary_model) {
+            return DoctorCheck::ok(
+                "model residency",
+                format!(
+                    "mode {mode}; PRIMARY uses MLX/tensor shards, so GGUF pinning is not applicable; keepalive fallback active"
+                ),
+            );
+        }
         match normalized_mode.as_str() {
             "pin_keepalive" => DoctorCheck::ok(
                 "model residency",
@@ -2619,6 +2649,16 @@ fn model_residency_check(health: &HealthResponse) -> DoctorCheck {
             ),
         }
     }
+}
+
+fn primary_uses_tensor_shards(model: &str) -> bool {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .split(':')
+        .nth(1)
+        .map(|tag| tag.contains("mlx"))
+        .unwrap_or(false)
 }
 
 fn component_health_check(name: &str, status: &str) -> DoctorCheck {
@@ -5286,7 +5326,7 @@ mod tests {
     }
 
     fn ready_health_with_residency(mode: &str, pinned: bool, poisoned: bool) -> HealthResponse {
-        HealthResponse {
+        let mut health = HealthResponse {
             trace_id: "trace".to_string(),
             core_version: "0.1.0".to_string(),
             status: "ready".to_string(),
@@ -5306,13 +5346,17 @@ mod tests {
             stt_worker: "ready".to_string(),
             tts_worker: "ready".to_string(),
             browser_worker: "ready".to_string(),
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: Vec::new(),
             operator_context_markdown: String::new(),
             residency_mode: mode.to_string(),
             primary_residency_pinned: pinned,
             primary_residency_wired_bytes: if pinned { 18 * 1024 * 1024 * 1024 } else { 0 },
             residency_lock_poisoned: poisoned,
-        }
+        };
+        health.primary_model = "gemma4:26b".to_string();
+        health
     }
 
     #[test]
@@ -5325,6 +5369,20 @@ mod tests {
         assert_eq!(
             check.detail,
             "mode pin_keepalive; PRIMARY not pinned, keepalive fallback active"
+        );
+    }
+
+    #[test]
+    fn model_residency_check_explains_mlx_tensor_primary() {
+        let mut health = ready_health_with_residency("pin_keepalive", false, false);
+        health.primary_model = "gemma4:26b-mlx".to_string();
+        let check = model_residency_check(&health);
+
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.name, "model residency");
+        assert_eq!(
+            check.detail,
+            "mode pin_keepalive; PRIMARY uses MLX/tensor shards, so GGUF pinning is not applicable; keepalive fallback active"
         );
     }
 
@@ -5390,6 +5448,8 @@ mod tests {
             stt_worker: "ready".to_string(),
             tts_worker: "ready".to_string(),
             browser_worker: "ready".to_string(),
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: vec![DiskHealth {
                 name: "state".to_string(),
                 path: "/Users/jason/.dexter/state".to_string(),
@@ -5443,6 +5503,8 @@ mod tests {
             stt_worker: "pending".to_string(),
             tts_worker: "ready".to_string(),
             browser_worker: "ready".to_string(),
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: Vec::new(),
             operator_context_markdown: String::new(),
             residency_mode: "pin_keepalive".to_string(),
@@ -5499,6 +5561,8 @@ mod tests {
             stt_worker: "ready".to_string(),
             tts_worker: "degraded".to_string(),
             browser_worker: "ready".to_string(),
+            browser_worker_detail: String::new(),
+            browser_worker_recovery_hint: String::new(),
             disk: Vec::new(),
             operator_context_markdown: String::new(),
             residency_mode: "pin_keepalive".to_string(),
@@ -5514,6 +5578,28 @@ mod tests {
         assert!(checks
             .iter()
             .any(|check| check.name == "TTS worker" && check.status == DoctorStatus::Fail));
+    }
+
+    #[test]
+    fn daemon_health_checks_include_browser_failure_detail_and_recovery() {
+        let mut health = ready_health_with_residency("pin_keepalive", true, false);
+        health.status = "degraded".to_string();
+        health.degraded_components = vec!["browser_worker".to_string()];
+        health.browser_worker = "degraded".to_string();
+        health.browser_worker_detail =
+            "browser_launch_failed: Executable doesn't exist".to_string();
+        health.browser_worker_recovery_hint =
+            "Install Playwright Chromium, then restart the browser worker.".to_string();
+
+        let checks = daemon_health_checks(health);
+        let browser = checks
+            .iter()
+            .find(|check| check.name == "browser worker")
+            .expect("browser worker check should exist");
+
+        assert_eq!(browser.status, DoctorStatus::Fail);
+        assert!(browser.detail.contains("browser_launch_failed"));
+        assert!(browser.detail.contains("Install Playwright Chromium"));
     }
 }
 

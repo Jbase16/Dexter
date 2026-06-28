@@ -217,29 +217,65 @@ impl ResidencyManager {
     }
 
     /// Resolve an Ollama model tag (`gemma4:26b`, `mxbai-embed-large`) to the
-    /// path of its weight blob, by reading the on-disk manifest and finding the
-    /// `application/vnd.ollama.image.model` layer.
+    /// path of its GGUF weight blob, by reading the on-disk manifest and finding
+    /// the `application/vnd.ollama.image.model` layer.
     ///
-    /// Returns `None` if the manifest is absent/malformed or the blob is missing.
+    /// Returns `None` if the manifest is absent/malformed, the blob is missing,
+    /// or the model uses Ollama's tensor-shard/MLX layout. The cross-process
+    /// residency mechanism is intentionally GGUF-only: MLX manifests have many
+    /// `application/vnd.ollama.image.tensor` layers instead of one mmap'd GGUF
+    /// blob, so there is no single blob for this pinner to wire resident.
     pub fn resolve_model_blob(&self, model_tag: &str) -> Option<PathBuf> {
+        match self.resolve_model_blob_result(model_tag) {
+            ModelBlobResolution::GgufBlob(path) => Some(path),
+            ModelBlobResolution::Missing | ModelBlobResolution::TensorShards => None,
+        }
+    }
+
+    fn resolve_model_blob_result(&self, model_tag: &str) -> ModelBlobResolution {
         let (name, tag) = model_tag.split_once(':').unwrap_or((model_tag, "latest"));
         let manifest = self
             .models_dir
             .join("manifests/registry.ollama.ai/library")
             .join(name)
             .join(tag);
-        let bytes = std::fs::read(&manifest).ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        let digest = v["layers"]
-            .as_array()?
+        let bytes = match std::fs::read(&manifest) {
+            Ok(bytes) => bytes,
+            Err(_) => return ModelBlobResolution::Missing,
+        };
+        let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(_) => return ModelBlobResolution::Missing,
+        };
+        let Some(layers) = v["layers"].as_array() else {
+            return ModelBlobResolution::Missing;
+        };
+        let digest = match layers
             .iter()
-            .find(|l| l["mediaType"].as_str() == Some("application/vnd.ollama.image.model"))?
-            .get("digest")?
-            .as_str()?;
+            .find(|l| l["mediaType"].as_str() == Some("application/vnd.ollama.image.model"))
+            .and_then(|l| l.get("digest"))
+            .and_then(|d| d.as_str())
+        {
+            Some(digest) => digest,
+            None => {
+                let has_tensor_layers = layers.iter().any(|l| {
+                    l["mediaType"].as_str() == Some("application/vnd.ollama.image.tensor")
+                });
+                return if has_tensor_layers {
+                    ModelBlobResolution::TensorShards
+                } else {
+                    ModelBlobResolution::Missing
+                };
+            }
+        };
         // "sha256:ab.." → "sha256-ab.." (Ollama's on-disk blob filename form).
         let blob = digest.replacen(':', "-", 1);
         let path = self.models_dir.join("blobs").join(blob);
-        path.exists().then_some(path)
+        if path.exists() {
+            ModelBlobResolution::GgufBlob(path)
+        } else {
+            ModelBlobResolution::Missing
+        }
     }
 
     /// Pin the given model tag's weight blob into the `primary` slot. Returns
@@ -278,13 +314,24 @@ impl ResidencyManager {
     }
 
     fn pin_slot(&self, model_tag: &str, slot: Slot) -> bool {
-        let Some(path) = self.resolve_model_blob(model_tag) else {
-            warn!(
-                model = model_tag,
-                models_dir = %self.models_dir.display(),
-                "Residency: could not resolve blob for model — leaving keepalive fallback in place"
-            );
-            return false;
+        let path = match self.resolve_model_blob_result(model_tag) {
+            ModelBlobResolution::GgufBlob(path) => path,
+            ModelBlobResolution::TensorShards => {
+                info!(
+                    model = model_tag,
+                    models_dir = %self.models_dir.display(),
+                    "Residency: model uses tensor-shard/MLX layout; GGUF blob pinning is not applicable, keepalive fallback remains responsible"
+                );
+                return false;
+            }
+            ModelBlobResolution::Missing => {
+                warn!(
+                    model = model_tag,
+                    models_dir = %self.models_dir.display(),
+                    "Residency: could not resolve GGUF blob for model — leaving keepalive fallback in place"
+                );
+                return false;
+            }
         };
         match PinnedRegion::map_and_lock(&path) {
             Ok(region) => {
@@ -356,6 +403,12 @@ enum Slot {
     Primary,
     #[allow(dead_code)] // reserved with pin_heavy — see note there
     Heavy,
+}
+
+enum ModelBlobResolution {
+    GgufBlob(PathBuf),
+    TensorShards,
+    Missing,
 }
 
 /// Snapshot of residency state for health/doctor reporting.
@@ -733,6 +786,29 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mgr = ResidencyManager::new(root.path().to_path_buf());
         assert!(mgr.resolve_model_blob("nope:1b").is_none());
+    }
+
+    #[test]
+    fn tensor_shard_manifest_is_not_treated_as_missing_gguf_blob() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let man = dir.join("manifests/registry.ollama.ai/library/mlx/26b");
+        std::fs::create_dir_all(man.parent().unwrap()).unwrap();
+        std::fs::write(
+            &man,
+            r#"{"layers":[
+                {"mediaType":"application/vnd.ollama.image.tensor","digest":"sha256:aa","size":123},
+                {"mediaType":"application/vnd.ollama.image.json","digest":"sha256:bb","size":456}
+            ]}"#,
+        )
+        .unwrap();
+
+        let mgr = ResidencyManager::new(dir.to_path_buf());
+        assert!(mgr.resolve_model_blob("mlx:26b").is_none());
+        assert!(matches!(
+            mgr.resolve_model_blob_result("mlx:26b"),
+            ModelBlobResolution::TensorShards
+        ));
     }
 
     #[test]

@@ -17,10 +17,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::Deserialize;
 use tokio::{process::Command, time::timeout};
 use tracing::warn;
 
-use crate::{browser::coordinator::BrowserCoordinator, voice::protocol::msg};
+use crate::{
+    browser::{
+        coordinator::BrowserCoordinator,
+        diagnostics::{
+            classify_browser_result_error, classify_worker_error, classify_worker_error_kind,
+            BrowserDiagnostic, BrowserFailureKind, BrowserRecoveryDirective,
+        },
+    },
+    voice::protocol::msg,
+};
 
 use super::engine::BrowserActionKind;
 
@@ -2330,37 +2340,232 @@ pub async fn execute_browser(
 ) -> ExecutionResult {
     let start = Instant::now();
 
+    let action_label = browser_action_label(action);
     let (msg_type, payload) = build_browser_frame(action);
     let result = coordinator.execute(msg_type, &payload).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match result {
-        Err(e) => ExecutionResult {
-            success: false,
-            output: String::new(),
-            error: format!("Browser worker error: {e}"),
-            exit_code: None,
-            duration_ms,
-        },
+        Err(e) => {
+            let diagnostic = browser_worker_error_diagnostic(coordinator, &e);
+            ExecutionResult {
+                success: false,
+                output: String::new(),
+                error: diagnostic.operator_message(),
+                exit_code: None,
+                duration_ms,
+            }
+        }
         Ok(json_str) => {
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Err(e) => ExecutionResult {
                     success: false,
                     output: String::new(),
-                    error: format!("Browser result parse error: {e}"),
+                    error: classify_browser_result_error(
+                        action_label,
+                        &format!("Browser result parse error: {e}"),
+                    )
+                    .operator_message(),
                     exit_code: None,
                     duration_ms,
                 },
-                Ok(val) => ExecutionResult {
-                    success: val["success"].as_bool().unwrap_or(false),
-                    output: val["output"].as_str().unwrap_or("").to_string(),
-                    error: val["error"].as_str().unwrap_or("").to_string(),
-                    exit_code: None, // browser actions have no process exit code
-                    duration_ms,
-                },
+                Ok(val) => {
+                    let worker_result = BrowserWorkerResult::from_value(&val);
+                    let success = worker_result.success;
+                    let error = if success || worker_result.error.trim().is_empty() {
+                        worker_result.error.clone()
+                    } else {
+                        let mut diagnostic =
+                            browser_result_diagnostic(action_label, &worker_result);
+                        if diagnostic.recovery_directive
+                            == BrowserRecoveryDirective::ExtractPageThenReplan
+                        {
+                            attach_browser_page_state_for_replan(coordinator, &mut diagnostic)
+                                .await;
+                        }
+                        diagnostic.operator_message()
+                    };
+                    let output = worker_result.output;
+                    ExecutionResult {
+                        success,
+                        output,
+                        error,
+                        exit_code: None, // browser actions have no process exit code
+                        duration_ms,
+                    }
+                }
             }
         }
+    }
+}
+
+const BROWSER_RECOVERY_PAGE_STATE_MAX_CHARS: usize = 1_200;
+
+#[derive(Debug, Default, Deserialize)]
+struct BrowserWorkerResult {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    output: String,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    error_kind: Option<String>,
+    #[serde(default)]
+    page_url: Option<String>,
+    #[serde(default)]
+    page_title: Option<String>,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+impl BrowserWorkerResult {
+    fn from_value(value: &serde_json::Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+}
+
+fn browser_result_diagnostic(
+    action_label: &str,
+    worker_result: &BrowserWorkerResult,
+) -> BrowserDiagnostic {
+    let detail = format_browser_result_detail(worker_result);
+    let kind = worker_result
+        .error_kind
+        .as_deref()
+        .and_then(classify_worker_error_kind)
+        .unwrap_or_else(|| classify_browser_result_error(action_label, &detail).kind);
+    BrowserDiagnostic::new(kind, detail)
+}
+
+async fn attach_browser_page_state_for_replan(
+    coordinator: &BrowserCoordinator,
+    diagnostic: &mut BrowserDiagnostic,
+) {
+    let payload = serde_json::json!({"selector": null}).to_string();
+    let state = match coordinator
+        .execute(msg::BROWSER_EXTRACT, payload.as_bytes())
+        .await
+    {
+        Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+            Ok(value) => BrowserWorkerResult::from_value(&value),
+            Err(error) => {
+                append_browser_detail(
+                    &mut diagnostic.detail,
+                    &format!("page_state_extract_failed=parse_error: {error}"),
+                );
+                return;
+            }
+        },
+        Err(error) => {
+            append_browser_detail(
+                &mut diagnostic.detail,
+                &format!("page_state_extract_failed={error}"),
+            );
+            return;
+        }
+    };
+
+    if state.success {
+        if let Some(page_state) = bounded_browser_page_state(&state.output) {
+            append_browser_detail(
+                &mut diagnostic.detail,
+                &format!("replan_page_state={page_state}"),
+            );
+        } else {
+            append_browser_detail(&mut diagnostic.detail, "replan_page_state=<empty>");
+        }
+    } else {
+        let failure = browser_result_diagnostic("extract", &state);
+        append_browser_detail(
+            &mut diagnostic.detail,
+            &format!(
+                "page_state_extract_failed={}: {}",
+                failure.kind.as_str(),
+                failure.detail
+            ),
+        );
+    }
+}
+
+fn bounded_browser_page_state(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let bounded: String = trimmed
+        .chars()
+        .take(BROWSER_RECOVERY_PAGE_STATE_MAX_CHARS)
+        .collect();
+    clean_browser_metadata(Some(&bounded))
+}
+
+fn append_browser_detail(detail: &mut String, addition: &str) {
+    if addition.trim().is_empty() {
+        return;
+    }
+    if !detail.trim().is_empty() {
+        detail.push_str("; ");
+    }
+    detail.push_str(addition.trim());
+}
+
+fn format_browser_result_detail(worker_result: &BrowserWorkerResult) -> String {
+    let mut parts = Vec::new();
+    if let Some(selector) = clean_browser_metadata(worker_result.selector.as_deref()) {
+        parts.push(format!("selector={selector}"));
+    }
+    if let Some(url) = clean_browser_metadata(worker_result.page_url.as_deref()) {
+        parts.push(format!("page_url={url}"));
+    }
+    if let Some(title) = clean_browser_metadata(worker_result.page_title.as_deref()) {
+        parts.push(format!("page_title={title}"));
+    }
+    if let Some(error) = clean_browser_metadata(Some(&worker_result.error)) {
+        parts.push(format!("error={error}"));
+    }
+    parts.join("; ")
+}
+
+fn clean_browser_metadata(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for ch in trimmed.chars().flat_map(char::escape_default) {
+        out.push(ch);
+        if out.len() >= 500 {
+            out.push_str("...");
+            break;
+        }
+    }
+    Some(out)
+}
+
+fn browser_worker_error_diagnostic(
+    coordinator: &BrowserCoordinator,
+    error: &crate::voice::worker_client::WorkerError,
+) -> BrowserDiagnostic {
+    let diagnostic = classify_worker_error(error);
+    if diagnostic.kind == BrowserFailureKind::WorkerNotStarted {
+        if let Some(stored) = coordinator.last_failure() {
+            if stored.kind != BrowserFailureKind::WorkerNotStarted {
+                return stored;
+            }
+        }
+    }
+    diagnostic
+}
+
+fn browser_action_label(action: &BrowserActionKind) -> &'static str {
+    match action {
+        BrowserActionKind::Navigate { .. } => "navigate",
+        BrowserActionKind::Click { .. } => "click",
+        BrowserActionKind::Type { .. } => "type",
+        BrowserActionKind::Extract { .. } => "extract",
+        BrowserActionKind::Screenshot => "screenshot",
     }
 }
 
@@ -2804,6 +3009,103 @@ mod tests {
             result.error
         );
         assert!(result.output.contains("hi"));
+    }
+
+    #[tokio::test]
+    async fn execute_browser_unavailable_returns_classified_recovery_message() {
+        let coordinator = BrowserCoordinator::new_degraded();
+        let action = BrowserActionKind::Navigate {
+            url: "https://example.com".to_string(),
+        };
+
+        let result = execute_browser(&coordinator, &action, ACTION_DEFAULT_TIMEOUT_SECS).await;
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .contains("Browser failure [worker_not_started]"));
+        assert!(result
+            .error
+            .contains("dexter-cli --restart-component browser"));
+    }
+
+    #[tokio::test]
+    async fn execute_browser_unavailable_preserves_stored_launch_failure() {
+        let coordinator = BrowserCoordinator::new_degraded();
+        coordinator.set_last_failure_for_test(crate::browser::diagnostics::BrowserDiagnostic::new(
+            crate::browser::diagnostics::BrowserFailureKind::BrowserLaunchFailed,
+            "BrowserType.launch: Executable doesn't exist",
+        ));
+        let action = BrowserActionKind::Extract {
+            selector: Some("body".to_string()),
+        };
+
+        let result = execute_browser(&coordinator, &action, ACTION_DEFAULT_TIMEOUT_SECS).await;
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .contains("Browser failure [browser_launch_failed]"));
+        assert!(result.error.contains("Executable doesn't exist"));
+        assert!(result.error.contains("playwright install chromium"));
+    }
+
+    #[test]
+    fn browser_result_diagnostic_prefers_structured_error_kind() {
+        let value = serde_json::json!({
+            "success": false,
+            "output": "",
+            "error": "no elements found for selector: '#missing'",
+            "error_kind": "selector_not_found",
+            "selector": "#missing",
+            "page_url": "https://example.com/form",
+            "page_title": "Example Form"
+        });
+        let result = BrowserWorkerResult::from_value(&value);
+        let diagnostic = browser_result_diagnostic("extract", &result);
+
+        assert_eq!(
+            diagnostic.kind,
+            crate::browser::diagnostics::BrowserFailureKind::SelectorNotFound
+        );
+        assert!(diagnostic.detail.contains("selector=#missing"));
+        assert!(diagnostic
+            .detail
+            .contains("page_url=https://example.com/form"));
+        assert!(diagnostic.detail.contains("page_title=Example Form"));
+    }
+
+    #[test]
+    fn browser_result_diagnostic_classifies_navigation_network_failure() {
+        let value = serde_json::json!({
+            "success": false,
+            "output": "",
+            "error": "page.goto: net::ERR_FILE_NOT_FOUND at file:///tmp/missing.html",
+            "error_kind": "navigation_failed",
+            "page_url": "about:blank"
+        });
+        let result = BrowserWorkerResult::from_value(&value);
+        let diagnostic = browser_result_diagnostic("navigate", &result);
+
+        assert_eq!(
+            diagnostic.kind,
+            crate::browser::diagnostics::BrowserFailureKind::NavigationFailed
+        );
+        assert!(diagnostic.detail.contains("ERR_FILE_NOT_FOUND"));
+        assert!(diagnostic.recovery_hint.contains("URL exists"));
+    }
+
+    #[test]
+    fn bounded_browser_page_state_escapes_and_truncates() {
+        let long = format!(
+            "line 1\n{}line 2",
+            "x".repeat(BROWSER_RECOVERY_PAGE_STATE_MAX_CHARS)
+        );
+        let state = bounded_browser_page_state(&long).expect("non-empty page state");
+
+        assert!(state.contains("\\n"));
+        assert!(state.ends_with("..."));
+        assert!(state.len() <= BROWSER_RECOVERY_PAGE_STATE_MAX_CHARS + 20);
     }
 
     // ── Phase 38 / Codex finding [3]: normalize_for_policy unit coverage ─────

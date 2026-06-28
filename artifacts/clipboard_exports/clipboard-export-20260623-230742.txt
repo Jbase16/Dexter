@@ -1,0 +1,1 @@
+can you save the clipboard contents of those previous files it to a new .txt file and copy the file itself to my clipboard ?

@@ -1,0 +1,14 @@
+python3 - <<'PY' | pbcopy
+from pathlib import Path
+
+files = [
+    "src/rust-core/src/inference/engine.rs",
+    "src/rust-core/src/orchestrator.rs",
+    "README.md",
+]
+
+for path in files:
+    p = Path(path)
+    print(f"\n\n===== {path} =====\n")
+    print(p.read_text())
+PY
