@@ -241,8 +241,9 @@ make live-smoke-action-safety-shared
 That target starts one release core, waits for doctor-ready health, then runs
 the compatible CLI/action checks against the shared daemon. It covers local
 action diagnostics, the synthetic action matrix, deterministic browser recovery
-evidence, action receipts, approval lifecycle, and action cancellation. It does
-not prove every individual smoke can launch and warm a fresh daemon.
+evidence, UI/window action receipts, action receipts, approval lifecycle, and
+action cancellation. It does not prove every individual smoke can launch and
+warm a fresh daemon.
 
 When you want the isolated release-grade action safety pass:
 
@@ -270,8 +271,9 @@ make live-smoke-action-safety-full
 ```
 
 That target adds the model-driven browser recovery check and Swift HUD action
-surfaces. It intentionally continues after failures so the receipt shows the
-whole sweep.
+surfaces, including typed UI/window failure rendering in Recent Actions and
+Why. It intentionally continues after failures so the receipt shows the whole
+sweep.
 
 All action safety lanes deliberately exclude the opt-in Contacts/iMessage send
 smokes. Those remain separate because they depend on local Contacts data and,

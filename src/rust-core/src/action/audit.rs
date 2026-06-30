@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{AUDIT_LOG_FILENAME, AUDIT_OUTPUT_PREVIEW_CHARS};
 
+use super::ui_diagnostics::ui_failure_summary;
+
 // ── AuditLog ──────────────────────────────────────────────────────────────────
 
 pub struct AuditLog {
@@ -238,6 +240,9 @@ fn audit_receipt_summary(
     if matches!(outcome, "failure" | "timeout") {
         if let Some(error) = clean_line(error) {
             if let Some(summary) = browser_failure_summary(&error) {
+                return summary;
+            }
+            if let Some(summary) = ui_failure_summary(&error) {
                 return summary;
             }
         }
@@ -596,6 +601,42 @@ mod tests {
             .summary
             .contains("Browser failed (browser_launch_failed)"));
         assert!(receipts[0].summary.contains("playwright install chromium"));
+    }
+
+    #[test]
+    fn recent_action_receipts_preserve_ui_failure_kind_and_recovery() {
+        let tmp = tempdir().unwrap();
+        let log = AuditLog::new(tmp.path());
+        let entry = AuditEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            action_id: "ui-1",
+            r#type: "ui_click",
+            category: "cautious",
+            spec_json: serde_json::json!({
+                "app_name": "Finder",
+                "role": "AXButton",
+                "label": "Save"
+            }),
+            outcome: "failure",
+            exit_code: None,
+            output_preview: None,
+            error: Some(
+                "UI failure [control_not_found]: no matching control for 'Save'. Recovery: Capture a UI snapshot and target a visible control from it. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly."
+                    .to_string(),
+            ),
+            duration_ms: Some(10),
+            operator_approved: None,
+        };
+        log.append(&entry).unwrap();
+
+        let (_path, receipts) = recent_action_receipts(tmp.path(), 10).unwrap();
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].outcome, "failed");
+        assert!(receipts[0]
+            .summary
+            .contains("UI failed (control_not_found)"));
+        assert!(receipts[0].summary.contains("snapshot_then_replan"));
     }
 
     #[test]

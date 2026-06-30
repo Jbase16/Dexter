@@ -15,6 +15,7 @@ pub mod audit;
 pub mod engine;
 pub mod executor;
 pub mod policy;
+pub mod ui_diagnostics;
 
 #[allow(unused_imports)] // Phase 9+ — external callers will use crate::action::AuditLog
 pub use audit::AuditLog;

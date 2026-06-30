@@ -46,6 +46,7 @@ DEFAULT_TARGETS=(
     live-smoke-ui-select
     live-smoke-ui-toggle
     live-smoke-ui-pick
+    live-smoke-ui-failure-diagnostic
     live-smoke-cli
     live-smoke-action-matrix
     live-smoke-action-receipts
@@ -59,6 +60,7 @@ DEFAULT_TARGETS=(
     live-smoke-hud-unavailable-health
     live-smoke-hud-action-history
     live-smoke-hud-action-diagnostic
+    live-smoke-hud-ui-failure
     live-smoke-hud-approval
     live-smoke-action-cancel
     live-smoke-barge-in

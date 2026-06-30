@@ -1883,6 +1883,13 @@ fn action_result_summary(
     if outcome == "rejected" && is_approval_expired_error(error) {
         return "Approval expired before execution.".to_string();
     }
+    if matches!(outcome, "failure" | "timeout") {
+        if let Some(error) = error.map(one_line).filter(|s| !s.is_empty()) {
+            if let Some(summary) = ui_failure_summary(&error) {
+                return summary;
+            }
+        }
+    }
 
     match (outcome, operator_approved) {
         ("success", _) => match output_preview.map(one_line).filter(|s| !s.is_empty()) {
@@ -1916,6 +1923,13 @@ fn is_approval_expired_error(error: Option<&str>) -> bool {
     error
         .map(|value| value.to_lowercase().contains("approval expired"))
         .unwrap_or(false)
+}
+
+fn ui_failure_summary(error: &str) -> Option<String> {
+    let prefix = "UI failure [";
+    let rest = error.strip_prefix(prefix)?;
+    let (kind, detail) = rest.split_once("]: ")?;
+    Some(format!("UI failed ({kind}): {detail}"))
 }
 
 fn print_action_receipts(audit_path: &Path, receipts: &[ActionReceipt]) {
@@ -4503,6 +4517,34 @@ mod tests {
             receipt.result,
             "Succeeded: pressed UI control: AXButton | name='Continue' app: Safari front window: Dexter Docs"
         );
+    }
+
+    #[test]
+    fn action_receipt_from_audit_preserves_ui_failure_kind() {
+        let receipt = action_receipt_from_audit(AuditEntryOwned {
+            timestamp: "2026-05-18T12:00:00Z".to_string(),
+            action_id: "ui-click-fail-1".to_string(),
+            action_type: "ui_click".to_string(),
+            category: "cautious".to_string(),
+            spec_json: serde_json::json!({
+                "app_name": "Finder",
+                "role": "AXButton",
+                "label": "Save",
+                "max_depth": 2,
+            }),
+            outcome: "failure".to_string(),
+            exit_code: None,
+            output_preview: None,
+            error: Some("UI failure [control_not_found]: no matching control for 'Save'. Recovery: Capture a UI snapshot and target a visible control from it. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly.".to_string()),
+            duration_ms: Some(24),
+            operator_approved: None,
+        });
+
+        assert_eq!(receipt.action_type, "ui_click");
+        assert_eq!(receipt.status, "failed");
+        assert_eq!(receipt.target, "UI click: Finder AXButton \"Save\"");
+        assert!(receipt.result.contains("UI failed (control_not_found)"));
+        assert!(receipt.result.contains("snapshot_then_replan"));
     }
 
     #[test]

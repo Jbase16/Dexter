@@ -40,6 +40,9 @@ pub(crate) fn action_receipt_diagnosis(receipt: &impl ActionEvidence) -> String 
     if action_type == "browser" {
         return "Browser automation failed after the action was dispatched.".to_string();
     }
+    if let Some(kind) = extract_ui_failure_kind(receipt.result_summary()) {
+        return format!("UI automation failed after the action was dispatched ({kind}).");
+    }
     if action_type == "shell" {
         return "The shell command ran but returned a failure.".to_string();
     }
@@ -73,11 +76,48 @@ pub(crate) fn action_receipt_next_step(receipt: &impl ActionEvidence) -> &'stati
     if action_type == "browser" {
         return "Check browser worker health with `make status` or `make doctor`, then retry the browser action.";
     }
+    if let Some(kind) = extract_ui_failure_kind(receipt.result_summary()) {
+        return ui_failure_next_step(kind);
+    }
     if action_type == "shell" {
         return "Inspect the command, working directory, and exit code before retrying.";
     }
 
     "Inspect the recent action receipt and retry only after the target and inputs are clear."
+}
+
+fn ui_failure_next_step(kind: &str) -> &'static str {
+    match kind {
+        "control_not_found" | "control_disabled" | "not_typeable" | "not_selectable"
+        | "option_not_found" => {
+            "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly."
+        }
+        "no_front_window" => "Inspect or focus the target window before retrying the UI action.",
+        "ambiguous_control" => {
+            "Ask which matching control to use, or collect a UI snapshot and choose a more specific target."
+        }
+        "app_not_running" => "Open the target app or ask for the correct running app before retrying.",
+        "accessibility_denied" => {
+            "Grant Accessibility permission for Dexter/Terminal, then retry the UI action."
+        }
+        "action_timeout" | "applescript_failed" => {
+            "Check macOS UI state and permissions before retrying the smallest safe UI action."
+        }
+        _ => "Inspect the current UI state before retrying the UI action.",
+    }
+}
+
+fn extract_ui_failure_kind(summary: &str) -> Option<&str> {
+    if let Some(rest) = summary.strip_prefix("UI failed (") {
+        return rest.split_once(')').map(|(kind, _)| kind);
+    }
+    if let Some(rest) = summary.strip_prefix("Failed: UI failure [") {
+        return rest.split_once(']').map(|(kind, _)| kind);
+    }
+    if let Some(rest) = summary.strip_prefix("Timed out: UI failure [") {
+        return rest.split_once(']').map(|(kind, _)| kind);
+    }
+    None
 }
 
 pub(crate) fn format_failed_action_evidence_block(receipt: &impl ActionEvidence) -> String {
@@ -153,5 +193,18 @@ mod tests {
 
         assert!(action_receipt_diagnosis(&receipt).contains("denied before execution"));
         assert!(action_receipt_next_step(&receipt).contains("approve it only if"));
+    }
+
+    #[test]
+    fn ui_failure_receipt_has_snapshot_guidance() {
+        let receipt = TestEvidence {
+            outcome: "failed",
+            action_type: "ui_click",
+            summary: "UI failed (control_not_found): no matching control for 'Save'. Recovery: Capture a UI snapshot and target a visible control from it. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control.",
+        };
+
+        assert!(action_receipt_diagnosis(&receipt).contains("control_not_found"));
+        assert!(action_receipt_next_step(&receipt).contains("UI snapshot"));
+        assert!(action_receipt_next_step(&receipt).contains("Do not repeat"));
     }
 }

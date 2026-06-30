@@ -27,7 +27,7 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
@@ -367,6 +367,25 @@ live-smoke-ui-pick: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-pick-smoke.sh
 
+## live-smoke-ui-failure-diagnostic: verify typed UI/window failure receipts and why output
+##
+## Drives exact synthetic `ui_click` failures against a temporary AppKit fixture.
+## This proves missing and ambiguous controls produce typed, audit-friendly
+## receipts plus deterministic `dexter-cli --why` recovery guidance.
+live-smoke-ui-failure-diagnostic: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-failure-diagnostic-smoke.sh
+
+## live-smoke-ui-actions-shared: verify UI/window lanes against one shared core
+##
+## Starts one release core and one combined AppKit fixture, then drives the
+## structured window/UI action subset plus typed UI failure diagnostics. This is
+## the fast day-to-day UI lane; isolated UI targets remain the release-grade
+## proof that each smoke can own a fresh daemon.
+live-smoke-ui-actions-shared: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-actions-shared-smoke.sh
+
 ## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core with logs at
@@ -517,6 +536,15 @@ live-smoke-hud-action-diagnostic: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-hud-action-diagnostic-smoke.sh --start-core
 
+## live-smoke-hud-ui-failure: run Swift HUD typed UI/window failure regression
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core, seeds missing
+## and ambiguous UI control failures through the CLI, then verifies the Swift
+## HUD Recent Actions and Why surfaces show the typed failure kind and directive.
+live-smoke-hud-ui-failure: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-hud-ui-failure-smoke.sh --start-core
+
 ## live-smoke-hud-approval: run Swift HUD approval-required action regression
 ##
 ## Builds release-mode dexter-core, starts it with logs at
@@ -591,6 +619,7 @@ live-smoke-all:
 	$(MAKE) live-smoke-hud-unavailable-health
 	$(MAKE) live-smoke-hud-action-history
 	$(MAKE) live-smoke-hud-action-diagnostic
+	$(MAKE) live-smoke-hud-ui-failure
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel
 	$(MAKE) live-smoke-barge-in
@@ -654,6 +683,7 @@ live-smoke-action-safety:
 		live-smoke-ui-select \
 		live-smoke-ui-toggle \
 		live-smoke-ui-pick \
+		live-smoke-ui-failure-diagnostic \
 		live-smoke-action-matrix \
 		live-smoke-browser-recovery \
 		live-smoke-action-receipts \
@@ -663,10 +693,10 @@ live-smoke-action-safety:
 ## live-smoke-action-safety-shared: run a faster shared-core action safety slice
 ##
 ## Starts one release core and runs the compatible CLI/action checks against it.
-## This is the fast day-to-day signal for policy, receipts, approval lifecycle,
-## browser recovery evidence, and action cancellation. Use live-smoke-action-safety
-## for the isolated release-grade sweep that also proves each target can own a
-## fresh daemon independently.
+## This is the fast day-to-day signal for policy, UI/window receipts, approval
+## lifecycle, browser recovery evidence, and action cancellation. Use
+## live-smoke-action-safety for the isolated release-grade sweep that also proves
+## each target can own a fresh daemon independently.
 live-smoke-action-safety-shared:
 	bash scripts/live-action-safety-shared-smoke.sh
 
@@ -688,6 +718,7 @@ live-smoke-action-safety-full:
 		live-smoke-ui-select \
 		live-smoke-ui-toggle \
 		live-smoke-ui-pick \
+		live-smoke-ui-failure-diagnostic \
 		live-smoke-action-matrix \
 		live-smoke-browser-recovery \
 		live-smoke-browser-recovery-model \
@@ -695,6 +726,7 @@ live-smoke-action-safety-full:
 		live-smoke-approval-lifecycle \
 		live-smoke-hud-action-history \
 		live-smoke-hud-action-diagnostic \
+		live-smoke-hud-ui-failure \
 		live-smoke-hud-approval \
 		live-smoke-action-cancel
 
@@ -728,12 +760,14 @@ live-smoke-acceptance:
 		live-smoke-ui-select \
 		live-smoke-ui-toggle \
 		live-smoke-ui-pick \
+		live-smoke-ui-failure-diagnostic \
 		live-smoke-action-matrix \
 		live-smoke-browser-recovery \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
 		live-smoke-hud-action-history \
 		live-smoke-hud-action-diagnostic \
+		live-smoke-hud-ui-failure \
 		live-smoke-hud-approval \
 		live-smoke-action-cancel
 

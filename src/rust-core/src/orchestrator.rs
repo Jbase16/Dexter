@@ -71,7 +71,7 @@ use crate::{
     },
     context_observer::{ContextObserver, ContextSnapshot},
     inference::{
-        engine::{GenerationRequest, InferenceEngine, TokenChunk},
+        engine::{GenerationRequest, InferenceEngine, OllamaPsEntry, TokenChunk},
         error::InferenceError,
         models::ModelId,
         retrieval_classifier::is_retrieval_first_query,
@@ -769,26 +769,43 @@ impl SharedDaemonState {
     /// load just leaves its `_warm` flag at false; sessions still open, just with
     /// a degraded subset of capabilities (logged at warn level).
     pub async fn run_startup_warmup(&self, cfg: Arc<crate::config::DexterConfig>) {
+        let startup_started_at = Instant::now();
         info!("Daemon startup warmup beginning");
+        log_startup_phase(startup_started_at, "begin");
 
         // Step 1: TTS worker. Failure is non-fatal — voice stays text-only.
+        log_startup_phase(startup_started_at, "tts_start");
         self.voice.start_tts().await;
         if self.voice.is_tts_available() {
-            info!("TTS worker ready (daemon-startup)");
+            info!(
+                startup_elapsed_ms = elapsed_ms(startup_started_at),
+                "TTS worker ready (daemon-startup)"
+            );
         } else {
-            warn!("TTS worker unavailable — daemon stays text-only mode");
+            warn!(
+                startup_elapsed_ms = elapsed_ms(startup_started_at),
+                "TTS worker unavailable — daemon stays text-only mode"
+            );
         }
 
         // Step 2: Browser worker. Failure is non-fatal — browser actions degrade.
+        log_startup_phase(startup_started_at, "browser_start");
         self.browser.start().await;
+        info!(
+            startup_elapsed_ms = elapsed_ms(startup_started_at),
+            browser_available = self.browser.is_available(),
+            "Browser worker startup phase complete"
+        );
 
         // Build an InferenceEngine for the warmup requests. CoreOrchestrator::new
         // will build its own per-session; this one is just for daemon startup.
+        log_startup_phase(startup_started_at, "inference_engine_init");
         let engine = match crate::inference::engine::InferenceEngine::new(cfg.inference.clone()) {
             Ok(e) => e,
             Err(e) => {
                 warn!(
                     error = %e,
+                    startup_elapsed_ms = elapsed_ms(startup_started_at),
                     "InferenceEngine setup failed at daemon startup — model warmups skipped"
                 );
                 self.startup_warmup_complete.store(true, Ordering::SeqCst);
@@ -803,13 +820,32 @@ impl SharedDaemonState {
             cfg.models.embed.clone(),
             self.embed_model_warm.clone(),
         );
+        info!(
+            startup_elapsed_ms = elapsed_ms(startup_started_at),
+            model = %cfg.models.embed,
+            "Embed model warmup spawned"
+        );
 
         // Step 4: FAST model (await). First-token latency for any chat depends
         // on this being warm.
+        log_startup_phase(startup_started_at, "fast_warmup_start");
         warm_fast_model_inline(&engine, &cfg.models.fast, &self.fast_model_warm).await;
+        info!(
+            startup_elapsed_ms = elapsed_ms(startup_started_at),
+            fast_model_warm = self.fast_model_warm.load(Ordering::SeqCst),
+            "FAST warmup phase complete"
+        );
 
         // Step 5: PRIMARY model (await). Routed-PRIMARY queries depend on this.
+        log_startup_phase(startup_started_at, "primary_residency_probe_start");
+        log_primary_ollama_residency(&engine, &cfg.models.primary, startup_started_at).await;
+        log_startup_phase(startup_started_at, "primary_warmup_start");
         warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
+        info!(
+            startup_elapsed_ms = elapsed_ms(startup_started_at),
+            primary_model_warm = self.primary_model_warm.load(Ordering::SeqCst),
+            "PRIMARY warmup phase complete"
+        );
 
         // Step 6: PRIMARY residency. Two strategies, best-first:
         //
@@ -876,7 +912,10 @@ impl SharedDaemonState {
         }
 
         self.startup_warmup_complete.store(true, Ordering::SeqCst);
-        info!("Daemon startup warmup complete — sessions can connect with no warmup tax");
+        info!(
+            startup_elapsed_ms = elapsed_ms(startup_started_at),
+            "Daemon startup warmup complete — sessions can connect with no warmup tax"
+        );
     }
 }
 
@@ -969,6 +1008,60 @@ fn elapsed_ms(started_at: Instant) -> u64 {
         Ok(ms) => ms,
         Err(_) => u64::MAX,
     }
+}
+
+fn log_startup_phase(started_at: Instant, phase: &'static str) {
+    info!(
+        startup_elapsed_ms = elapsed_ms(started_at),
+        startup_phase = phase,
+        "Daemon startup warmup phase"
+    );
+}
+
+async fn log_primary_ollama_residency(
+    engine: &InferenceEngine,
+    primary_model: &str,
+    startup_started_at: Instant,
+) {
+    match engine.ps().await {
+        Ok(models) => {
+            let primary = models
+                .iter()
+                .find(|entry| ollama_ps_entry_matches_model(entry, primary_model));
+            if let Some(entry) = primary {
+                info!(
+                    startup_elapsed_ms = elapsed_ms(startup_started_at),
+                    model = %primary_model,
+                    resident = true,
+                    resident_name = %entry.name,
+                    resident_size_gb = entry.size as f64 / 1_073_741_824.0,
+                    resident_vram_gb = entry.size_vram as f64 / 1_073_741_824.0,
+                    resident_fully_in_vram = entry.size_vram >= entry.size,
+                    resident_expires_at = %entry.expires_at,
+                    resident_count = models.len(),
+                    "PRIMARY Ollama residency before startup warmup"
+                );
+            } else {
+                info!(
+                    startup_elapsed_ms = elapsed_ms(startup_started_at),
+                    model = %primary_model,
+                    resident = false,
+                    resident_count = models.len(),
+                    "PRIMARY Ollama residency before startup warmup"
+                );
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            startup_elapsed_ms = elapsed_ms(startup_started_at),
+            model = %primary_model,
+            "PRIMARY Ollama residency probe failed before startup warmup"
+        ),
+    }
+}
+
+fn ollama_ps_entry_matches_model(entry: &OllamaPsEntry, model: &str) -> bool {
+    entry.name == model || entry.name.starts_with(&format!("{model}:"))
 }
 
 async fn drain_warmup_stream(

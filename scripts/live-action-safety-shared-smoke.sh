@@ -255,6 +255,9 @@ main() {
 
     run_target live-action-diagnostic-smoke bash scripts/live-action-diagnostic-smoke.sh "$CORE_LOG" || overall_status=1
     if [[ "$overall_status" -eq 0 ]]; then
+        run_target live-ui-actions-shared-smoke bash scripts/live-ui-actions-shared-smoke.sh --existing-core "$CORE_LOG" || overall_status=1
+    fi
+    if [[ "$overall_status" -eq 0 ]]; then
         run_target live-action-matrix-smoke bash scripts/live-cli-smoke.sh --action-matrix "$CORE_LOG" || overall_status=1
     fi
     if [[ "$overall_status" -eq 0 ]]; then

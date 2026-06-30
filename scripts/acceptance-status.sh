@@ -69,6 +69,7 @@ FOCUSED_SLICES = (
             "live-smoke-ui-select",
             "live-smoke-ui-toggle",
             "live-smoke-ui-pick",
+            "live-smoke-ui-failure-diagnostic",
             "live-smoke-action-matrix",
             "live-smoke-browser-recovery",
             "live-smoke-action-receipts",
@@ -78,15 +79,27 @@ FOCUSED_SLICES = (
     ),
 )
 
+MAIN_ACCEPTANCE_EXTRA_TARGETS = (
+    "live-smoke-hud-action-history",
+    "live-smoke-hud-action-diagnostic",
+    "live-smoke-hud-ui-failure",
+    "live-smoke-hud-approval",
+)
+
 SLICES = (
     Slice(
         "Main acceptance battery",
         "live-smoke-acceptance",
         tuple(
             dict.fromkeys(
-                target
-                for acceptance_slice in FOCUSED_SLICES
-                for target in acceptance_slice.required_targets
+                [
+                    *(
+                        target
+                        for acceptance_slice in FOCUSED_SLICES
+                        for target in acceptance_slice.required_targets
+                    ),
+                    *MAIN_ACCEPTANCE_EXTRA_TARGETS,
+                ]
             )
         ),
     ),

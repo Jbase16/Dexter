@@ -655,6 +655,12 @@ on replaceText(sourceText, searchText, replacementText)
     return joinedText
 end replaceText
 
+on displayText(rawValue)
+    set cleanedValue to my cleanText(rawValue)
+    if cleanedValue is "" then return "<none>"
+    return cleanedValue
+end displayText
+
 on safeProperty(uiElement, propertyName)
     try
         tell application "System Events"
@@ -685,6 +691,17 @@ on safeProperty(uiElement, propertyName)
     end try
     return ""
 end safeProperty
+
+on safeAttribute(uiElement, attributeName)
+    try
+        tell application "System Events"
+            set rawValue to value of attribute attributeName of uiElement
+            if rawValue is missing value then return ""
+            return my cleanText(rawValue)
+        end tell
+    end try
+    return ""
+end safeAttribute
 
 on isInterestingRole(roleName)
     if roleName is "" then return false
@@ -828,6 +845,7 @@ set requestedRole to "{role}"
 set requestedLabel to "{label}"
 set maxDepth to {max_depth}
 set maxRows to 80
+set maxEvidenceRows to 8
 
 on cleanText(rawValue)
     try
@@ -856,6 +874,12 @@ on replaceText(sourceText, searchText, replacementText)
     set AppleScript's text item delimiters to oldDelimiters
     return joinedText
 end replaceText
+
+on displayText(rawValue)
+    set cleanedValue to my cleanText(rawValue)
+    if cleanedValue is "" then return "<none>"
+    return cleanedValue
+end displayText
 
 on safeProperty(uiElement, propertyName)
     try
@@ -888,6 +912,17 @@ on safeProperty(uiElement, propertyName)
     return ""
 end safeProperty
 
+on safeAttribute(uiElement, attributeName)
+    try
+        tell application "System Events"
+            set rawValue to value of attribute attributeName of uiElement
+            if rawValue is missing value then return ""
+            return my cleanText(rawValue)
+        end tell
+    end try
+    return ""
+end safeAttribute
+
 on isInterestingRole(roleName)
     if roleName is "" then return false
     set interestingRoles to {{"AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXComboBox", "AXLink", "AXTabGroup", "AXToolbar"}}
@@ -904,6 +939,17 @@ on isEnabledControl(uiElement)
     end try
     return true
 end isEnabledControl
+
+on elementFrame(uiElement)
+    try
+        tell application "System Events"
+            set elementPosition to position of uiElement
+            set elementSize to size of uiElement
+        end tell
+        return "frame={{x=" & (item 1 of elementPosition as text) & ",y=" & (item 2 of elementPosition as text) & ",w=" & (item 1 of elementSize as text) & ",h=" & (item 2 of elementSize as text) & "}}"
+    end try
+    return ""
+end elementFrame
 
 on labelMatches(uiElement, wantedLabel, exactMatch)
     set candidateLabels to {{}}
@@ -932,10 +978,16 @@ on elementSummary(uiElement)
     set elementName to my safeProperty(uiElement, "name")
     set elementDescription to my safeProperty(uiElement, "description")
     set elementValue to my safeProperty(uiElement, "value")
+    set elementIdentifier to my safeAttribute(uiElement, "AXIdentifier")
+    set elementFrameText to my elementFrame(uiElement)
+    set elementEnabled to my isEnabledControl(uiElement)
     set labelParts to {{}}
     if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
     if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
     if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    if elementIdentifier is not "" then set end of labelParts to "identifier=" & quoted form of elementIdentifier
+    set end of labelParts to "enabled=" & (elementEnabled as text)
+    if elementFrameText is not "" then set end of labelParts to elementFrameText
     set oldDelimiters to AppleScript's text item delimiters
     set AppleScript's text item delimiters to " | "
     set labelsText to labelParts as text
@@ -943,6 +995,71 @@ on elementSummary(uiElement)
     if labelsText is "" then return roleName
     return roleName & " | " & labelsText
 end elementSummary
+
+on joinRows(rowList, delimiterText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to delimiterText
+    set joinedText to rowList as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end joinRows
+
+on summarizeElements(elementList, rowLimit)
+    set rows to {{}}
+    repeat with candidateElementRef in elementList
+        if (count of rows) is greater than or equal to rowLimit then exit repeat
+        try
+            set candidateElement to contents of candidateElementRef
+        on error
+            set candidateElement to candidateElementRef
+        end try
+        set end of rows to my elementSummary(candidateElement)
+    end repeat
+    if (count of rows) is 0 then return "(none)"
+    return my joinRows(rows, "; ")
+end summarizeElements
+
+on targetEvidencePrefix(actionName, targetAppName, frontWindowTitle, requestedRole, requestedLabel)
+    return "Target: action=" & actionName & " app=" & my displayText(targetAppName) & " window=" & quoted form of my displayText(frontWindowTitle) & " role=" & my displayText(requestedRole) & " label=" & quoted form of my displayText(requestedLabel) & " container=<none>."
+end targetEvidencePrefix
+
+on collectCandidateSummaries(uiElement, currentDepth, allowedDepth, wantedRole, rowLimit)
+    set rows to {{}}
+    if currentDepth > allowedDepth then return rows
+    try
+        tell application "System Events"
+            set childElements to UI elements of uiElement
+        end tell
+    on error
+        return rows
+    end try
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
+        set roleName to my safeProperty(childElement, "role")
+        set roleOk to true
+        if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
+        if roleOk and my isInterestingRole(roleName) then
+            set end of rows to my elementSummary(childElement)
+        end if
+        if currentDepth < allowedDepth and (count of rows) is less than rowLimit then
+            try
+                set nestedRows to my collectCandidateSummaries(childElement, currentDepth + 1, allowedDepth, wantedRole, rowLimit - (count of rows))
+            on error
+                set nestedRows to {{}}
+            end try
+            repeat with nestedRow in nestedRows
+                if (count of rows) is greater than or equal to rowLimit then exit repeat
+                set end of rows to nestedRow as text
+            end repeat
+        end if
+        if (count of rows) is greater than or equal to rowLimit then exit repeat
+    end repeat
+    return rows
+end collectCandidateSummaries
 
 on collectMatches(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
     set matches to {{}}
@@ -954,7 +1071,12 @@ on collectMatches(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         set roleOk to true
         if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
@@ -964,7 +1086,11 @@ on collectMatches(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel
         if currentDepth < allowedDepth then
             set nestedMatches to my collectMatches(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -998,19 +1124,29 @@ set exactMatches to my collectMatches(targetWindow, 1, maxDepth, requestedRole, 
 if (count of exactMatches) is 1 then
     set targetElement to item 1 of exactMatches
 else if (count of exactMatches) is greater than 1 then
-    error "ui control press failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+    error "ui control press failed: ambiguous exact match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_click", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=" & ((count of exactMatches) as text) & " candidates: " & my summarizeElements(exactMatches, maxEvidenceRows) number 1728
 else
     set fuzzyMatches to my collectMatches(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
     if (count of fuzzyMatches) is 0 then
-        error "ui control press failed: no matching control for " & quoted form of requestedLabel number 1728
+        try
+            set candidateRows to my collectCandidateSummaries(targetWindow, 1, maxDepth, requestedRole, maxEvidenceRows)
+        on error
+            set candidateRows to {{"(unavailable)"}}
+        end try
+        if (count of candidateRows) is 0 then
+            set candidatesText to "(none)"
+        else
+            set candidatesText to my joinRows(candidateRows, "; ")
+        end if
+        error "ui control press failed: no matching control for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_click", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=0 nearest_safe_candidates: " & candidatesText number 1728
     else if (count of fuzzyMatches) is greater than 1 then
-        error "ui control press failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+        error "ui control press failed: ambiguous partial match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_click", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=" & ((count of fuzzyMatches) as text) & " candidates: " & my summarizeElements(fuzzyMatches, maxEvidenceRows) number 1728
     end if
     set targetElement to item 1 of fuzzyMatches
 end if
 
 if not my isEnabledControl(targetElement) then
-    error "ui control press failed: matched control is disabled: " & my elementSummary(targetElement) number 1728
+    error "ui control press failed: matched control is disabled. " & my targetEvidencePrefix("ui_click", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: matched_control: " & my elementSummary(targetElement) number 1728
 end if
 
 set targetSummary to my elementSummary(targetElement)
@@ -1080,6 +1216,7 @@ set requestedLabel to "{label}"
 set requestedText to "{text}"
 set maxDepth to {max_depth}
 set maxRows to 80
+set maxEvidenceRows to 8
 
 on cleanText(rawValue)
     try
@@ -1108,6 +1245,12 @@ on replaceText(sourceText, searchText, replacementText)
     set AppleScript's text item delimiters to oldDelimiters
     return joinedText
 end replaceText
+
+on displayText(rawValue)
+    set cleanedValue to my cleanText(rawValue)
+    if cleanedValue is "" then return "<none>"
+    return cleanedValue
+end displayText
 
 on safeProperty(uiElement, propertyName)
     try
@@ -1140,11 +1283,30 @@ on safeProperty(uiElement, propertyName)
     return ""
 end safeProperty
 
+on joinRows(rowList, delimiterText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to delimiterText
+    set joinedText to rowList as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end joinRows
+
 on isTypeableRole(roleName)
     if roleName is "" then return false
     set typeableRoles to {{"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"}}
     return typeableRoles contains roleName
 end isTypeableRole
+
+on isEnabledControl(uiElement)
+    try
+        tell application "System Events"
+            set rawEnabled to enabled of uiElement
+            if rawEnabled is missing value then return true
+            return rawEnabled as boolean
+        end tell
+    end try
+    return true
+end isEnabledControl
 
 on labelMatches(uiElement, wantedLabel, exactMatch)
     if wantedLabel is "" then return true
@@ -1174,10 +1336,12 @@ on elementSummary(uiElement)
     set elementName to my safeProperty(uiElement, "name")
     set elementDescription to my safeProperty(uiElement, "description")
     set elementValue to my safeProperty(uiElement, "value")
+    set elementEnabled to my isEnabledControl(uiElement)
     set labelParts to {{}}
     if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
     if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
     if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set end of labelParts to "enabled=" & (elementEnabled as text)
     set oldDelimiters to AppleScript's text item delimiters
     set AppleScript's text item delimiters to " | "
     set labelsText to labelParts as text
@@ -1185,6 +1349,25 @@ on elementSummary(uiElement)
     if labelsText is "" then return roleName
     return roleName & " | " & labelsText
 end elementSummary
+
+on summarizeElements(elementList, rowLimit)
+    set rows to {{}}
+    repeat with candidateElementRef in elementList
+        if (count of rows) is greater than or equal to rowLimit then exit repeat
+        try
+            set candidateElement to contents of candidateElementRef
+        on error
+            set candidateElement to candidateElementRef
+        end try
+        set end of rows to my elementSummary(candidateElement)
+    end repeat
+    if (count of rows) is 0 then return "(none)"
+    return my joinRows(rows, "; ")
+end summarizeElements
+
+on targetEvidencePrefix(actionName, targetAppName, frontWindowTitle, requestedRole, requestedLabel)
+    return "Target: action=" & actionName & " app=" & my displayText(targetAppName) & " window=" & quoted form of my displayText(frontWindowTitle) & " role=" & my displayText(requestedRole) & " label=" & quoted form of my displayText(requestedLabel) & " container=<none> text=<redacted>."
+end targetEvidencePrefix
 
 on collectTypeTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
     set matches to {{}}
@@ -1196,7 +1379,12 @@ on collectTypeTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedL
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         set roleOk to true
         if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
@@ -1206,7 +1394,11 @@ on collectTypeTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedL
         if currentDepth < allowedDepth then
             set nestedMatches to my collectTypeTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -1240,26 +1432,32 @@ set exactMatches to my collectTypeTargets(targetWindow, 1, maxDepth, requestedRo
 if (count of exactMatches) is 1 then
     set targetElement to item 1 of exactMatches
 else if (count of exactMatches) is greater than 1 then
-    error "ui type failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+    error "ui type failed: ambiguous exact match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_type", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=" & ((count of exactMatches) as text) & " candidates: " & my summarizeElements(exactMatches, maxEvidenceRows) number 1728
 else
     if requestedLabel is "" then
-        error "ui type failed: no matching text control for role " & quoted form of requestedRole number 1728
+        set candidateRows to my collectTypeTargets(targetWindow, 1, maxDepth, requestedRole, "", true, maxEvidenceRows)
+        error "ui type failed: no matching text control for role " & quoted form of requestedRole & ". " & my targetEvidencePrefix("ui_type", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=0 nearest_safe_candidates: " & my summarizeElements(candidateRows, maxEvidenceRows) number 1728
     end if
     set fuzzyMatches to my collectTypeTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
     if (count of fuzzyMatches) is 0 then
-        error "ui type failed: no matching text control for " & quoted form of requestedLabel number 1728
+        set candidateRows to my collectTypeTargets(targetWindow, 1, maxDepth, requestedRole, "", true, maxEvidenceRows)
+        error "ui type failed: no matching text control for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_type", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=0 nearest_safe_candidates: " & my summarizeElements(candidateRows, maxEvidenceRows) number 1728
     else if (count of fuzzyMatches) is greater than 1 then
-        error "ui type failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+        error "ui type failed: ambiguous partial match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_type", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: match_count=" & ((count of fuzzyMatches) as text) & " candidates: " & my summarizeElements(fuzzyMatches, maxEvidenceRows) number 1728
     end if
     set targetElement to item 1 of fuzzyMatches
 end if
 
 set targetSummary to my elementSummary(targetElement)
+if not my isEnabledControl(targetElement) then
+    error "ui type failed: matched control is disabled. " & my targetEvidencePrefix("ui_type", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: matched_control: " & targetSummary number 1728
+end if
+
 tell application "System Events"
     try
         set value of targetElement to requestedText
     on error errMsg number errNum
-        error "ui type failed: could not set text value: " & errMsg number errNum
+        error "ui type failed: could not set text value: " & errMsg & ". " & my targetEvidencePrefix("ui_type", targetAppName, frontWindowTitle, requestedRole, requestedLabel) & " Evidence: matched_control: " & targetSummary number errNum
     end try
 end tell
 return "typed into UI control: " & targetSummary & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle & linefeed & "text: <" & ((length of requestedText) as text) & " chars>"
@@ -1333,6 +1531,7 @@ set requestedLabel to "{label}"
 set requestedOption to "{option}"
 set maxDepth to {max_depth}
 set maxRows to 80
+set maxEvidenceRows to 8
 
 on cleanText(rawValue)
     try
@@ -1362,6 +1561,12 @@ on replaceText(sourceText, searchText, replacementText)
     return joinedText
 end replaceText
 
+on displayText(rawValue)
+    set cleanedValue to my cleanText(rawValue)
+    if cleanedValue is "" then return "<none>"
+    return cleanedValue
+end displayText
+
 on safeProperty(uiElement, propertyName)
     try
         tell application "System Events"
@@ -1389,6 +1594,14 @@ on safeProperty(uiElement, propertyName)
     end try
     return ""
 end safeProperty
+
+on joinRows(rowList, delimiterText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to delimiterText
+    set joinedText to rowList as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end joinRows
 
 on isSelectableRole(roleName)
     if roleName is "" then return false
@@ -1452,10 +1665,12 @@ on elementSummary(uiElement)
     set elementName to my safeProperty(uiElement, "name")
     set elementDescription to my safeProperty(uiElement, "description")
     set elementValue to my safeProperty(uiElement, "value")
+    set elementEnabled to my isEnabledControl(uiElement)
     set labelParts to {{}}
     if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
     if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
     if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set end of labelParts to "enabled=" & (elementEnabled as text)
     set oldDelimiters to AppleScript's text item delimiters
     set AppleScript's text item delimiters to " | "
     set labelsText to labelParts as text
@@ -1463,6 +1678,25 @@ on elementSummary(uiElement)
     if labelsText is "" then return roleName
     return roleName & " | " & labelsText
 end elementSummary
+
+on summarizeElements(elementList, rowLimit)
+    set rows to {{}}
+    repeat with candidateElementRef in elementList
+        if (count of rows) is greater than or equal to rowLimit then exit repeat
+        try
+            set candidateElement to contents of candidateElementRef
+        on error
+            set candidateElement to candidateElementRef
+        end try
+        set end of rows to my elementSummary(candidateElement)
+    end repeat
+    if (count of rows) is 0 then return "(none)"
+    return my joinRows(rows, "; ")
+end summarizeElements
+
+on targetEvidencePrefix(actionName, targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption)
+    return "Target: action=" & actionName & " app=" & my displayText(targetAppName) & " window=" & quoted form of my displayText(frontWindowTitle) & " role=" & my displayText(requestedRole) & " label=" & quoted form of my displayText(requestedLabel) & " option=" & quoted form of my displayText(requestedOption) & " container=<none>."
+end targetEvidencePrefix
 
 on collectSelectTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
     set matches to {{}}
@@ -1474,7 +1708,12 @@ on collectSelectTargets(uiElement, currentDepth, allowedDepth, wantedRole, wante
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         set roleOk to true
         if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
@@ -1484,7 +1723,11 @@ on collectSelectTargets(uiElement, currentDepth, allowedDepth, wantedRole, wante
         if currentDepth < allowedDepth then
             set nestedMatches to my collectSelectTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -1502,7 +1745,12 @@ on collectOptionTargets(uiElement, currentDepth, allowedDepth, wantedOption, row
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         if roleName is "AXMenuItem" and my optionMatches(childElement, wantedOption) then
             set end of matches to childElement
@@ -1510,7 +1758,11 @@ on collectOptionTargets(uiElement, currentDepth, allowedDepth, wantedOption, row
         if currentDepth < allowedDepth then
             set nestedMatches to my collectOptionTargets(childElement, currentDepth + 1, allowedDepth, wantedOption, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -1544,19 +1796,20 @@ set exactMatches to my collectSelectTargets(targetWindow, 1, maxDepth, requested
 if (count of exactMatches) is 1 then
     set targetElement to item 1 of exactMatches
 else if (count of exactMatches) is greater than 1 then
-    error "ui select failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+    error "ui select failed: ambiguous exact match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_select", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption) & " Evidence: match_count=" & ((count of exactMatches) as text) & " candidates: " & my summarizeElements(exactMatches, maxEvidenceRows) number 1728
 else
     set fuzzyMatches to my collectSelectTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
     if (count of fuzzyMatches) is 0 then
-        error "ui select failed: no matching selectable control for " & quoted form of requestedLabel number 1728
+        set candidateRows to my collectSelectTargets(targetWindow, 1, maxDepth, requestedRole, "", true, maxEvidenceRows)
+        error "ui select failed: no matching selectable control for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_select", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption) & " Evidence: match_count=0 nearest_safe_candidates: " & my summarizeElements(candidateRows, maxEvidenceRows) number 1728
     else if (count of fuzzyMatches) is greater than 1 then
-        error "ui select failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+        error "ui select failed: ambiguous partial match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_select", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption) & " Evidence: match_count=" & ((count of fuzzyMatches) as text) & " candidates: " & my summarizeElements(fuzzyMatches, maxEvidenceRows) number 1728
     end if
     set targetElement to item 1 of fuzzyMatches
 end if
 
 if not my isEnabledControl(targetElement) then
-    error "ui select failed: matched control is disabled: " & my elementSummary(targetElement) number 1728
+    error "ui select failed: matched control is disabled. " & my targetEvidencePrefix("ui_select", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption) & " Evidence: matched_control: " & my elementSummary(targetElement) number 1728
 end if
 
 set targetSummary to my elementSummary(targetElement)
@@ -1570,9 +1823,9 @@ if (count of optionMatches) is 0 then
     set optionMatches to my collectOptionTargets(targetProcess, 1, 4, requestedOption, maxRows)
 end if
 if (count of optionMatches) is 0 then
-    error "ui select failed: no exact option " & quoted form of requestedOption & " for " & targetSummary number 1728
+    error "ui select failed: no exact option " & quoted form of requestedOption & " for " & targetSummary & ". " & my targetEvidencePrefix("ui_select", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption) & " Evidence: match_count=0 option_candidates: " & my summarizeElements(optionMatches, maxEvidenceRows) number 1728
 else if (count of optionMatches) is greater than 1 then
-    error "ui select failed: ambiguous option " & quoted form of requestedOption & " for " & targetSummary number 1728
+    error "ui select failed: ambiguous option " & quoted form of requestedOption & " for " & targetSummary & ". " & my targetEvidencePrefix("ui_select", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedOption) & " Evidence: match_count=" & ((count of optionMatches) as text) & " option_candidates: " & my summarizeElements(optionMatches, maxEvidenceRows) number 1728
 end if
 
 set optionElement to item 1 of optionMatches
@@ -1643,6 +1896,7 @@ set requestedLabel to "{label}"
 set requestedState to {requested_state}
 set maxDepth to {max_depth}
 set maxRows to 80
+set maxEvidenceRows to 8
 
 on cleanText(rawValue)
     try
@@ -1672,6 +1926,12 @@ on replaceText(sourceText, searchText, replacementText)
     return joinedText
 end replaceText
 
+on displayText(rawValue)
+    set cleanedValue to my cleanText(rawValue)
+    if cleanedValue is "" then return "<none>"
+    return cleanedValue
+end displayText
+
 on safeProperty(uiElement, propertyName)
     try
         tell application "System Events"
@@ -1699,6 +1959,14 @@ on safeProperty(uiElement, propertyName)
     end try
     return ""
 end safeProperty
+
+on joinRows(rowList, delimiterText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to delimiterText
+    set joinedText to rowList as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end joinRows
 
 on isToggleRole(roleName)
     if roleName is "" then return false
@@ -1774,10 +2042,12 @@ on elementSummary(uiElement)
     set elementName to my safeProperty(uiElement, "name")
     set elementDescription to my safeProperty(uiElement, "description")
     set elementValue to my safeProperty(uiElement, "value")
+    set elementEnabled to my isEnabledControl(uiElement)
     set labelParts to {{}}
     if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
     if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
     if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set end of labelParts to "enabled=" & (elementEnabled as text)
     set oldDelimiters to AppleScript's text item delimiters
     set AppleScript's text item delimiters to " | "
     set labelsText to labelParts as text
@@ -1785,6 +2055,25 @@ on elementSummary(uiElement)
     if labelsText is "" then return roleName
     return roleName & " | " & labelsText
 end elementSummary
+
+on summarizeElements(elementList, rowLimit)
+    set rows to {{}}
+    repeat with candidateElementRef in elementList
+        if (count of rows) is greater than or equal to rowLimit then exit repeat
+        try
+            set candidateElement to contents of candidateElementRef
+        on error
+            set candidateElement to candidateElementRef
+        end try
+        set end of rows to my elementSummary(candidateElement)
+    end repeat
+    if (count of rows) is 0 then return "(none)"
+    return my joinRows(rows, "; ")
+end summarizeElements
+
+on targetEvidencePrefix(actionName, targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState)
+    return "Target: action=" & actionName & " app=" & my displayText(targetAppName) & " window=" & quoted form of my displayText(frontWindowTitle) & " role=" & my displayText(requestedRole) & " label=" & quoted form of my displayText(requestedLabel) & " state=" & my stateName(requestedState) & " container=<none>."
+end targetEvidencePrefix
 
 on collectToggleTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
     set matches to {{}}
@@ -1796,7 +2085,12 @@ on collectToggleTargets(uiElement, currentDepth, allowedDepth, wantedRole, wante
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         set roleOk to true
         if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
@@ -1806,7 +2100,11 @@ on collectToggleTargets(uiElement, currentDepth, allowedDepth, wantedRole, wante
         if currentDepth < allowedDepth then
             set nestedMatches to my collectToggleTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -1840,25 +2138,26 @@ set exactMatches to my collectToggleTargets(targetWindow, 1, maxDepth, requested
 if (count of exactMatches) is 1 then
     set targetElement to item 1 of exactMatches
 else if (count of exactMatches) is greater than 1 then
-    error "ui toggle failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+    error "ui toggle failed: ambiguous exact match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_toggle", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState) & " Evidence: match_count=" & ((count of exactMatches) as text) & " candidates: " & my summarizeElements(exactMatches, maxEvidenceRows) number 1728
 else
     set fuzzyMatches to my collectToggleTargets(targetWindow, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
     if (count of fuzzyMatches) is 0 then
-        error "ui toggle failed: no matching toggle control for " & quoted form of requestedLabel number 1728
+        set candidateRows to my collectToggleTargets(targetWindow, 1, maxDepth, requestedRole, "", true, maxEvidenceRows)
+        error "ui toggle failed: no matching toggle control for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_toggle", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState) & " Evidence: match_count=0 nearest_safe_candidates: " & my summarizeElements(candidateRows, maxEvidenceRows) number 1728
     else if (count of fuzzyMatches) is greater than 1 then
-        error "ui toggle failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+        error "ui toggle failed: ambiguous partial match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_toggle", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState) & " Evidence: match_count=" & ((count of fuzzyMatches) as text) & " candidates: " & my summarizeElements(fuzzyMatches, maxEvidenceRows) number 1728
     end if
     set targetElement to item 1 of fuzzyMatches
 end if
 
 if not my isEnabledControl(targetElement) then
-    error "ui toggle failed: matched control is disabled: " & my elementSummary(targetElement) number 1728
+    error "ui toggle failed: matched control is disabled. " & my targetEvidencePrefix("ui_toggle", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState) & " Evidence: matched_control: " & my elementSummary(targetElement) number 1728
 end if
 
 set targetSummary to my elementSummary(targetElement)
 set roleName to my safeProperty(targetElement, "role")
 if roleName is "AXRadioButton" and requestedState is false then
-    error "ui toggle failed: cannot turn off a radio button directly: " & targetSummary number 1728
+    error "ui toggle failed: cannot turn off a radio button directly. " & my targetEvidencePrefix("ui_toggle", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState) & " Evidence: matched_control: " & targetSummary & " current_state=on requested_state=off" number 1728
 end if
 
 set initialState to my toggleState(targetElement)
@@ -1873,7 +2172,7 @@ end if
 
 set finalState to my toggleState(targetElement)
 if finalState is not requestedState then
-    error "ui toggle failed: final state " & my stateName(finalState) & " did not match requested " & my stateName(requestedState) & " for " & targetSummary number 1728
+    error "ui toggle failed: final state " & my stateName(finalState) & " did not match requested " & my stateName(requestedState) & ". " & my targetEvidencePrefix("ui_toggle", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedState) & " Evidence: matched_control: " & targetSummary & " current_state=" & my stateName(finalState) & " requested_state=" & my stateName(requestedState) number 1728
 end if
 
 return "set UI toggle: " & targetSummary & linefeed & "state: " & my stateName(finalState) & linefeed & "changed: " & (changedState as text) & linefeed & "app: " & targetAppName & linefeed & "front window: " & frontWindowTitle"#
@@ -1939,6 +2238,7 @@ set requestedLabel to "{label}"
 set requestedContainerLabel to "{container_label}"
 set maxDepth to {max_depth}
 set maxRows to 120
+set maxEvidenceRows to 8
 
 on cleanText(rawValue)
     try
@@ -1968,6 +2268,12 @@ on replaceText(sourceText, searchText, replacementText)
     return joinedText
 end replaceText
 
+on displayText(rawValue)
+    set cleanedValue to my cleanText(rawValue)
+    if cleanedValue is "" then return "<none>"
+    return cleanedValue
+end displayText
+
 on safeProperty(uiElement, propertyName)
     try
         tell application "System Events"
@@ -1995,6 +2301,14 @@ on safeProperty(uiElement, propertyName)
     end try
     return ""
 end safeProperty
+
+on joinRows(rowList, delimiterText)
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to delimiterText
+    set joinedText to rowList as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedText
+end joinRows
 
 on isPickableRole(roleName)
     if roleName is "" then return false
@@ -2051,7 +2365,12 @@ on elementLabels(uiElement, descendantDepth)
     on error
         return candidateLabels
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set childLabels to my elementLabels(childElement, descendantDepth - 1)
         repeat with childLabel in childLabels
             set end of candidateLabels to childLabel as text
@@ -2065,10 +2384,12 @@ on elementSummary(uiElement)
     set elementName to my safeProperty(uiElement, "name")
     set elementDescription to my safeProperty(uiElement, "description")
     set elementValue to my safeProperty(uiElement, "value")
+    set elementEnabled to my isEnabledControl(uiElement)
     set labelParts to {{}}
     if elementName is not "" then set end of labelParts to "name=" & quoted form of elementName
     if elementDescription is not "" and elementDescription is not elementName then set end of labelParts to "description=" & quoted form of elementDescription
     if elementValue is not "" and elementValue is not elementName and elementValue is not elementDescription then set end of labelParts to "value=" & quoted form of elementValue
+    set end of labelParts to "enabled=" & (elementEnabled as text)
     set oldDelimiters to AppleScript's text item delimiters
     set AppleScript's text item delimiters to " | "
     set labelsText to labelParts as text
@@ -2076,6 +2397,25 @@ on elementSummary(uiElement)
     if labelsText is "" then return roleName
     return roleName & " | " & labelsText
 end elementSummary
+
+on summarizeElements(elementList, rowLimit)
+    set rows to {{}}
+    repeat with candidateElementRef in elementList
+        if (count of rows) is greater than or equal to rowLimit then exit repeat
+        try
+            set candidateElement to contents of candidateElementRef
+        on error
+            set candidateElement to candidateElementRef
+        end try
+        set end of rows to my elementSummary(candidateElement)
+    end repeat
+    if (count of rows) is 0 then return "(none)"
+    return my joinRows(rows, "; ")
+end summarizeElements
+
+on targetEvidencePrefix(actionName, targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel)
+    return "Target: action=" & actionName & " app=" & my displayText(targetAppName) & " window=" & quoted form of my displayText(frontWindowTitle) & " role=" & my displayText(requestedRole) & " label=" & quoted form of my displayText(requestedLabel) & " container=" & quoted form of my displayText(requestedContainerLabel) & "."
+end targetEvidencePrefix
 
 on collectContainerTargets(uiElement, currentDepth, allowedDepth, wantedLabel, exactMatch, rowLimit)
     set matches to {{}}
@@ -2087,7 +2427,12 @@ on collectContainerTargets(uiElement, currentDepth, allowedDepth, wantedLabel, e
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         if my isContainerRole(roleName) and my labelMatches(childElement, wantedLabel, exactMatch) then
             set end of matches to childElement
@@ -2095,7 +2440,11 @@ on collectContainerTargets(uiElement, currentDepth, allowedDepth, wantedLabel, e
         if currentDepth < allowedDepth then
             set nestedMatches to my collectContainerTargets(childElement, currentDepth + 1, allowedDepth, wantedLabel, exactMatch, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -2113,7 +2462,12 @@ on collectPickTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedL
     on error
         return matches
     end try
-    repeat with childElement in childElements
+    repeat with childElementRef in childElements
+        try
+            set childElement to contents of childElementRef
+        on error
+            set childElement to childElementRef
+        end try
         set roleName to my safeProperty(childElement, "role")
         set roleOk to true
         if wantedRole is not "" and roleName is not wantedRole then set roleOk to false
@@ -2123,7 +2477,11 @@ on collectPickTargets(uiElement, currentDepth, allowedDepth, wantedRole, wantedL
         if currentDepth < allowedDepth then
             set nestedMatches to my collectPickTargets(childElement, currentDepth + 1, allowedDepth, wantedRole, wantedLabel, exactMatch, rowLimit)
             repeat with nestedMatch in nestedMatches
-                set end of matches to nestedMatch
+                try
+                    set end of matches to contents of nestedMatch
+                on error
+                    set end of matches to nestedMatch
+                end try
             end repeat
         end if
         if (count of matches) is greater than rowLimit then exit repeat
@@ -2159,13 +2517,14 @@ if requestedContainerLabel is not "" then
     if (count of exactContainers) is 1 then
         set searchRoot to item 1 of exactContainers
     else if (count of exactContainers) is greater than 1 then
-        error "ui pick failed: ambiguous exact container match for " & quoted form of requestedContainerLabel number 1728
+        error "ui pick failed: ambiguous exact container match for " & quoted form of requestedContainerLabel & ". " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: match_count=" & ((count of exactContainers) as text) & " container_candidates: " & my summarizeElements(exactContainers, maxEvidenceRows) number 1728
     else
         set fuzzyContainers to my collectContainerTargets(targetWindow, 1, maxDepth, requestedContainerLabel, false, maxRows)
         if (count of fuzzyContainers) is 0 then
-            error "ui pick failed: no matching container for " & quoted form of requestedContainerLabel number 1728
+            set containerRows to my collectContainerTargets(targetWindow, 1, maxDepth, "", true, maxEvidenceRows)
+            error "ui pick failed: no matching container for " & quoted form of requestedContainerLabel & ". " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: match_count=0 container_candidates: " & my summarizeElements(containerRows, maxEvidenceRows) number 1728
         else if (count of fuzzyContainers) is greater than 1 then
-            error "ui pick failed: ambiguous partial container match for " & quoted form of requestedContainerLabel number 1728
+            error "ui pick failed: ambiguous partial container match for " & quoted form of requestedContainerLabel & ". " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: match_count=" & ((count of fuzzyContainers) as text) & " container_candidates: " & my summarizeElements(fuzzyContainers, maxEvidenceRows) number 1728
         end if
         set searchRoot to item 1 of fuzzyContainers
     end if
@@ -2175,19 +2534,20 @@ set exactMatches to my collectPickTargets(searchRoot, 1, maxDepth, requestedRole
 if (count of exactMatches) is 1 then
     set targetElement to item 1 of exactMatches
 else if (count of exactMatches) is greater than 1 then
-    error "ui pick failed: ambiguous exact match for " & quoted form of requestedLabel number 1728
+    error "ui pick failed: ambiguous exact match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: match_count=" & ((count of exactMatches) as text) & " candidates: " & my summarizeElements(exactMatches, maxEvidenceRows) number 1728
 else
     set fuzzyMatches to my collectPickTargets(searchRoot, 1, maxDepth, requestedRole, requestedLabel, false, maxRows)
     if (count of fuzzyMatches) is 0 then
-        error "ui pick failed: no matching visible item for " & quoted form of requestedLabel number 1728
+        set candidateRows to my collectPickTargets(searchRoot, 1, maxDepth, requestedRole, "", true, maxEvidenceRows)
+        error "ui pick failed: no matching visible item for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: match_count=0 nearest_safe_candidates: " & my summarizeElements(candidateRows, maxEvidenceRows) number 1728
     else if (count of fuzzyMatches) is greater than 1 then
-        error "ui pick failed: ambiguous partial match for " & quoted form of requestedLabel number 1728
+        error "ui pick failed: ambiguous partial match for " & quoted form of requestedLabel & ". " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: match_count=" & ((count of fuzzyMatches) as text) & " candidates: " & my summarizeElements(fuzzyMatches, maxEvidenceRows) number 1728
     end if
     set targetElement to item 1 of fuzzyMatches
 end if
 
 if not my isEnabledControl(targetElement) then
-    error "ui pick failed: matched item is disabled: " & my elementSummary(targetElement) number 1728
+    error "ui pick failed: matched item is disabled. " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: matched_control: " & my elementSummary(targetElement) number 1728
 end if
 
 set targetSummary to my elementSummary(targetElement)
@@ -2260,7 +2620,7 @@ if selectedWasReadable then
     else if targetRoleName is "AXMenuItem" then
         set verifiedState to "not_applicable"
     else
-        error "ui pick failed: selected state remained false for " & targetSummary number 1728
+        error "ui pick failed: selected state remained false. " & my targetEvidencePrefix("ui_pick", targetAppName, frontWindowTitle, requestedRole, requestedLabel, requestedContainerLabel) & " Evidence: matched_control: " & targetSummary & " selected=false" number 1728
     end if
 end if
 
@@ -2795,6 +3155,22 @@ mod tests {
         assert!(!script.contains("keystroke"));
     }
 
+    #[test]
+    fn build_ui_click_script_reports_bounded_replan_evidence_on_miss() {
+        let script = build_ui_click_script("Fixture", "AXButton", "Save", 2);
+
+        assert!(script.contains("set maxEvidenceRows to 8"));
+        assert!(script.contains("Target: action="));
+        assert!(script.contains("window="));
+        assert!(script.contains("container=<none>"));
+        assert!(script.contains("Evidence: match_count=0 nearest_safe_candidates:"));
+        assert!(script.contains("Evidence: match_count=\" & ((count of exactMatches) as text)"));
+        assert!(script.contains("Evidence: matched_control:"));
+        assert!(script.contains("identifier="));
+        assert!(script.contains("enabled="));
+        assert!(script.contains("frame={x="));
+    }
+
     #[tokio::test]
     async fn execute_ui_click_blank_label_fails_closed() {
         let result = execute_ui_click(None, Some("AXButton"), "   ", Some(2), 1).await;
@@ -2828,6 +3204,13 @@ mod tests {
         assert!(script.contains("set value of targetElement to requestedText"));
         assert!(script.contains("AXTextField"));
         assert!(script.contains("AXTextArea"));
+        assert!(script.contains("set maxEvidenceRows to 8"));
+        assert!(script.contains("Target: action="));
+        assert!(script.contains("container=<none> text=<redacted>"));
+        assert!(script.contains("Evidence: match_count=0 nearest_safe_candidates:"));
+        assert!(script.contains("Evidence: match_count=\" & ((count of exactMatches) as text)"));
+        assert!(script.contains("ui type failed: matched control is disabled."));
+        assert!(script.contains("Evidence: matched_control:"));
         assert!(!script.contains("keystroke"));
         assert!(!script.contains("perform action \"AXPress\""));
         assert!(!script.contains("click "));
@@ -2865,6 +3248,13 @@ mod tests {
         );
         assert!(script.contains("AXPopUpButton"));
         assert!(script.contains("AXMenuItem"));
+        assert!(script.contains("set maxEvidenceRows to 8"));
+        assert!(script.contains("Target: action="));
+        assert!(script.contains("option=\" & quoted form of my displayText(requestedOption)"));
+        assert!(script.contains("Evidence: match_count=0 nearest_safe_candidates:"));
+        assert!(script.contains("option_candidates:"));
+        assert!(script.contains("ui select failed: matched control is disabled."));
+        assert!(script.contains("Evidence: matched_control:"));
         assert!(script.contains("perform action \"AXPress\" of targetElement"));
         assert!(script.contains("perform action \"AXPress\" of optionElement"));
         assert!(!script.contains("keystroke"));
@@ -2915,6 +3305,14 @@ mod tests {
         assert!(script.contains("perform action \"AXPress\" of targetElement"));
         assert!(script.contains("final state"));
         assert!(script.contains("cannot turn off a radio button directly"));
+        assert!(script.contains("set maxEvidenceRows to 8"));
+        assert!(script.contains("Target: action="));
+        assert!(script.contains("state=\" & my stateName(requestedState)"));
+        assert!(script.contains("Evidence: match_count=0 nearest_safe_candidates:"));
+        assert!(script.contains("Evidence: match_count=\" & ((count of exactMatches) as text)"));
+        assert!(script.contains("ui toggle failed: matched control is disabled."));
+        assert!(script.contains("current_state=\" & my stateName(finalState)"));
+        assert!(script.contains("requested_state=\" & my stateName(requestedState)"));
         assert!(!script.contains("keystroke"));
         assert!(!script.contains("click "));
     }
@@ -2952,6 +3350,15 @@ mod tests {
         assert!(script.contains("AXRow"));
         assert!(script.contains("AXCell"));
         assert!(script.contains("AXStaticText"));
+        assert!(script.contains("set maxEvidenceRows to 8"));
+        assert!(script.contains("Target: action="));
+        assert!(script
+            .contains("container=\" & quoted form of my displayText(requestedContainerLabel)"));
+        assert!(script.contains("container_candidates:"));
+        assert!(script.contains("Evidence: match_count=0 nearest_safe_candidates:"));
+        assert!(script.contains("ui pick failed: matched item is disabled."));
+        assert!(script.contains("Evidence: matched_control:"));
+        assert!(script.contains("selected=false"));
         assert!(script.contains("collectContainerTargets"));
         assert!(script.contains("perform action \"AXPress\" of targetElement"));
         assert!(script.contains("perform action \"AXSelect\" of targetElement"));

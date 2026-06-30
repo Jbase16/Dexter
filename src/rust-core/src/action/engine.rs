@@ -42,6 +42,7 @@ use super::{
     audit::{AuditEntry, AuditLog},
     executor,
     policy::PolicyEngine,
+    ui_diagnostics,
 };
 
 // ── BrowserActionKind ─────────────────────────────────────────────────────────
@@ -775,6 +776,7 @@ impl ActionEngine {
                 .await
             }
         };
+        let result = classify_ui_window_failure(spec, result);
 
         let outcome_str: &'static str = if result.success {
             "success"
@@ -1574,6 +1576,7 @@ impl ExecutorHandle {
                 .await
             }
         };
+        let result = classify_ui_window_failure(spec, result);
 
         let outcome_str: &'static str = if result.success {
             "success"
@@ -1642,6 +1645,24 @@ impl ExecutorHandle {
             }
         }
     }
+}
+
+fn classify_ui_window_failure(
+    spec: &ActionSpec,
+    mut result: executor::ExecutionResult,
+) -> executor::ExecutionResult {
+    if result.success || result.error.starts_with("UI failure [") {
+        return result;
+    }
+
+    let action_type = ActionEngine::type_str(spec);
+    if !ui_diagnostics::is_ui_or_window_action(action_type) {
+        return result;
+    }
+
+    let diagnostic = ui_diagnostics::classify_ui_error(action_type, &result.error);
+    result.error = diagnostic.operator_message();
+    result
 }
 
 fn record_action_audit_event(
