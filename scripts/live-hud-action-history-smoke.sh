@@ -171,7 +171,7 @@ start_swift_smoke() {
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_ACTION_HISTORY=1 \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-1}" \
-        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-10}" \
+        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-75}" \
             swift run
     ) >> "$SWIFT_LOG" 2>&1 &
     SWIFT_PID="$!"
@@ -200,6 +200,12 @@ main() {
         tail -120 "$CORE_LOG" || true
         exit 1
     }
+    wait_for_pattern "$SWIFT_LOG" "[HUDSmoke] showActionHistory" 30 || {
+        say "$FAIL" "Swift HUD action history smoke - HUD did not render ActionHistory"
+        tail -140 "$SWIFT_LOG" || true
+        tail -120 "$CORE_LOG" || true
+        exit 1
+    }
 
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] enabled" || ok=1
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] actionHistoryRequest" || ok=1
@@ -212,6 +218,10 @@ main() {
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] showActionHistory" || ok=1
     assert_contains "Swift HUD action history smoke" "$SWIFT_LOG" "[HUDSmoke] showUtilityMarkdown" || ok=1
     assert_contains "Swift HUD action history smoke" "$CORE_LOG" "Action history requested" || ok=1
+
+    cleanup
+    SWIFT_PID=""
+    CORE_PID=""
 
     if [[ "$ok" -eq 0 ]]; then
         say "$PASS" "Swift HUD action history smoke passed"

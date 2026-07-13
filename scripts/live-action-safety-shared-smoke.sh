@@ -126,28 +126,13 @@ start_shared_core() {
         exit 2
     fi
 
-    waited=0
-    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
-        "$CLI_BIN" --doctor >/tmp/dexter-action-safety-shared-doctor.out 2>&1 || true
-        if grep -Fq "OK   daemon health      status ready" /tmp/dexter-action-safety-shared-doctor.out \
-            && grep -Fq "Result: OK - no failed checks." /tmp/dexter-action-safety-shared-doctor.out; then
-            say INFO "shared core doctor-ready after ${waited}s"
-            return
-        fi
-        if ! kill -0 "$CORE_PID" >/dev/null 2>&1; then
-            say FAIL "shared core exited during warmup"
-            tail -120 "$CORE_LOG" || true
-            exit 2
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    say FAIL "shared core did not become doctor-ready within ${CORE_WARMUP_TIMEOUT_SECS}s"
-    say INFO "last doctor report:"
-    cat /tmp/dexter-action-safety-shared-doctor.out 2>/dev/null || true
-    tail -120 "$CORE_LOG" || true
-    exit 2
+    bash "$ROOT_DIR/scripts/wait-for-ready.sh" \
+        --cli-bin "$CLI_BIN" \
+        --timeout "$CORE_WARMUP_TIMEOUT_SECS" \
+        --out /tmp/dexter-action-safety-shared-doctor.out \
+        --label "shared core" \
+        --core-pid "$CORE_PID" \
+        --core-log "$CORE_LOG"
 }
 
 run_target() {

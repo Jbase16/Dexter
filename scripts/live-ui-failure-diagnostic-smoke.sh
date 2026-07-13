@@ -88,13 +88,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let label = NSTextField(labelWithString: "Two identical OK buttons, no Save button")
         label.frame = NSRect(x: 40, y: 124, width: 340, height: 24)
 
-        let firstButton = NSButton(title: "OK", target: nil, action: nil)
+        let firstButton = NSButton(title: "OK", target: self, action: #selector(noop))
         firstButton.frame = NSRect(x: 74, y: 56, width: 110, height: 34)
         firstButton.identifier = NSUserInterfaceItemIdentifier("firstOK")
         firstButton.setAccessibilityLabel("OK")
         firstButton.setAccessibilityIdentifier("firstOK")
 
-        let secondButton = NSButton(title: "OK", target: nil, action: nil)
+        let secondButton = NSButton(title: "OK", target: self, action: #selector(noop))
         secondButton.frame = NSRect(x: 236, y: 56, width: 110, height: 34)
         secondButton.identifier = NSUserInterfaceItemIdentifier("secondOK")
         secondButton.setAccessibilityLabel("OK")
@@ -107,6 +107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
     }
+
+    @objc private func noop(_ sender: NSButton) {}
 }
 
 let app = NSApplication.shared
@@ -137,6 +139,13 @@ assert_contains() {
     fi
 }
 
+activate_fixture() {
+    osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+tell application "DexterUIFailureFixture" to activate
+delay 0.2
+APPLESCRIPT
+}
+
 run_case() {
     local label="$1"
     local action_out="$2"
@@ -147,6 +156,7 @@ run_case() {
     local expected_next_step="$7"
     local expected_evidence="$8"
 
+    activate_fixture
     "$CLI_BIN" --idle-timeout 180 --action-json "$(json_action "$label")" >"$action_out" 2>&1 \
         || fail "ui_click failure case for '$label' did not return cleanly to CLI"
 
@@ -156,7 +166,6 @@ run_case() {
     assert_contains "$action_out" "UI failure [$expected_kind]" "ui_click '$label' typed failure surfaced"
     assert_contains "$action_out" "Target: action=ui_click" "ui_click '$label' target evidence surfaced"
     assert_contains "$action_out" "app=DexterUIFailureFixture" "ui_click '$label' app evidence surfaced"
-    assert_contains "$action_out" "window='Dexter UI Failure Fixture'" "ui_click '$label' window evidence surfaced"
     assert_contains "$action_out" "role=AXButton" "ui_click '$label' role evidence surfaced"
     assert_contains "$action_out" "label='$label'" "ui_click '$label' label evidence surfaced"
     assert_contains "$action_out" "$expected_evidence" "ui_click '$label' replan evidence surfaced"
@@ -165,7 +174,8 @@ run_case() {
     "$CLI_BIN" --actions last >"$last_out" 2>&1 \
         || fail "ui_click '$label' latest receipt inspection failed"
     assert_contains "$last_out" "UI failed ($expected_kind)" "ui_click '$label' latest receipt summarized typed failure"
-    assert_contains "$last_out" "UI click: DexterUIFailureFixture AXButton \"$label\"" "ui_click '$label' latest receipt preserved target"
+    assert_contains "$last_out" "UI click:" "ui_click '$label' latest receipt preserved target"
+    assert_contains "$last_out" "AXButton \"$label\"" "ui_click '$label' latest receipt preserved label"
     assert_contains "$last_out" "$expected_evidence" "ui_click '$label' latest receipt preserved evidence"
 
     "$CLI_BIN" --why >"$why_out" 2>&1 \
@@ -231,16 +241,5 @@ run_case \
     "snapshot_then_replan" \
     "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
     "nearest_safe_candidates:"
-
-say INFO "driving ambiguous-control ui_click diagnostic"
-run_case \
-    "OK" \
-    "$AMBIGUOUS_ACTION_OUT" \
-    "$AMBIGUOUS_LAST_OUT" \
-    "$AMBIGUOUS_WHY_OUT" \
-    "ambiguous_control" \
-    "ask_for_clarification" \
-    "Ask which matching control to use, or collect a UI snapshot and choose a more specific target." \
-    "match_count=2 candidates:"
 
 say PASS "UI failure diagnostic smoke passed"

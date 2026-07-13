@@ -30,6 +30,10 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
     /// element. Each `Data` is a raw int16 LE PCM buffer at 16kHz mono.
     var onUtteranceComplete: (([Data]) -> Void)?
 
+    /// Called after the armed capture cycle completes or expires without speech.
+    /// DexterClient uses this to release the microphone immediately.
+    var onCaptureCycleComplete: (() -> Void)?
+
     // MARK: - Constants
 
     private enum Constants {
@@ -47,6 +51,7 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
         /// Consecutive below-threshold frames required to declare utterance end.
         /// At 16kHz with ~512-frame buffers ≈ 32ms/frame, 20 frames ≈ 640ms silence.
         static let VAD_SILENCE_FRAMES: Int    = 20
+        static let ARMED_CAPTURE_TIMEOUT_SECS: TimeInterval = 15
     }
 
     /// AVCaptureAudioDataOutput audio settings — requests 16kHz int16 mono PCM.
@@ -141,11 +146,17 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
     /// Accessed exclusively on `callbackQueue` (same contract as all other VAD state).
     private var isArmed:  Bool = false   // set by activate(); gates the rising edge
     private var isActive: Bool = false   // set by rising edge; gates falling-edge delivery
+    private var activationGeneration: UInt64 = 0
 
-    // MARK: - Capture session state (mutated on main thread in start/stop only)
+    // MARK: - Capture session state
 
     private var session:      AVCaptureSession?
     private var audioOutput:  AVCaptureAudioDataOutput?
+    private var sessionStartPending = false
+    private var sessionGeneration: UInt64 = 0
+    private let sessionLock = NSLock()
+    private let sessionQueue = DispatchQueue(label: "com.dexter.voicecapture.session",
+                                             qos: .userInitiated)
 
     // Serial queue for AVCaptureAudioDataOutputSampleBufferDelegate callbacks.
     // All VAD state mutations happen here — satisfying the @unchecked Sendable contract.
@@ -167,45 +178,63 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
     /// Safe to call from any thread. Returns immediately if the microphone is
     /// unavailable — `onUtteranceComplete` will never fire.
     func start() {
+        sessionLock.lock()
+        if session?.isRunning == true || sessionStartPending {
+            sessionLock.unlock()
+            return
+        }
+        sessionStartPending = true
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        sessionLock.unlock()
+
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         print("[VoiceCapture] Authorization status at start(): \(status.rawValue) " +
               "(0=notDetermined, 1=restricted, 2=denied, 3=authorized)")
 
         switch status {
         case .authorized:
-            startSession()
+            sessionQueue.async { self.startSession(generation: generation) }
         case .notDetermined:
             // Request permission; launch session on the grant callback.
             print("[VoiceCapture] Requesting microphone authorization…")
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 print("[VoiceCapture] Authorization response: granted=\(granted)")
-                if granted { self.startSession() }
+                if granted {
+                    self.sessionQueue.async { self.startSession(generation: generation) }
+                } else {
+                    self.cancelPendingStart(generation: generation)
+                }
             }
         case .denied, .restricted:
+            cancelPendingStart(generation: generation)
             print("[VoiceCapture] Microphone access denied/restricted — voice input disabled")
         @unknown default:
             print("[VoiceCapture] Unknown authorization status \(status.rawValue) — attempting session start")
-            startSession()
+            sessionQueue.async { self.startSession(generation: generation) }
         }
     }
 
     /// Internal: configure and start the AVCaptureSession.
     /// Only called after authorization is confirmed.
-    private func startSession() {
+    private func startSession(generation: UInt64) {
         let s = AVCaptureSession()
 
         guard let device = AVCaptureDevice.default(for: .audio) else {
+            cancelPendingStart(generation: generation)
             print("[VoiceCapture] No audio capture device available — voice input disabled")
             return
         }
         print("[VoiceCapture] Using audio device: \(device.localizedName)")
 
         guard let input = try? AVCaptureDeviceInput(device: device) else {
+            cancelPendingStart(generation: generation)
             print("[VoiceCapture] Could not create audio device input — voice input disabled")
             return
         }
 
         guard s.canAddInput(input) else {
+            cancelPendingStart(generation: generation)
             print("[VoiceCapture] Cannot add audio input to session — voice input disabled")
             return
         }
@@ -216,15 +245,36 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
         output.setSampleBufferDelegate(self, queue: callbackQueue)
 
         guard s.canAddOutput(output) else {
+            cancelPendingStart(generation: generation)
             print("[VoiceCapture] Cannot add audio output to session — voice input disabled")
             return
         }
         s.addOutput(output)
 
-        audioOutput = output
-        session     = s
         s.startRunning()
+
+        sessionLock.lock()
+        let isCurrent = generation == sessionGeneration && sessionStartPending
+        if isCurrent {
+            audioOutput = output
+            session = s
+            sessionStartPending = false
+        }
+        sessionLock.unlock()
+
+        if !isCurrent {
+            s.stopRunning()
+            return
+        }
         print("[VoiceCapture] Session startRunning() called — isRunning=\(s.isRunning)")
+    }
+
+    private func cancelPendingStart(generation: UInt64) {
+        sessionLock.lock()
+        if generation == sessionGeneration {
+            sessionStartPending = false
+        }
+        sessionLock.unlock()
     }
 
     /// Arm the push-to-talk gate for one utterance.
@@ -247,9 +297,26 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
             self.isActive       = false
             // Arm the gate — the next rising edge above threshold will trigger delivery.
             self.isArmed        = true
+            self.activationGeneration &+= 1
+            let generation = self.activationGeneration
             self.activeLogFrames = 0
             print(String(format: "[VoiceCapture] Armed — waiting for speech above threshold %.5f",
                          self.workingThreshold))
+
+            self.callbackQueue.asyncAfter(
+                deadline: .now() + Constants.ARMED_CAPTURE_TIMEOUT_SECS
+            ) {
+                guard generation == self.activationGeneration,
+                      self.isArmed,
+                      !self.isActive else { return }
+                self.isArmed = false
+                self.vadState = .silent
+                self.onsetFrames = 0
+                self.silenceFrames = 0
+                self.utteranceBuffer.removeAll()
+                print("[VoiceCapture] Armed capture expired without speech")
+                self.onCaptureCycleComplete?()
+            }
         }
     }
 
@@ -270,9 +337,19 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
 
     /// Stop the capture session and release resources.
     func stop() {
-        session?.stopRunning()
-        session     = nil
+        sessionLock.lock()
+        sessionGeneration &+= 1
+        sessionStartPending = false
+        let activeSession = session
+        session = nil
         audioOutput = nil
+        sessionLock.unlock()
+
+        guard let activeSession else { return }
+        sessionQueue.async {
+            activeSession.stopRunning()
+            print("[VoiceCapture] Session stopped — microphone released")
+        }
     }
 
     // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
@@ -412,6 +489,7 @@ final class VoiceCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate
                         print(String(format: "[VoiceCapture] Falling edge — delivering %d chunks to STT",
                                      utterance.count))
                         onUtteranceComplete?(utterance)
+                        onCaptureCycleComplete?()
                     }
                     // Unarmed falling edges (ambient noise cycle) are silently discarded —
                     // no log: they fire constantly from TV/HVAC and produce zero signal.

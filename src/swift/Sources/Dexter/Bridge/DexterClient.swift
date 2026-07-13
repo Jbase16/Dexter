@@ -123,6 +123,10 @@ enum DexterWorkerRestartTarget: String, CaseIterable, Sendable {
     case tts
     case browser
 
+    static var operatorControls: [DexterWorkerRestartTarget] {
+        [.stt, .tts, .browser]
+    }
+
     var component: Dexter_V1_RestartComponent {
         switch self {
         case .stt: return .stt
@@ -247,6 +251,10 @@ actor DexterClient {
         defaultValue: 60,
         maxValue: 86_400
     )
+    private static let smokeSkipVoiceCapture: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_SKIP_VOICE_CAPTURE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
 
     // AudioPlayer persists across session reconnects — the engine is started once
     // and stays running for the process lifetime. Declared as a `let` constant so
@@ -462,7 +470,14 @@ actor DexterClient {
             capture.onUtteranceComplete = { utterance in
                 utteranceContinuation.yield(utterance)
             }
-            capture.start()
+            capture.onCaptureCycleComplete = { [weak capture] in
+                capture?.stop()
+            }
+            if Self.smokeSkipVoiceCapture {
+                print("[HUDSmoke] voiceCaptureSkipped")
+            } else {
+                print("[VoiceCapture] Idle — microphone will start only for push-to-talk")
+            }
 
             // Drive one stub.streamAudio() call per complete utterance.
             // Runs concurrently with the session stream (which handles inference responses).
@@ -624,8 +639,9 @@ actor DexterClient {
                         // `capture` is captured directly (VoiceCapture is @unchecked Sendable)
                         // rather than going through the actor to avoid the isolation error.
                         // activate() dispatches to callbackQueue internally — thread-safe.
-                        if state == .listening {
+                        if state == .listening && !Self.smokeSkipVoiceCapture {
                             capture.activate()
+                            capture.start()
                         }
 
                     case .textResponse(let resp):
@@ -648,6 +664,12 @@ actor DexterClient {
                                     return
                                 }
                                 guard !finalSnapshot.assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                    return
+                                }
+                                guard Self.shouldRequestNoReceiptActionDiagnostic(
+                                    userText: finalSnapshot.userText,
+                                    assistantText: finalSnapshot.assistantText
+                                ) else {
                                     return
                                 }
                                 let report = await self?.fetchActionDiagnosticReport(
@@ -1221,7 +1243,7 @@ actor DexterClient {
                 return
             }
 
-            let eventIDs = inbox.events.map(\.eventID).filter { !$0.isEmpty }
+            let eventIDs = Self.ambientAcknowledgementIDs(inbox.events)
             print("[DexterClient] Proactive ambient inbox surfacing events=\(inbox.events.count)")
             let markdown = Self.ambientInboxMarkdown(inbox)
             await MainActor.run {
@@ -1237,6 +1259,33 @@ actor DexterClient {
             }
         } catch {
             print("[DexterClient] Proactive ambient inbox skipped error=\(error)")
+        }
+    }
+
+    func fetchAmbientInboxMarkdownForSmoke() async -> String? {
+        do {
+            let inbox = try await requestAmbientInbox(limit: 3)
+            guard !inbox.events.isEmpty else {
+                print("[DexterClient] Proactive ambient inbox silent events=0")
+                return nil
+            }
+
+            let eventIDs = Self.ambientAcknowledgementIDs(inbox.events)
+            print("[DexterClient] Proactive ambient inbox surfacing events=\(inbox.events.count)")
+            let markdown = Self.ambientInboxMarkdown(inbox)
+
+            guard !eventIDs.isEmpty else { return markdown }
+            do {
+                let ack = try await acknowledgeAmbientEvents(eventIDs)
+                print("[DexterClient] Ambient inbox acknowledged count=\(ack.newlyAcknowledgedCount)")
+            } catch {
+                print("[DexterClient] Ambient inbox acknowledgement skipped error=\(error)")
+            }
+
+            return markdown
+        } catch {
+            print("[DexterClient] Proactive ambient inbox skipped error=\(error)")
+            return nil
         }
     }
 
@@ -1282,6 +1331,28 @@ actor DexterClient {
     /// or fires during reconnect gap).
     func sendTypedInput(_ text: String) async {
         await sendTextInput(text, fromVoice: false, label: "sendTypedInput")
+    }
+
+    /// Smoke tests may start their scripted submit task before the bidirectional
+    /// session stream has installed `eventContinuation`. Production HUD submits
+    /// keep their old fail-fast behavior; smoke scripts use this bounded wait to
+    /// avoid papering over startup races with arbitrary sleeps.
+    func waitForSessionReadyForSmoke(timeoutSecs: Int64) async -> Bool {
+        let maxAttempts = max(timeoutSecs, 0) * 10
+        var attempts: Int64 = 0
+        while attempts <= maxAttempts {
+            if currentSessionID != nil && eventContinuation != nil {
+                print("[HUDSmoke] sessionReady attempts=\(attempts)")
+                return true
+            }
+            if attempts == maxAttempts {
+                break
+            }
+            attempts += 1
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        print("[HUDSmoke] sessionReady timeout sessionID=\(currentSessionID ?? "NIL") continuation=\(eventContinuation != nil ? "live" : "NIL")")
+        return false
     }
 
     /// Test hook used by live smoke to drive the same Swift AudioPlayer path as voice
@@ -1407,7 +1478,7 @@ extension DexterClient {
                 ambientHistory: ambientHistory,
                 ambientHistoryError: ambientHistoryError
             ),
-            restartTargets: restartTargets(for: health)
+            restartTargets: operatorRestartTargets(for: health)
         )
     }
 
@@ -1436,7 +1507,14 @@ extension DexterClient {
             )
         }
 
-        return healthHUDReport(for: response.health, notice: notice)
+        let report = healthHUDReport(for: response.health, notice: notice)
+        guard response.success else {
+            return report
+        }
+        return DexterHealthHUDReport(
+            markdown: report.markdown,
+            restartTargets: operatorRestartTargets(for: response.health)
+        )
     }
 
     private static func actionReceiptMarkdown(_ receipt: Dexter_V1_ActionReceipt) -> String {
@@ -1533,6 +1611,67 @@ extension DexterClient {
         }
     }
 
+    private static func shouldRequestNoReceiptActionDiagnostic(
+        userText: String,
+        assistantText: String
+    ) -> Bool {
+        let assistant = assistantText.lowercased()
+        let user = userText.lowercased()
+        let refusalMarkers = [
+            "i can't",
+            "i cannot",
+            "i couldn't",
+            "i can’t",
+            "i couldn’t",
+            "unable to",
+            "not able to",
+            "i don't have",
+            "i don’t have",
+            "didn't run",
+            "didn’t run",
+            "didn't send",
+            "didn’t send",
+            "didn't execute",
+            "didn’t execute",
+            "no action",
+            "action failed",
+            "failed to",
+            "different machine",
+            "only run it here",
+            "contacts lookup failed",
+            "couldn't find",
+            "couldn’t find",
+            "couldn't determine",
+            "couldn’t determine",
+            "couldn't verify",
+            "couldn’t verify"
+        ]
+        guard refusalMarkers.contains(where: { assistant.contains($0) }) else {
+            return false
+        }
+
+        let actionIntentMarkers = [
+            "run",
+            "check",
+            "open",
+            "click",
+            "type",
+            "select",
+            "toggle",
+            "send",
+            "message",
+            "download",
+            "browse",
+            "search",
+            "look up",
+            "find",
+            "show me",
+            "what's",
+            "what is"
+        ]
+        return actionIntentMarkers.contains(where: { user.contains($0) })
+    }
+
     private static func ambientInboxMarkdown(_ response: Dexter_V1_AmbientInboxResponse) -> String {
         guard !response.events.isEmpty else {
             return """
@@ -1542,8 +1681,7 @@ extension DexterClient {
             """
         }
 
-        let rows = response.events
-            .map(ambientEventLine)
+        let rows = ambientInboxLines(response.events)
             .joined(separator: "\n")
         let eventPath = receiptLine(response.eventLogPath, fallback: "ambient event path unavailable")
 
@@ -1554,6 +1692,33 @@ extension DexterClient {
 
         Events: `\(eventPath)`
         """
+    }
+
+    private static func ambientInboxLines(_ events: [Dexter_V1_AmbientEvent]) -> [String] {
+        let actionFailureCount = events.filter(isActionFailureTriggerNotice).count
+        var didEmitActionFailureGroup = false
+        var lines: [String] = []
+
+        for event in events {
+            if isActionFailureTriggerNotice(event) {
+                guard !didEmitActionFailureGroup else { continue }
+                didEmitActionFailureGroup = true
+                lines.append(ambientActionFailureGroupLine(event, count: actionFailureCount))
+            } else {
+                lines.append(ambientEventLine(event))
+            }
+        }
+
+        return lines
+    }
+
+    private static func ambientActionFailureGroupLine(_ event: Dexter_V1_AmbientEvent, count: Int) -> String {
+        let severity = receiptLine(event.severity, fallback: "warn").uppercased()
+        let source = receiptLine(event.source, fallback: "trigger")
+        let title = count == 1 ? "Action failure noticed" : "\(count) action failures noticed"
+        let latest = ambientEventDisplaySummary(event)
+        let grouped = count > 1 ? " \(count - 1) more recent action-failure notice\(count == 2 ? "" : "s") grouped." : ""
+        return "- `\(severity)` action_failed [\(source)]: \(title) - Latest: \(latest)\(grouped)"
     }
 
     private static func operatorStatusMarkdown(
@@ -1590,6 +1755,9 @@ extension DexterClient {
         lines.append("- STT: \(cleanStatus(health.sttWorker))")
         lines.append("- TTS: \(cleanStatus(health.ttsWorker))")
         lines.append("- Browser: \(browserWorkerLine(health))")
+        if !operatorRestartTargets(for: health).isEmpty {
+            lines.append("- Controls: restart STT, TTS, or browser from the buttons below.")
+        }
 
         lines.append("")
         lines.append("Models")
@@ -1682,11 +1850,102 @@ extension DexterClient {
 
     private static func ambientEventLine(_ event: Dexter_V1_AmbientEvent) -> String {
         let severity = receiptLine(event.severity, fallback: "info").uppercased()
-        let kind = receiptLine(event.kind, fallback: "ambient_event")
+        let kind = ambientEventDisplayKind(event)
         let source = receiptLine(event.source, fallback: "ambient")
-        let title = receiptLine(event.title, fallback: "Ambient event")
-        let summary = receiptLine(event.summary, fallback: "No summary returned.")
+        let title = ambientEventDisplayTitle(event)
+        let summary = ambientEventDisplaySummary(event)
         return "- `\(severity)` \(kind) [\(source)]: \(title) - \(summary)"
+    }
+
+    private static func ambientEventPayload(_ event: Dexter_V1_AmbientEvent) -> [String: Any] {
+        guard !event.payloadJson.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let data = event.payloadJson.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let payload = object as? [String: Any] else {
+            return [:]
+        }
+        return payload
+    }
+
+    private static func ambientPayloadString(_ payload: [String: Any], _ key: String) -> String? {
+        guard let value = payload[key] as? String else { return nil }
+        let clean = receiptLine(value, fallback: "")
+        return clean.isEmpty ? nil : clean
+    }
+
+    private static func ambientAcknowledgementIDs(_ events: [Dexter_V1_AmbientEvent]) -> [String] {
+        var seen = Set<String>()
+        var ids: [String] = []
+
+        func append(_ raw: String) {
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, seen.insert(id).inserted else { return }
+            ids.append(id)
+        }
+
+        for event in events {
+            let payload = ambientEventPayload(event)
+            if let grouped = payload["grouped_event_ids"] as? [String], !grouped.isEmpty {
+                grouped.forEach(append)
+            } else if let grouped = payload["grouped_event_ids"] as? [Any], !grouped.isEmpty {
+                grouped.compactMap { $0 as? String }.forEach(append)
+            } else {
+                append(event.eventID)
+            }
+        }
+
+        return ids
+    }
+
+    private static func ambientEventDisplayKind(_ event: Dexter_V1_AmbientEvent) -> String {
+        let kind = receiptLine(event.kind, fallback: "ambient_event")
+        if isActionFailureTriggerNotice(event) {
+            return "action_failed"
+        }
+        return kind
+    }
+
+    private static func ambientEventDisplayTitle(_ event: Dexter_V1_AmbientEvent) -> String {
+        if isActionFailureTriggerNotice(event) {
+            return "Action failure noticed"
+        }
+        return receiptLine(event.title, fallback: "Ambient event")
+    }
+
+    private static func ambientEventDisplaySummary(_ event: Dexter_V1_AmbientEvent) -> String {
+        let payload = ambientEventPayload(event)
+        if isActionFailureTriggerNotice(event) {
+            let description = ambientPayloadString(payload, "matched_event_summary")
+                ?? ambientPayloadString(payload, "matched_action_description").map { "\($0) failed." }
+                ?? "A Dexter action failed."
+            let key = ambientKey(description)
+            if key.contains("openwhy") || key.contains("makewhy") {
+                return description
+            }
+            return "\(description) Open Why or run `make why` for the action receipt before retrying."
+        }
+        return receiptLine(event.summary, fallback: "No summary returned.")
+    }
+
+    private static func isActionFailureTriggerNotice(_ event: Dexter_V1_AmbientEvent) -> Bool {
+        guard ambientKey(event.kind) == "triggermatched" else { return false }
+        let payload = ambientEventPayload(event)
+        if ambientPayloadString(payload, "matched_event_kind").map({ ambientKey($0) }) == "actionfailed" {
+            return true
+        }
+        if ambientPayloadString(payload, "trigger_name").map({ ambientKey($0) }) == "dexteractionfailures" {
+            return true
+        }
+        return ambientKey(event.title).contains("dexteractionfailures")
+    }
+
+    private static func ambientKey(_ value: String) -> String {
+        value
+            .lowercased()
+            .unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
     }
 
     private static func receiptLine(_ value: String, fallback: String) -> String {
@@ -1809,6 +2068,13 @@ extension DexterClient {
             targets.append(.browser)
         }
         return targets
+    }
+
+    private static func operatorRestartTargets(for health: Dexter_V1_HealthResponse) -> [DexterWorkerRestartTarget] {
+        if isPendingStartupHealth(health) {
+            return []
+        }
+        return DexterWorkerRestartTarget.operatorControls
     }
 
     private static func shouldRetryProactiveHealth(_ health: Dexter_V1_HealthResponse) -> Bool {

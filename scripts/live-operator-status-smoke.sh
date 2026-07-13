@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # scripts/live-operator-status-smoke.sh - live regression for operator status.
 #
-# Starts a release Dexter core, writes one safe synthetic action receipt through
+# Starts a release Dexter core, sends one safe synthetic action through
 # dexter-cli, then verifies `dexter-cli --status` prints a single operator-facing
-# report with health and recent action context.
+# report with health, context, filtered dev-action receipts, and ambient action
+# evidence.
 #
 # Usage:
 #   scripts/live-operator-status-smoke.sh --start-core
@@ -194,7 +195,7 @@ main() {
 
     local stamp token action action_out status_out status_code ok
     stamp="$(date +%s)-$$"
-    token="OPERATOR_STATUS_SMOKE_$stamp"
+    token="OPERATOR_STATUS_CHECK_$stamp"
     action='{"type":"shell","args":["echo",'$(json_string "$token" )'],"rationale":"operator status smoke safe"}'
     action_out="$(mktemp -t dexter-operator-status-action.XXXXXX)"
     status_out="$(mktemp -t dexter-operator-status.XXXXXX)"
@@ -223,11 +224,13 @@ main() {
         assert_contains "$status_out" "Current Context" "status prints current context section" || ok=1
         assert_contains_any "$status_out" "status includes context capabilities or fallback" "Dexter can:" "No focused app context" || ok=1
         assert_contains "$status_out" "Latest Action Summary" "status prints latest action summary" || ok=1
-        assert_contains "$status_out" "The latest audited action executed successfully." "status summarizes successful latest action" || ok=1
-        assert_contains "$status_out" "Evidence: Succeeded:" "status includes latest action evidence" || ok=1
+        assert_contains "$status_out" "No recent action receipt was found." "status filters dev-only action receipts" || ok=1
         assert_contains "$status_out" "Recent Actions" "status prints recent action section" || ok=1
         assert_contains "$status_out" "source:" "status prints audit source" || ok=1
-        assert_contains "$status_out" "target: echo $token" "status includes seeded action receipt" || ok=1
+        assert_contains "$status_out" "No action receipts found." "status does not expose filtered dev-only receipt" || ok=1
+        assert_contains "$status_out" "Recent Ambient Events" "status prints ambient event section" || ok=1
+        assert_contains "$status_out" "INFO  action_succeeded" "status includes seeded action event" || ok=1
+        assert_contains "$status_out" "Run: echo $token completed successfully." "status includes seeded ambient action summary" || ok=1
         assert_contains "$status_out" "Result:" "status prints final result line" || ok=1
     fi
 

@@ -16,6 +16,7 @@ set -u
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/gui-session.sh"
 SUMMARY_DIR="${DEXTER_SMOKE_SUMMARY_DIR:-$ROOT_DIR/docs/live-smoke-results}"
 STAMP="$(date '+%Y%m%d_%H%M%S')"
 SUMMARY_FILE="$SUMMARY_DIR/live-smoke-$STAMP.md"
@@ -58,8 +59,7 @@ DEFAULT_TARGETS=(
     live-smoke-placement-command
     live-smoke-hud-health
     live-smoke-hud-unavailable-health
-    live-smoke-hud-action-history
-    live-smoke-hud-action-diagnostic
+    live-smoke-hud-action-surfaces
     live-smoke-hud-ui-failure
     live-smoke-hud-approval
     live-smoke-action-cancel
@@ -90,6 +90,39 @@ duration_label() {
     else
         printf '%ds' "$rest"
     fi
+}
+
+target_requires_active_gui_session() {
+    case "$1" in
+        live-smoke-context-turn-records|\
+        live-smoke-window-focus|\
+        live-smoke-window-inspect|\
+        live-smoke-ui-snapshot|\
+        live-smoke-ui-click|\
+        live-smoke-ui-type|\
+        live-smoke-ui-select|\
+        live-smoke-ui-toggle|\
+        live-smoke-ui-pick|\
+        live-smoke-ui-failure-diagnostic|\
+        live-smoke-ui-actions-shared|\
+        live-smoke-ui-recovery-model|\
+        live-smoke-hud|\
+        live-smoke-hud-new-session|\
+        live-smoke-hud-lifecycle|\
+        live-smoke-hud-placement|\
+        live-smoke-placement-command|\
+        live-smoke-hud-action-history|\
+        live-smoke-hud-action-diagnostic|\
+        live-smoke-hud-action-surfaces|\
+        live-smoke-hud-ui-failure|\
+        live-smoke-hud-approval|\
+        live-smoke-action-safety-shared)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 targets_from_env() {
@@ -244,6 +277,24 @@ for target in "${TARGETS[@]}"; do
         cd "$ROOT_DIR" || exit 2
         bash scripts/stop-dexter.sh --quiet >/dev/null 2>&1 || true
     )
+
+    if target_requires_active_gui_session "$target"; then
+        if ! require_active_gui_session 2>&1 | tee "$log_file"; then
+            status=1
+            target_end="$(date '+%s')"
+            duration="$((target_end - target_start))"
+            TARGET_DURATIONS+=("$(duration_label "$duration")")
+            TARGET_STATUSES+=("FAIL")
+            overall_status=1
+            say FAIL "$target skipped before launch: active unlocked GUI session required"
+            if [[ "$FAIL_FAST" -eq 1 ]]; then
+                SUMMARY_STOP_REASON="fail_fast_after_$target"
+                say INFO "fail-fast stopping after $target"
+                break
+            fi
+            continue
+        fi
+    fi
 
     say INFO "running make $target"
     (

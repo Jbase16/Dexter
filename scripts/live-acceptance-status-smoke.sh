@@ -69,6 +69,7 @@ write_summary "$TMP_DIR/live-smoke-20260609_010000.md" "2026-06-09T01:00:00-0700
 write_summary "$TMP_DIR/live-smoke-20260609_020000.md" "2026-06-09T02:00:00-0700" \
     live-smoke-residency-proof \
     live-smoke-startup-readiness \
+    live-smoke-local-answers \
     live-smoke-operator-status \
     live-smoke-hud-health \
     live-smoke-hud-unavailable-health
@@ -76,6 +77,7 @@ write_summary "$TMP_DIR/live-smoke-20260609_020000.md" "2026-06-09T02:00:00-0700
 write_summary "$TMP_DIR/live-smoke-20260609_030000.md" "2026-06-09T03:00:00-0700" \
     live-smoke-external-failures \
     live-smoke-action-diagnostic \
+    live-smoke-context-turn-records \
     live-smoke-shortcut-action \
     live-smoke-window-focus \
     live-smoke-window-inspect \
@@ -103,11 +105,13 @@ write_summary "$TMP_DIR/live-smoke-20260609_040000.md" "2026-06-09T04:00:00-0700
     live-smoke-placement-command \
     live-smoke-residency-proof \
     live-smoke-startup-readiness \
+    live-smoke-local-answers \
     live-smoke-operator-status \
     live-smoke-hud-health \
     live-smoke-hud-unavailable-health \
     live-smoke-external-failures \
     live-smoke-action-diagnostic \
+    live-smoke-context-turn-records \
     live-smoke-shortcut-action \
     live-smoke-window-focus \
     live-smoke-window-inspect \
@@ -120,10 +124,10 @@ write_summary "$TMP_DIR/live-smoke-20260609_040000.md" "2026-06-09T04:00:00-0700
     live-smoke-ui-failure-diagnostic \
     live-smoke-action-matrix \
     live-smoke-browser-recovery \
+    live-smoke-browser-recovery-model \
     live-smoke-action-receipts \
     live-smoke-approval-lifecycle \
-    live-smoke-hud-action-history \
-    live-smoke-hud-action-diagnostic \
+    live-smoke-hud-action-surfaces \
     live-smoke-hud-ui-failure \
     live-smoke-hud-approval \
     live-smoke-action-cancel
@@ -138,11 +142,15 @@ require_contains "$OUT" 'Main acceptance battery | PASS' "main acceptance batter
 require_contains "$OUT" 'Operator controls | PASS' "operator controls slice did not pass"
 require_contains "$OUT" 'Runtime health | PASS' "runtime health slice did not pass"
 require_contains "$OUT" 'Action safety | PASS' "action safety slice did not pass"
+require_contains "$OUT" 'Full action/HUD sweep | PASS' "full action/HUD sweep did not pass"
 require_contains "$OUT" 'make live-smoke-acceptance' "main acceptance command missing"
 require_contains "$OUT" 'make live-smoke-operator-controls' "operator controls command missing"
 require_contains "$OUT" 'make live-smoke-runtime-health' "runtime health command missing"
 require_contains "$OUT" 'make live-smoke-action-safety' "action safety command missing"
+require_contains "$OUT" 'make live-smoke-action-safety-full' "full action/HUD sweep command missing"
 require_contains "$OUT" 'live-smoke-residency-proof' "residency proof target missing"
+require_contains "$OUT" 'live-smoke-local-answers' "local answers target missing"
+require_contains "$OUT" 'live-smoke-browser-recovery-model' "model-driven browser recovery target missing"
 
 DEXTER_SMOKE_SUMMARY_DIR="$EMPTY_DIR" "$ROOT_DIR/scripts/acceptance-status.sh" > "$EMPTY_OUT"
 require_contains "$EMPTY_OUT" 'Operator controls | MISSING' "empty non-strict run should report missing operator controls"

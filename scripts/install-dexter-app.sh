@@ -48,7 +48,8 @@ set repoPath to "$repo_applescript"
 set appPath to "$app_applescript"
 tell application "Terminal"
     activate
-    set dexterTab to do script "cd " & quoted form of repoPath & "; export OLLAMA_MODELS=/Users/jason/ollama-models; clear; echo 'Dexter live logs'; echo 'Started from: " & appPath & "'; echo 'OLLAMA_MODELS=/Users/jason/ollama-models'; echo; echo 'Use Dexter > New Session for a fresh conversation.'; echo 'Use Dexter > Restart Dexter to restart the app/core.'; echo 'Use Dexter > Quit Dexter to stop the app/core.'; echo; make configure-ollama-models && make stop && make run"
+    set dexterCommand to "cd " & quoted form of repoPath & "; export OLLAMA_MODELS=/Users/jason/ollama-models; export DEXTER_STARTED_FROM=" & quoted form of appPath & "; exec " & quoted form of (repoPath & "/scripts/restart-dexter-ui.sh")
+    set dexterTab to do script dexterCommand
     set custom title of dexterTab to "Dexter Live Logs"
 end tell
 OSA

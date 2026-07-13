@@ -133,9 +133,9 @@ grep -Fq "action_failed" "$EVENTS_OUT" \
 grep -Fq "$failed_token" "$EVENTS_OUT" \
     || fail "ambient action failure event did not mention failed token"
 grep -Fq "trigger_matched" "$EVENTS_OUT" \
-    || fail "ambient event queue did not include trigger_matched for default action failure trigger"
-grep -Fq "Dexter action failures" "$EVENTS_OUT" \
-    || fail "default action failure trigger did not match failed action"
+    && fail "ambient event queue exposed raw trigger_matched wrapper copy"
+grep -Eq "Action failure noticed|action failures noticed" "$EVENTS_OUT" \
+    || fail "ambient event queue did not include plain/grouped action-failure notice"
 grep -Fq "action_approval_requested" "$EVENTS_OUT" \
     || fail "ambient event queue did not include action_approval_requested"
 grep -Fq "$DELETE_SENTINEL" "$EVENTS_OUT" \

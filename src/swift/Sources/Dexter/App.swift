@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 
 /// Application delegate — lifecycle callbacks only.
 ///
@@ -26,29 +25,6 @@ final class DexterApp: NSObject, NSApplicationDelegate {
         // the traditional sense. orderFrontRegardless() is the correct call
         // for windows that must appear unconditionally.
         window.orderFrontRegardless()
-
-        // ── Microphone permission (Phase 13) ─────────────────────────────────
-        //
-        // Request microphone access before DexterClient starts. AVCaptureSession
-        // silently produces no audio if permission is denied — surfacing the denial
-        // dialog at launch makes the requirement clear to the operator.
-        //
-        // The request is non-blocking: the system shows the dialog asynchronously
-        // and the completion handler fires on an arbitrary thread. DexterClient's
-        // VoiceCapture will call AVCaptureDevice.default(for: .audio) which returns
-        // nil if access is denied — VoiceCapture degrades gracefully (text-only).
-        AVCaptureDevice.requestAccess(for: .audio) { granted in
-            if !granted {
-                DispatchQueue.main.async {
-                    let alert = NSAlert()
-                    alert.messageText     = "Microphone Access Required"
-                    alert.informativeText = "Dexter needs microphone access for voice interaction. " +
-                                           "Grant access in System Settings → Privacy & Security → Microphone."
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                }
-            }
-        }
 
         // Connect to Rust core in the background.
         // DexterClient handles retry on connection failure — core may not be up yet.
@@ -156,7 +132,7 @@ final class DexterApp: NSObject, NSApplicationDelegate {
 
             if HUDSmokeConfig.enabled {
                 HUDSmokeConfig.log(
-                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) actionHistory=\(HUDSmokeConfig.actionHistoryRequest) actionDiagnostic=\(HUDSmokeConfig.actionDiagnosticRequest) newSession=\(HUDSmokeConfig.newSessionRequest) lifecycle=\(HUDSmokeConfig.lifecycleConfirmationAction ?? "none") restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
+                    "enabled text='\(HUDSmokeConfig.text)' health=\(HUDSmokeConfig.healthRequest) actionHistory=\(HUDSmokeConfig.actionHistoryRequest) actionDiagnostic=\(HUDSmokeConfig.actionDiagnosticRequest) ambientInbox=\(HUDSmokeConfig.ambientInboxRequest) diagnosticBundle=\(HUDSmokeConfig.diagnosticBundleRequest) newSession=\(HUDSmokeConfig.newSessionRequest) lifecycle=\(HUDSmokeConfig.lifecycleConfirmationAction ?? "none") restart=\(HUDSmokeConfig.restartComponent?.smokeName ?? "none") submitDelaySecs=\(HUDSmokeConfig.submitDelaySecs) sessionReadyTimeoutSecs=\(HUDSmokeConfig.sessionReadyTimeoutSecs) actionSurfaceSequenceDelaySecs=\(HUDSmokeConfig.actionSurfaceSequenceDelaySecs) exitAfterSecs=\(HUDSmokeConfig.exitAfterSecs)"
                 )
                 Task {
                     try? await Task.sleep(for: .seconds(HUDSmokeConfig.submitDelaySecs))
@@ -172,19 +148,45 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                             HUDSmokeConfig.log("idleOnly")
                         } else if HUDSmokeConfig.newSessionRequest {
                             window.hud.performNewSessionRequestForSmoke()
+                        } else if HUDSmokeConfig.actionHistoryRequest && HUDSmokeConfig.actionDiagnosticRequest {
+                            window.hud.performActionHistoryRequestForSmoke()
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .seconds(HUDSmokeConfig.actionSurfaceSequenceDelaySecs))
+                                window.hud.performActionDiagnosticRequestForSmoke()
+                            }
                         } else if HUDSmokeConfig.actionDiagnosticRequest {
                             window.hud.performActionDiagnosticRequestForSmoke()
                         } else if HUDSmokeConfig.actionHistoryRequest {
                             window.hud.performActionHistoryRequestForSmoke()
                         } else if HUDSmokeConfig.healthRequest {
                             window.hud.performHealthRequestForSmoke()
+                        } else if HUDSmokeConfig.ambientInboxRequest {
+                            HUDSmokeConfig.log("ambientInboxRequest")
+                            Task { [weak c, weak window] in
+                                guard let markdown = await c?.fetchAmbientInboxMarkdownForSmoke() else { return }
+                                await MainActor.run {
+                                    window?.hud.showAmbientNotice(markdown)
+                                }
+                            }
+                        } else if HUDSmokeConfig.diagnosticBundleRequest {
+                            HUDSmokeConfig.log("diagnosticBundleRequest")
+                            createDiagnosticBundle(nil)
                         } else {
                             HUDSmokeConfig.log("autoSubmit")
-                            if HUDSmokeConfig.fromVoice {
-                                window.hud.showOperatorInput(HUDSmokeConfig.text)
-                                Task { await c.sendVoiceSmokeInput(HUDSmokeConfig.text) }
-                            } else {
-                                window.hud.onTextSubmit?(HUDSmokeConfig.text)
+                            Task { [weak window] in
+                                let sessionReady = await c.waitForSessionReadyForSmoke(
+                                    timeoutSecs: HUDSmokeConfig.sessionReadyTimeoutSecs
+                                )
+                                await MainActor.run {
+                                    if !sessionReady {
+                                        HUDSmokeConfig.log("autoSubmitSkipped sessionReady=false")
+                                    } else if HUDSmokeConfig.fromVoice {
+                                        window?.hud.showOperatorInput(HUDSmokeConfig.text)
+                                        Task { await c.sendVoiceSmokeInput(HUDSmokeConfig.text) }
+                                    } else {
+                                        window?.hud.onTextSubmit?(HUDSmokeConfig.text)
+                                    }
+                                }
                             }
                         }
                     }
@@ -262,13 +264,35 @@ final class DexterApp: NSObject, NSApplicationDelegate {
 
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(
-            withTitle: "Move Dexter to Mouse",
-            action: #selector(moveDexterToMouse(_:)),
-            keyEquivalent: ""
+            withTitle: "Show Dexter Status",
+            action: #selector(showDexterStatus(_:)),
+            keyEquivalent: "s"
         ).target = self
         appMenu.addItem(
-            withTitle: "Start Dexter Placement Drag",
-            action: #selector(startDexterPlacementDrag(_:)),
+            withTitle: "Show Recent Actions",
+            action: #selector(showRecentActions(_:)),
+            keyEquivalent: "l"
+        ).target = self
+        appMenu.addItem(
+            withTitle: "Explain Latest Action",
+            action: #selector(explainLatestAction(_:)),
+            keyEquivalent: "/"
+        ).target = self
+        appMenu.addItem(
+            withTitle: "Create Diagnostic Bundle",
+            action: #selector(createDiagnosticBundle(_:)),
+            keyEquivalent: "b"
+        ).target = self
+
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(
+            withTitle: "Move Dexter to Mouse",
+            action: #selector(moveDexterToMouse(_:)),
+            keyEquivalent: "d"
+        ).target = self
+        appMenu.addItem(
+            withTitle: "Toggle Dexter Placement Drag",
+            action: #selector(toggleDexterPlacementDrag(_:)),
             keyEquivalent: ""
         ).target = self
         appMenu.addItem(
@@ -306,6 +330,64 @@ final class DexterApp: NSObject, NSApplicationDelegate {
         Task { await client?.startNewSession() }
     }
 
+    @MainActor @objc private func showDexterStatus(_ sender: Any?) {
+        let targetWindow = floatingWindow
+        targetWindow?.hud.showHealthLoading()
+        Task { [weak self, weak targetWindow] in
+            let report = await self?.client?.fetchOperatorStatusReport()
+                ?? DexterHealthHUDReport(
+                    markdown: DexterClient.unavailableHealthMarkdown(reason: "Dexter client is not ready."),
+                    restartTargets: []
+                )
+            await MainActor.run {
+                targetWindow?.hud.showHealthReport(report)
+            }
+        }
+    }
+
+    @MainActor @objc private func showRecentActions(_ sender: Any?) {
+        let targetWindow = floatingWindow
+        targetWindow?.hud.showActionHistoryLoading()
+        Task { [weak self, weak targetWindow] in
+            let markdown = await self?.client?.fetchActionHistoryMarkdown()
+                ?? """
+                ### Recent Actions
+
+                Dexter client is not ready.
+                """
+            await MainActor.run {
+                targetWindow?.hud.showActionHistory(markdown)
+            }
+        }
+    }
+
+    @MainActor @objc private func explainLatestAction(_ sender: Any?) {
+        let targetWindow = floatingWindow
+        targetWindow?.hud.showActionDiagnosticLoading()
+        Task { [weak self, weak targetWindow] in
+            let markdown = await self?.client?.fetchActionDiagnosticMarkdown()
+                ?? """
+                ### Action Diagnostic
+
+                Dexter client is not ready.
+                """
+            await MainActor.run {
+                targetWindow?.hud.showActionDiagnostic(markdown)
+            }
+        }
+    }
+
+    @MainActor @objc private func createDiagnosticBundle(_ sender: Any?) {
+        let targetWindow = floatingWindow
+        targetWindow?.hud.showDiagnosticBundleStarting()
+        Task.detached(priority: .utility) {
+            let markdown = DexterProcessControl.createDiagnosticBundleMarkdown()
+            await MainActor.run {
+                targetWindow?.hud.showDiagnosticBundleResult(markdown)
+            }
+        }
+    }
+
     @MainActor private func performLifecycleActionForSmoke(_ action: String, window: FloatingWindow) {
         switch action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "restart":
@@ -326,6 +408,10 @@ final class DexterApp: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func startDexterPlacementDrag(_ sender: Any?) {
         floatingWindow?.setHotkeyRepositionActive(true)
+    }
+
+    @MainActor @objc private func toggleDexterPlacementDrag(_ sender: Any?) {
+        floatingWindow?.toggleHotkeyReposition()
     }
 
     @MainActor @objc private func stopDexterPlacementDrag(_ sender: Any?) {
@@ -361,16 +447,53 @@ private enum DexterProcessControl {
         if writeRestartSentinelIfConfigured() {
             return
         }
-        let command = """
-        cd \(shellQuote(repoPath)); export OLLAMA_MODELS=/Users/jason/ollama-models; echo 'Restarting Dexter...'; echo 'OLLAMA_MODELS='$OLLAMA_MODELS; sleep 1; make configure-ollama-models && make stop && make run
-        """
+        let command = shellQuote("\(repoPath)/scripts/restart-dexter-ui.sh")
         let script = """
         tell application "Terminal"
             activate
-            do script "\(appleScriptString(command))"
+            set dexterTab to do script "\(appleScriptString(command))"
+            set custom title of dexterTab to "Dexter Live Logs"
         end tell
         """
         run("/usr/bin/osascript", ["-e", script])
+    }
+
+    static func createDiagnosticBundleMarkdown() -> String {
+        let result = runCapturing("/bin/bash", ["\(repoPath)/scripts/diagnostic-bundle.sh"])
+        let output = [result.stdout, result.stderr]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
+        guard result.exitCode == 0 else {
+            return """
+            ### Diagnostic Bundle
+
+            Status: failed
+
+            Exit status: \(result.exitCode)
+
+            ```text
+            \(output.isEmpty ? "No output returned." : output)
+            ```
+            """
+        }
+
+        let reportPath = diagnosticBundlePath(from: output, marker: "[INFO] diagnostic bundle written:")
+        let latestPath = diagnosticBundlePath(from: output, marker: "[INFO] latest diagnostic bundle:")
+        let reportLine = reportPath.map { "- Report: `\($0)`" } ?? "- Report: path unavailable"
+        let latestLine = latestPath.map { "- Latest: `\($0)`" } ?? "- Latest: path unavailable"
+
+        return """
+        ### Diagnostic Bundle
+
+        Status: created
+
+        \(reportLine)
+        \(latestLine)
+
+        This bundle is local markdown for launch, model, process, health, and acceptance evidence.
+        """
     }
 
     private static func run(_ executable: String, _ arguments: [String]) {
@@ -382,6 +505,48 @@ private enum DexterProcessControl {
         } catch {
             print("[DexterProcessControl] failed to run \(executable): \(error)")
         }
+    }
+
+    private static func runCapturing(
+        _ executable: String,
+        _ arguments: [String]
+    ) -> (exitCode: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: repoPath, isDirectory: true)
+        process.environment = ProcessInfo.processInfo.environment
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return (127, "", "failed to run \(executable): \(error)")
+        }
+
+        let stdout = String(
+            data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        let stderr = String(
+            data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        return (process.terminationStatus, stdout, stderr)
+    }
+
+    private static func diagnosticBundlePath(from output: String, marker: String) -> String? {
+        output
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first { $0.hasPrefix(marker) }?
+            .dropFirst(marker.count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func writeRestartSentinelIfConfigured() -> Bool {
@@ -441,6 +606,16 @@ private enum HUDSmokeConfig {
         return ["1", "true", "yes"].contains(raw.lowercased())
     }()
 
+    static let diagnosticBundleRequest: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_DIAGNOSTIC_BUNDLE"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
+    static let ambientInboxRequest: Bool = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_AMBIENT_INBOX"] ?? ""
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
+
     static let newSessionRequest: Bool = {
         let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_NEW_SESSION"] ?? ""
         return ["1", "true", "yes"].contains(raw.lowercased())
@@ -481,8 +656,16 @@ private enum HUDSmokeConfig {
         parseSecs("DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS", defaultValue: 3)
     }()
 
+    static let sessionReadyTimeoutSecs: Int64 = {
+        parseSecs("DEXTER_HUD_SMOKE_SESSION_READY_TIMEOUT_SECS", defaultValue: 30)
+    }()
+
     static let restartDelaySecs: Int64 = {
         parseSecs("DEXTER_HUD_SMOKE_RESTART_DELAY_SECS", defaultValue: 3)
+    }()
+
+    static let actionSurfaceSequenceDelaySecs: Int64 = {
+        parseSecs("DEXTER_HUD_SMOKE_ACTION_SURFACE_SEQUENCE_DELAY_SECS", defaultValue: 6)
     }()
 
     static let exitAfterSecs: Int64 = {

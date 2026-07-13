@@ -49,6 +49,7 @@ FOCUSED_SLICES = (
         (
             "live-smoke-residency-proof",
             "live-smoke-startup-readiness",
+            "live-smoke-local-answers",
             "live-smoke-operator-status",
             "live-smoke-hud-health",
             "live-smoke-hud-unavailable-health",
@@ -60,6 +61,7 @@ FOCUSED_SLICES = (
         (
             "live-smoke-external-failures",
             "live-smoke-action-diagnostic",
+            "live-smoke-context-turn-records",
             "live-smoke-shortcut-action",
             "live-smoke-window-focus",
             "live-smoke-window-inspect",
@@ -80,10 +82,34 @@ FOCUSED_SLICES = (
 )
 
 MAIN_ACCEPTANCE_EXTRA_TARGETS = (
-    "live-smoke-hud-action-history",
-    "live-smoke-hud-action-diagnostic",
+    "live-smoke-hud-action-surfaces",
     "live-smoke-hud-ui-failure",
     "live-smoke-hud-approval",
+)
+
+FULL_ACTION_SAFETY_TARGETS = (
+    "live-smoke-external-failures",
+    "live-smoke-action-diagnostic",
+    "live-smoke-context-turn-records",
+    "live-smoke-shortcut-action",
+    "live-smoke-window-focus",
+    "live-smoke-window-inspect",
+    "live-smoke-ui-snapshot",
+    "live-smoke-ui-click",
+    "live-smoke-ui-type",
+    "live-smoke-ui-select",
+    "live-smoke-ui-toggle",
+    "live-smoke-ui-pick",
+    "live-smoke-ui-failure-diagnostic",
+    "live-smoke-action-matrix",
+    "live-smoke-browser-recovery",
+    "live-smoke-browser-recovery-model",
+    "live-smoke-action-receipts",
+    "live-smoke-approval-lifecycle",
+    "live-smoke-hud-action-surfaces",
+    "live-smoke-hud-ui-failure",
+    "live-smoke-hud-approval",
+    "live-smoke-action-cancel",
 )
 
 SLICES = (
@@ -104,6 +130,11 @@ SLICES = (
         ),
     ),
     *FOCUSED_SLICES,
+    Slice(
+        "Full action/HUD sweep",
+        "live-smoke-action-safety-full",
+        FULL_ACTION_SAFETY_TARGETS,
+    ),
 )
 
 

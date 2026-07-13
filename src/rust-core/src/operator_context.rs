@@ -2,7 +2,8 @@ use crate::context_observer::{format_visible_windows_inline, is_terminal_bundle,
 
 pub(crate) const NO_CONTEXT_MARKDOWN: &str =
     "- No focused app context has been observed yet.\n\
-     - I can still answer questions, use recent action receipts, and run explicit actions you request.\n";
+     - Dexter can still inspect current RAM, CPU, PIDs, disk, health, notices, and action receipts from local host sources.\n\
+     - I can still answer questions and run explicit actions you request.\n";
 
 pub(crate) fn format_operator_context_markdown(snapshot: Option<&ContextSnapshot>) -> String {
     let Some(snapshot) = snapshot else {
@@ -49,6 +50,9 @@ pub(crate) fn format_operator_context_markdown(snapshot: Option<&ContextSnapshot
         ));
     }
 
+    lines.push(
+        "- Local inspection: current RAM, CPU, PIDs, disk, Dexter health, notices, and action receipts are available from Rust-owned host sources.".to_string(),
+    );
     lines.push("- Dexter can:".to_string());
     lines.extend(capability_lines(app_name, bundle_id));
     lines.push(
@@ -188,6 +192,7 @@ mod tests {
     fn no_context_reports_available_fallback() {
         let markdown = format_operator_context_markdown(None);
         assert!(markdown.contains("No focused app context"));
+        assert!(markdown.contains("inspect current RAM, CPU, PIDs"));
         assert!(markdown.contains("run explicit actions"));
     }
 
@@ -203,6 +208,7 @@ mod tests {
         let markdown = format_operator_context_markdown(Some(&snap));
         assert!(markdown.contains("Focus: iTerm2"));
         assert!(markdown.contains("Recent shell: `make test` -> exit 2"));
+        assert!(markdown.contains("Local inspection: current RAM, CPU, PIDs"));
         assert!(markdown.contains("explain the latest shell error"));
         assert!(markdown.contains("run a local command"));
     }

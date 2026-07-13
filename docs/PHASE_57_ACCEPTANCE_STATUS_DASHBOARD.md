@@ -22,7 +22,7 @@ The status report looks for the latest passing saved receipt that covers each
 slice:
 
 - operator controls;
-- runtime health;
+- runtime health, including deterministic local-answer coverage;
 - action safety.
 
 It does not start Dexter or generate new evidence. It only summarizes existing

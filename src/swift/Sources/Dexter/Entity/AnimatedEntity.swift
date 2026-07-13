@@ -28,6 +28,10 @@ final class AnimatedEntity: MTKView {
     /// FloatingWindow sets this to toggle the HUD.
     var onDoubleTap: (() -> Void)?
 
+    /// Called when an entity drag starts/ends so the owning panel can keep
+    /// mouse events enabled while the cursor temporarily leaves the circle.
+    var onDragStateChanged: ((Bool) -> Void)?
+
     // MARK: - Private state
 
     private let entityRenderer: EntityRenderer
@@ -117,19 +121,24 @@ final class AnimatedEntity: MTKView {
     /// If `GeometricRenderer.shaderSource` changes `baseRadius`, update the
     /// constant here to match. Both are in the same file group for discoverability.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else { return nil }
+        guard containsVisibleEntity(at: point) else { return nil }
 
         // Give subviews first crack (none in Phase 12, but future-proof).
         for subview in subviews.reversed() {
             if let hit = subview.hitTest(convert(point, to: subview)) { return hit }
         }
 
+        return self
+    }
+
+    func containsVisibleEntity(at point: NSPoint) -> Bool {
+        guard bounds.contains(point) else { return false }
         let center = NSPoint(x: bounds.midX, y: bounds.midY)
         // shaderBaseRadius must match GeometricRenderer fragment shader.
         let radius = Self.shaderBaseRadius * min(bounds.width, bounds.height) / 2.0
         let dx = point.x - center.x
         let dy = point.y - center.y
-        return (dx * dx + dy * dy) <= (radius * radius) ? self : nil
+        return (dx * dx + dy * dy) <= (radius * radius)
     }
 
     // NSView coordinate system is bottom-left origin; the shader flips y
@@ -155,6 +164,7 @@ final class AnimatedEntity: MTKView {
         // Capture screen-space anchor so deltas stay correct as the window moves.
         dragScreenOrigin   = NSEvent.mouseLocation
         windowOriginAtDrag = window?.frame.origin ?? .zero
+        onDragStateChanged?(true)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -167,6 +177,7 @@ final class AnimatedEntity: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        onDragStateChanged?(false)
         // clickCount == 2 fires on the *second* up event within the double-click
         // interval — the first up event has clickCount == 1.
         if event.clickCount == 2 {

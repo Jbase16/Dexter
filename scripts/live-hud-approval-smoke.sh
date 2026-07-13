@@ -23,6 +23,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 SWIFT_DIR="$ROOT_DIR/src/swift"
+SWIFT_BIN="$SWIFT_DIR/.build/debug/Dexter"
 CORE_PID=""
 SWIFT_PID=""
 TARGET_DIR="/tmp/dexter-hud-smoke-delete-me"
@@ -71,6 +72,11 @@ require_bins() {
     if [[ ! -x "$CORE_BIN" ]]; then
         say "$FAIL" "missing core binary: $CORE_BIN"
         say "$INFO" "build it with: cd src/rust-core && cargo build --release --bin dexter-core"
+        exit 2
+    fi
+    if [[ ! -x "$SWIFT_BIN" ]]; then
+        say "$FAIL" "missing Swift binary: $SWIFT_BIN"
+        say "$INFO" "build it with: cd src/swift && swift build"
         exit 2
     fi
 }
@@ -139,9 +145,10 @@ start_swift_smoke() {
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_TEXT="$SMOKE_TEXT" \
         DEXTER_HUD_SMOKE_ACTION_APPROVAL=deny \
-        DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-3}" \
-        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-24}" \
-            swift run
+        DEXTER_HUD_SMOKE_SKIP_VOICE_CAPTURE=1 \
+        DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-0}" \
+        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-150}" \
+            "$SWIFT_BIN"
     ) >> "$SWIFT_LOG" 2>&1 &
     SWIFT_PID="$!"
 }
@@ -224,6 +231,8 @@ run_assertions() {
     }
 
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] enabled" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] voiceCaptureSkipped" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] sessionReady" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[App] onTextSubmit fired: '$SMOKE_TEXT'" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[DexterClient] onResponse ← actionRequest:" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] actionRequest" || ok=1

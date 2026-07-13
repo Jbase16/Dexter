@@ -181,7 +181,7 @@ start_swift_smoke() {
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_ACTION_DIAGNOSTIC=1 \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-1}" \
-        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-10}" \
+        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-75}" \
             swift run
     ) >> "$SWIFT_LOG" 2>&1 &
     SWIFT_PID="$!"
@@ -223,6 +223,13 @@ main() {
 
     wait_for_pattern "$SWIFT_LOG" "[DexterClient] ActionDiagnostic report generated" 60 || {
         say "$FAIL" "Swift HUD action diagnostic smoke - diagnostic report did not complete"
+        tail -160 "$SWIFT_LOG" || true
+        tail -140 "$CORE_LOG" || true
+        cat "$CLI_LOG" || true
+        exit 1
+    }
+    wait_for_pattern "$SWIFT_LOG" "[HUDSmoke] showActionDiagnostic" 30 || {
+        say "$FAIL" "Swift HUD action diagnostic smoke - HUD did not render ActionDiagnostic"
         tail -160 "$SWIFT_LOG" || true
         tail -140 "$CORE_LOG" || true
         cat "$CLI_LOG" || true

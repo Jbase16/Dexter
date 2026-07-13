@@ -8,6 +8,8 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dexter-dock-launcher-smoke.XXXXXX")"
 APP_PATH="$TMP_ROOT/Dexter.app"
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 LAUNCHER="$APP_PATH/Contents/MacOS/DexterLauncher"
+RESTART_SCRIPT="$ROOT_DIR/scripts/restart-dexter-ui.sh"
+APP_SWIFT="$ROOT_DIR/src/swift/Sources/Dexter/App.swift"
 
 cleanup() {
     rm -rf "$TMP_ROOT"
@@ -60,12 +62,16 @@ bash scripts/install-dexter-app.sh "$APP_PATH" >/tmp/dexter-dock-launcher-instal
 assert_file "$INFO_PLIST" "launcher Info.plist"
 assert_file "$LAUNCHER" "launcher executable"
 assert_executable "$LAUNCHER" "launcher executable"
+assert_file "$RESTART_SCRIPT" "restart lifecycle script"
+assert_executable "$RESTART_SCRIPT" "restart lifecycle script"
 
 plutil -lint "$INFO_PLIST" >/dev/null
 pass "Info.plist is valid"
 
 /bin/zsh -n "$LAUNCHER"
 pass "launcher shell syntax is valid"
+bash -n "$RESTART_SCRIPT"
+pass "restart lifecycle script syntax is valid"
 
 APPLESCRIPT="$TMP_ROOT/DexterLauncher.applescript"
 awk '
@@ -86,9 +92,13 @@ assert_plist_value "LSUIElement" "false"
 assert_contains "$LAUNCHER" "set repoPath to \"$ROOT_DIR\"" "launcher embeds current repo path"
 assert_contains "$LAUNCHER" "set appPath to \"$APP_PATH\"" "launcher embeds actual app path"
 assert_contains "$LAUNCHER" "export OLLAMA_MODELS=/Users/jason/ollama-models" "launcher exports local model store"
-assert_contains "$LAUNCHER" "make configure-ollama-models && make stop && make run" "launcher configures models before terminal-backed run loop"
+assert_contains "$LAUNCHER" "DEXTER_STARTED_FROM" "launcher passes app path to lifecycle script"
+assert_contains "$LAUNCHER" "scripts/restart-dexter-ui.sh" "launcher uses centralized Terminal lifecycle script"
 assert_contains "$LAUNCHER" "Dexter Live Logs" "launcher sets live-log terminal title"
-assert_contains "$LAUNCHER" "Use Dexter > Restart Dexter" "launcher prints restart guidance"
-assert_contains "$LAUNCHER" "Use Dexter > Quit Dexter" "launcher prints quit guidance"
+assert_contains "$RESTART_SCRIPT" "Use Dexter > Restart Dexter" "lifecycle script prints restart guidance"
+assert_contains "$RESTART_SCRIPT" "Use Dexter > Quit Dexter" "lifecycle script prints quit guidance"
+assert_contains "$APP_SWIFT" "scripts/restart-dexter-ui.sh" "Swift restart handler launches lifecycle script"
+assert_contains "$RESTART_SCRIPT" "make restart-core" "restart lifecycle script uses detached core restart"
+assert_contains "$RESTART_SCRIPT" "make run-swift" "restart lifecycle script starts Swift after core readiness"
 
 pass "Dock launcher smoke passed"

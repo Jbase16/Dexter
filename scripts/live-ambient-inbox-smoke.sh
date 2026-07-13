@@ -176,12 +176,12 @@ say INFO "starting Swift HUD ambient inbox smoke; log: $SWIFT_LOG"
 (
     cd "$SWIFT_DIR" || exit 2
     DEXTER_HUD_SMOKE=1 \
-    DEXTER_HUD_SMOKE_IDLE_ONLY=1 \
+    DEXTER_HUD_SMOKE_AMBIENT_INBOX=1 \
     DEXTER_HUD_SMOKE_KEEP_CORE_ON_EXIT=1 \
     DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS=1 \
-    DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=10 \
+    DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=75 \
     DEXTER_PROACTIVE_HEALTH_INITIAL_DELAY_SECS=120 \
-    DEXTER_PROACTIVE_AMBIENT_INITIAL_DELAY_SECS=1 \
+    DEXTER_PROACTIVE_AMBIENT_INITIAL_DELAY_SECS=120 \
     DEXTER_PROACTIVE_AMBIENT_POLL_INTERVAL_SECS=60 \
         swift run
 ) >>"$SWIFT_LOG" 2>&1 &
@@ -199,8 +199,10 @@ SWIFT_PID=""
 
 grep -Fq "Dexter Notices" "$SWIFT_LOG" \
     || fail "ambient notice markdown did not include Dexter Notices"
-grep -Fq "Dexter action failures" "$SWIFT_LOG" \
-    || fail "ambient notice did not include default action failure trigger"
+grep -Eq "Action failure noticed|action failures noticed" "$SWIFT_LOG" \
+    || fail "ambient notice did not include plain/grouped action-failure notice"
+grep -Fq "trigger_matched [trigger]" "$SWIFT_LOG" \
+    && fail "ambient notice exposed raw trigger wrapper copy"
 grep -Fq "Ambient inbox requested" "$CORE_LOG" \
     || fail "core did not receive AmbientInbox RPC"
 grep -Fq "Ambient events acknowledged" "$CORE_LOG" \

@@ -33,6 +33,7 @@ final class FloatingWindow: NSPanel {
     private static let frameDefaultsKey = "com.dexter.windowFrame"
     private static let saveDebounceMs   = 250
     private static let entityWindowSize = NSSize(width: 136, height: 136)
+    private static let mouseGateInterval: TimeInterval = 1.0 / 120.0
     private var saveDebounceItem: DispatchWorkItem?
 
     private(set) var animatedEntity: AnimatedEntity!
@@ -49,8 +50,12 @@ final class FloatingWindow: NSPanel {
     // the current mouse location. This preserves the old "bring Dexter with me"
     // workflow, but only during an intentional placement gesture.
     private var hotkeyRepositionTimer: Timer?
+    private var mouseGateTimer: Timer?
+    private var globalMouseMovementMonitor: Any?
+    private var localMouseMovementMonitor: Any?
     private var lastHotkeyMouseLocation: NSPoint?
     private var hotkeyRepositionActive = false
+    private var entityDragActive = false
     private var hotkeyRepositionObserver: NSObjectProtocol?
     private var placementCommandObserver: NSObjectProtocol?
 
@@ -76,6 +81,11 @@ final class FloatingWindow: NSPanel {
 
         // Wire entity double-tap: toggle HUD and focus input for immediate typing.
         animatedEntity.onDoubleTap = { [weak self] in self?.toggleHUD() }
+        animatedEntity.onDragStateChanged = { [weak self] active in
+            self?.entityDragActive = active
+            self?.updateMouseEventGate()
+        }
+        startMouseEventGate()
 
         // Seed the tracked screen from the initial window position.
         lastTrackedScreen = self.screen
@@ -107,6 +117,13 @@ final class FloatingWindow: NSPanel {
 
     @MainActor deinit {
         hotkeyRepositionTimer?.invalidate()
+        mouseGateTimer?.invalidate()
+        if let globalMouseMovementMonitor {
+            NSEvent.removeMonitor(globalMouseMovementMonitor)
+        }
+        if let localMouseMovementMonitor {
+            NSEvent.removeMonitor(localMouseMovementMonitor)
+        }
         if let hotkeyRepositionObserver {
             NotificationCenter.default.removeObserver(hotkeyRepositionObserver)
         }
@@ -130,12 +147,17 @@ final class FloatingWindow: NSPanel {
     func setHotkeyRepositionActive(_ active: Bool) {
         guard active != hotkeyRepositionActive else { return }
         hotkeyRepositionActive = active
+        updateMouseEventGate()
 
         if active {
             beginHotkeyReposition()
         } else {
             endHotkeyReposition()
         }
+    }
+
+    func toggleHotkeyReposition() {
+        setHotkeyRepositionActive(!hotkeyRepositionActive)
     }
 
     func snapToCurrentMouseLocation() {
@@ -178,6 +200,7 @@ final class FloatingWindow: NSPanel {
         hotkeyRepositionTimer = nil
         lastHotkeyMouseLocation = nil
         persistFrameNow()
+        updateMouseEventGate()
     }
 
     private func applyHotkeyMouseDelta() {
@@ -227,6 +250,54 @@ final class FloatingWindow: NSPanel {
         persistFrameNow()
     }
 
+    private func startMouseEventGate() {
+        updateMouseEventGate()
+
+        // The timer is a fallback. Mouse monitors update the window gate as soon
+        // as the pointer moves, before a following click can reach the app below.
+        globalMouseMovementMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateMouseEventGate()
+            }
+        }
+        localMouseMovementMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged]
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.updateMouseEventGate()
+            }
+            return event
+        }
+
+        let timer = Timer(timeInterval: Self.mouseGateInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateMouseEventGate()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        mouseGateTimer = timer
+    }
+
+    private func updateMouseEventGate() {
+        if entityDragActive && !isPrimaryMouseButtonDown {
+            entityDragActive = false
+        }
+
+        // AppKit can still let a high-level transparent panel feel rectangular
+        // before view-level hit testing gets a chance to pass events through. Keep
+        // the whole panel click-through unless the pointer is inside Dexter's
+        // rendered orb, or while the operator is intentionally placing Dexter.
+        ignoresMouseEvents = !(hotkeyRepositionActive || entityDragActive || mouseIsOverVisibleEntity())
+    }
+
+    private func mouseIsOverVisibleEntity() -> Bool {
+        let windowPoint = convertPoint(fromScreen: NSEvent.mouseLocation)
+        let entityPoint = animatedEntity.convert(windowPoint, from: nil)
+        return animatedEntity.containsVisibleEntity(at: entityPoint)
+    }
+
     private func clampedFrameCentered(on point: NSPoint) -> NSRect {
         var origin = NSPoint(
             x: point.x - frame.width / 2,
@@ -265,6 +336,10 @@ final class FloatingWindow: NSPanel {
             FloatingWindowSmokeLog.log("placement command=stop")
             setHotkeyRepositionActive(false)
             smokeLogPlacementSnapshot("after-command-stop")
+        case "toggle":
+            FloatingWindowSmokeLog.log("placement command=toggle")
+            toggleHotkeyReposition()
+            smokeLogPlacementSnapshot("after-command-toggle")
         default:
             if command.hasPrefix("synthetic-nodrag:") {
                 performSyntheticPlacementDelta(command, primaryMouseButtonDown: false)
@@ -352,6 +427,8 @@ final class FloatingWindow: NSPanel {
         isOpaque   = false
         hasShadow  = false  // Shadow rendered by Metal entity in later phases
         backgroundColor = .clear
+        ignoresMouseEvents = true
+        acceptsMouseMovedEvents = true
 
         // Round 3 / behavioral fix: `isMovableByWindowBackground = true` was causing
         // the entire entity window rect to intercept mouse events at the window-
@@ -371,9 +448,11 @@ final class FloatingWindow: NSPanel {
     }
 
     private func buildContentView() {
-        // PassthroughView provides selective mouse event pass-through:
-        // transparent pixels forward clicks to windows below,
-        // opaque pixels (Dexter's rendered form) receive events normally.
+        // PassthroughView provides view-level selective hit testing while the
+        // window-level mouse gate below handles AppKit's top-level rectangular
+        // panel behavior. Both are needed: the gate keeps transparent regions
+        // truly click-through, and the view hit test keeps the visible orb
+        // interactive once the gate enables events.
         let content = PassthroughView(frame: .zero)
         content.autoresizingMask = [.width, .height]
         contentView = content
@@ -501,10 +580,10 @@ extension FloatingWindow: NSWindowDelegate {
 /// A view that passes mouse events through to windows below when the pixel
 /// under the cursor is fully transparent.
 ///
-/// The alternative — `window.ignoresMouseEvents = true` — would make the entire
-/// window click-through, including Dexter's rendered form. We need selective
-/// pass-through: transparent regions forward to apps below, opaque regions
-/// (where Dexter is rendered) receive events for drag, interaction, etc.
+/// A static `window.ignoresMouseEvents = true` would make the entire window
+/// click-through, including Dexter's rendered form. FloatingWindow now toggles
+/// that flag dynamically based on cursor position; this view remains the
+/// second line of defense so only Dexter's visible orb claims events.
 ///
 /// Implementation: override `hitTest(_:)`. Return nil to pass through, return the
 /// relevant subview to claim the event. The root view itself never claims the

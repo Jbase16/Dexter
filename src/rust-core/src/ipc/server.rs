@@ -25,7 +25,7 @@ use crate::{
     },
     action_diagnostic::{build_action_diagnostic, ActionDiagnosticInput},
     action_evidence::{format_failed_action_evidence_block, format_success_action_evidence_block},
-    ambient::{AmbientEvent, AmbientEventStore, AmbientSeverity},
+    ambient::{self, AmbientEvent, AmbientEventStore, AmbientSeverity},
     config::{resolve_config_path, DexterConfig},
     constants::{
         BROWSER_WORKER_HEALTH_INTERVAL_SECS, CORE_VERSION, SHELL_SOCKET_PATH, VOICE_PYTHON_EXE,
@@ -1030,6 +1030,7 @@ impl DexterService for CoreService {
             );
             Status::internal(format!("ambient history unavailable: {e}"))
         })?;
+        let events = ambient::compact_ambient_events_for_operator(events);
         let event_count = events.len();
         let events = events
             .into_iter()
@@ -1070,6 +1071,7 @@ impl DexterService for CoreService {
                     );
                     Status::internal(format!("ambient inbox unavailable: {e}"))
                 })?;
+        let events = ambient::compact_ambient_events_for_operator(events);
         let event_count = events.len();
         let events = events
             .into_iter()

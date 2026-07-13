@@ -50,6 +50,7 @@ pub enum ContextRiskClass {
 #[serde(rename_all = "snake_case")]
 pub enum TaskClass {
     Chat,
+    LocalSystemStatus,
     DebugShellFailure,
     UiAction,
     ClipboardReference,

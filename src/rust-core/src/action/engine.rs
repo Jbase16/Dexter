@@ -1313,6 +1313,46 @@ impl ActionEngine {
         self.audit.lock().await.path().to_path_buf()
     }
 
+    /// Record an action that failed before it could enter the normal execution
+    /// path.
+    ///
+    /// Used for Rust-side preflight refusals such as Contacts-backed
+    /// `message_send` resolution failures. The model requested an action, but
+    /// Dexter refused before approval or side effects, so the operator still
+    /// deserves a durable audit receipt.
+    pub async fn record_preflight_failure(
+        &self,
+        spec: &ActionSpec,
+        category: ActionCategory,
+        error: &str,
+    ) -> ActionOutcome {
+        let action_id = Uuid::new_v4().to_string();
+        let entry = AuditEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            action_id: &action_id,
+            r#type: Self::type_str(spec),
+            category: Self::category_str(category),
+            spec_json: Self::spec_to_audit_json(spec),
+            outcome: "failure",
+            exit_code: None,
+            output_preview: None,
+            error: Some(error.to_string()),
+            duration_ms: None,
+            operator_approved: None,
+        };
+        {
+            let guard = self.audit.lock().await;
+            if let Err(e) = guard.append(&entry) {
+                error!(action_id = %action_id, error = %e, "Audit log append failed");
+            }
+        }
+        self.record_action_audit_event(&entry, spec);
+        ActionOutcome::Rejected {
+            action_id,
+            error: error.to_string(),
+        }
+    }
+
     fn record_approval_requested_event(
         &self,
         action_id: &str,
@@ -1886,6 +1926,34 @@ mod tests {
         assert_eq!(audit["recipient"], "Mom");
         assert_eq!(audit["body"], "<12 bytes omitted>");
         assert_eq!(audit["rationale"], "structured send");
+    }
+
+    #[tokio::test]
+    async fn message_send_preflight_failure_writes_redacted_audit_receipt() {
+        let tmp = tempdir().unwrap();
+        let engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let spec = make_message_send();
+        let outcome = engine
+            .record_preflight_failure(
+                &spec,
+                ActionCategory::Cautious,
+                "Structured iMessage send refused before execution: Contacts name not found for Mom.",
+            )
+            .await;
+
+        assert!(matches!(outcome, ActionOutcome::Rejected { .. }));
+        let (_path, receipts) =
+            crate::action::audit::recent_action_receipts(tmp.path(), 1).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].action_type, "message_send");
+        assert_eq!(receipts[0].outcome, "failed");
+        assert!(receipts[0].summary.contains("Contacts name not found"));
+
+        let audit_path = engine.audit.lock().await.path().to_path_buf();
+        let audit = std::fs::read_to_string(audit_path).expect("audit log should exist");
+        assert!(audit.contains("\"recipient\":\"Mom\""));
+        assert!(audit.contains("\"body\":\"<12 bytes omitted>\""));
+        assert!(!audit.contains("I'll be late"));
     }
 
     #[test]

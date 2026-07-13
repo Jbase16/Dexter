@@ -50,6 +50,10 @@ enum C {
     /// Square hit target for the history toggle button.
     static let toggleButtonSize: CGFloat = 22
 
+    /// Top icon row safe area. The scroll view must stop below this band so
+    /// response text never scrolls visually underneath the HUD menu controls.
+    static let topControlsReservedHeight: CGFloat = toggleButtonSize + inputPadding * 2
+
     /// Thin divider between the history panel and the current exchange area.
     static let historyDividerH:  CGFloat = 1
 
@@ -68,6 +72,12 @@ private enum HUDSmokeLog {
         return ["1", "true", "yes"].contains(raw.lowercased())
     }()
 
+    static let markdownPreviewChars: Int = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_MARKDOWN_PREVIEW_CHARS"] ?? ""
+        guard let value = Int(raw), value > 0 else { return 3000 }
+        return min(value, 25000)
+    }()
+
     static func log(_ message: String) {
         guard enabled else { return }
         print("[HUDSmoke] \(message)")
@@ -79,7 +89,7 @@ private enum HUDSmokeLog {
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[HUDSmoke] markdownPreview \(preview.prefix(3000))")
+        print("[HUDSmoke] markdownPreview \(preview.prefix(markdownPreviewChars))")
     }
 }
 
@@ -87,6 +97,7 @@ private final class HUDIconButton: NSButton {
     private var trackingAreaRef: NSTrackingArea?
     private var restAlpha: CGFloat = 0.45
     private var hoverAlpha: CGFloat = 0.9
+    var onHoverChanged: ((Bool) -> Void)?
 
     func setChrome(restAlpha: CGFloat, hoverAlpha: CGFloat = 0.9) {
         self.restAlpha = restAlpha
@@ -111,10 +122,12 @@ private final class HUDIconButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         alphaValue = hoverAlpha
+        onHoverChanged?(true)
     }
 
     override func mouseExited(with event: NSEvent) {
         alphaValue = restAlpha
+        onHoverChanged?(false)
     }
 }
 
@@ -209,6 +222,10 @@ final class HUDWindow: NSPanel {
     // Mute button — toggles TTS on/off.
     private let muteButton: NSButton
 
+    // In-panel tooltip. Native AppKit tooltips are separate windows and can
+    // appear behind Dexter's screen-saver-level HUD panel.
+    private let tooltipLabel: NSTextField
+
     // MARK: - Mode state
 
     private var ttsMuted: Bool = false
@@ -247,8 +264,12 @@ final class HUDWindow: NSPanel {
         // Input bar occupies the bottom strip; text area fills the rest.
         let inputBarHeight = C.inputHeight + C.inputPadding * 2
         let inputRect = NSRect(x: 0, y: 0, width: C.width, height: inputBarHeight)
-        let textRect  = NSRect(x: 0, y: inputBarHeight,
-                               width: C.width, height: C.height - inputBarHeight)
+        let textRect  = NSRect(
+            x: 0,
+            y: inputBarHeight,
+            width: C.width,
+            height: C.height - inputBarHeight - C.topControlsReservedHeight
+        )
         let healthActionsRect = NSRect(
             x: C.inputPadding,
             y: inputBarHeight + C.inputPadding / 2,
@@ -259,7 +280,7 @@ final class HUDWindow: NSPanel {
             x: 0,
             y: inputBarHeight + C.healthActionRowHeight + C.inputPadding,
             width: C.width,
-            height: C.height - inputBarHeight - C.healthActionRowHeight - C.inputPadding
+            height: C.height - inputBarHeight - C.healthActionRowHeight - C.inputPadding - C.topControlsReservedHeight
         )
 
         // History view positioned above the base window height (invisible until expanded).
@@ -337,6 +358,7 @@ final class HUDWindow: NSPanel {
         dexterQuitButton = HUDIconButton(frame: dexterQuitRect)
         toggleButton = HUDIconButton(frame: toggleRect)
         muteButton   = NSButton(frame: muteRect)
+        tooltipLabel = NSTextField(labelWithString: "")
 
         super.init(
             contentRect: initRect,
@@ -513,6 +535,9 @@ final class HUDWindow: NSPanel {
         muteButton.action           = #selector(toggleMute)
         updateMuteIcon()
         effect.addSubview(muteButton)
+
+        configureTooltipLabel()
+        effect.addSubview(tooltipLabel, positioned: .above, relativeTo: nil)
     }
 
     // MARK: - Health
@@ -523,7 +548,7 @@ final class HUDWindow: NSPanel {
         button.bezelStyle = .rounded
         button.isBordered = true
         button.controlSize = .small
-        button.toolTip = "Restart \(target.displayName)"
+        button.toolTip = nil
 
         switch target {
         case .stt:
@@ -561,13 +586,53 @@ final class HUDWindow: NSPanel {
         button.isBordered = false
         if let iconButton = button as? HUDIconButton {
             iconButton.setChrome(restAlpha: alpha)
+            iconButton.onHoverChanged = { [weak self, weak button] hovering in
+                guard let self, let button else { return }
+                if hovering {
+                    self.showTooltip(toolTip, near: button.frame)
+                } else {
+                    self.hideTooltip()
+                }
+            }
         } else {
             button.alphaValue = alpha
         }
         button.autoresizingMask = autoresizingMask
         button.target = self
         button.action = action
-        button.toolTip = toolTip
+        button.toolTip = nil
+    }
+
+    private func configureTooltipLabel() {
+        tooltipLabel.isHidden = true
+        tooltipLabel.isEditable = false
+        tooltipLabel.isSelectable = false
+        tooltipLabel.isBezeled = false
+        tooltipLabel.drawsBackground = true
+        tooltipLabel.backgroundColor = NSColor.black.withAlphaComponent(0.78)
+        tooltipLabel.textColor = .white
+        tooltipLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        tooltipLabel.alignment = .center
+        tooltipLabel.lineBreakMode = .byTruncatingTail
+        tooltipLabel.wantsLayer = true
+        tooltipLabel.layer?.cornerRadius = 5
+        tooltipLabel.layer?.masksToBounds = true
+    }
+
+    private func showTooltip(_ text: String, near anchor: NSRect) {
+        tooltipLabel.stringValue = text
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: tooltipLabel.font as Any]).width)
+        let width = min(max(textWidth + 14, 54), C.width - C.inputPadding * 2)
+        let height: CGFloat = 22
+        var x = anchor.midX - width / 2
+        x = min(max(x, C.inputPadding), C.width - C.inputPadding - width)
+        let y = max(anchor.minY - height - 6, C.inputPadding + C.inputHeight + 4)
+        tooltipLabel.frame = NSRect(x: x, y: y, width: width, height: height)
+        tooltipLabel.isHidden = false
+    }
+
+    private func hideTooltip() {
+        tooltipLabel.isHidden = true
     }
 
     @objc private func requestHealth() {
@@ -644,6 +709,20 @@ final class HUDWindow: NSPanel {
 
     func showActionDiagnostic(_ markdown: String) {
         HUDSmokeLog.log("showActionDiagnostic chars=\(markdown.count)")
+        showUtilityMarkdown(markdown, restartTargets: [])
+    }
+
+    func showDiagnosticBundleStarting() {
+        HUDSmokeLog.log("showDiagnosticBundleStarting")
+        showUtilityMarkdown("""
+        ### Diagnostic Bundle
+
+        Creating a local diagnostic bundle...
+        """, restartTargets: [])
+    }
+
+    func showDiagnosticBundleResult(_ markdown: String) {
+        HUDSmokeLog.log("showDiagnosticBundleResult chars=\(markdown.count)")
         showUtilityMarkdown(markdown, restartTargets: [])
     }
 
@@ -752,6 +831,10 @@ final class HUDWindow: NSPanel {
 
     private func showUtilityMarkdown(_ markdown: String, restartTargets: [DexterWorkerRestartTarget]) {
         HUDSmokeLog.log("showUtilityMarkdown chars=\(markdown.count)")
+        if !restartTargets.isEmpty {
+            HUDSmokeLog.log("restartTargets=\(restartTargets.map(\.smokeName).joined(separator: ","))")
+        }
+        logLayoutForSmoke("utility")
         HUDSmokeLog.logMarkdownPreview(markdown)
         cancelDismiss()
         pendingTurnOperatorText = ""
@@ -774,6 +857,25 @@ final class HUDWindow: NSPanel {
         let hasActions = !targets.isEmpty
         healthActionsView.isHidden = !hasActions
         textArea.frame = hasActions ? textAreaWithHealthActionsFrame : textAreaNormalFrame
+        logLayoutForSmoke(hasActions ? "health-actions" : "normal")
+    }
+
+    private func logLayoutForSmoke(_ label: String) {
+        guard HUDSmokeLog.enabled else { return }
+        let textTop = textArea.frame.maxY
+        let safeTop = C.height - C.topControlsReservedHeight
+        let gap = safeTop - textTop
+        HUDSmokeLog.log(
+            String(
+                format: "layout %@ textTop=%.1f topSafe=%.1f topGap=%.1f textFrame=%@ healthActionsHidden=%@",
+                label,
+                textTop,
+                safeTop,
+                gap,
+                NSStringFromRect(textArea.frame),
+                healthActionsView.isHidden ? "true" : "false"
+            )
+        )
     }
 
     // MARK: - TTS mute toggle

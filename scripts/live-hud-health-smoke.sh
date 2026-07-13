@@ -154,6 +154,7 @@ start_swift_smoke() {
         cd "$SWIFT_DIR" || exit 2
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_HEALTH=1 \
+        DEXTER_HUD_SMOKE_SKIP_VOICE_CAPTURE=1 \
         DEXTER_HUD_SMOKE_RESTART_COMPONENT="$RESTART_COMPONENT" \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-3}" \
         DEXTER_HUD_SMOKE_RESTART_DELAY_SECS="${DEXTER_HUD_SMOKE_RESTART_DELAY_SECS:-3}" \
@@ -170,16 +171,18 @@ run_swift_silent_ready_smoke() {
         cd "$SWIFT_DIR" || exit 2
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_IDLE_ONLY=1 \
+        DEXTER_HUD_SMOKE_SKIP_VOICE_CAPTURE=1 \
         DEXTER_HUD_SMOKE_KEEP_CORE_ON_EXIT=1 \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS=1 \
-        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 \
+        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=14 \
         DEXTER_PROACTIVE_HEALTH_INITIAL_DELAY_SECS=2 \
         DEXTER_PROACTIVE_HEALTH_RETRY_DELAY_SECS=2 \
+        DEXTER_PROACTIVE_AMBIENT_INITIAL_DELAY_SECS=300 \
             swift run
     ) >> "$SILENT_SWIFT_LOG" 2>&1 &
     SWIFT_PID="$!"
 
-    wait_for_pattern "$SILENT_SWIFT_LOG" "[DexterClient] Proactive health probe silent status=ready" 30 || {
+    wait_for_pattern "$SILENT_SWIFT_LOG" "[DexterClient] Proactive health probe silent status=ready" 45 || {
         say "$FAIL" "Swift HUD silent-ready health smoke - proactive ready probe did not stay silent"
         tail -140 "$SILENT_SWIFT_LOG" || true
         tail -120 "$CORE_LOG" || true
@@ -269,7 +272,9 @@ run_assertions() {
     assert_contains "$name" "$SWIFT_LOG" "Current Context" || ok=1
     assert_contains_any "$name" "$SWIFT_LOG" "Dexter can:" "No focused app context" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "Latest Action Summary" || ok=1
-    assert_contains "$name" "$SWIFT_LOG" "Recent Ambient Events" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "Controls: restart STT, TTS, or browser from the buttons below." || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] restartTargets=stt,tts,browser" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] layout health-actions textTop=262.0 topSafe=262.0 topGap=0.0" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "action_succeeded" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "The latest audited action executed successfully." || ok=1
     assert_contains "$name" "$SWIFT_LOG" "Evidence: Succeeded:" || ok=1

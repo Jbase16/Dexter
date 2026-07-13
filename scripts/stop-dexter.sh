@@ -12,6 +12,7 @@ SWIFT_DIR="$ROOT_DIR/src/swift"
 SOCKET="/tmp/dexter.sock"
 SHELL_SOCKET="/tmp/dexter-shell.sock"
 RUN_PID_FILE="/tmp/dexter-make-run.pid"
+CORE_PID_FILE="/tmp/dexter-core.pid"
 CORE_ONLY=0
 QUIET=0
 
@@ -153,6 +154,23 @@ append_run_loop_pid() {
     fi
 }
 
+append_core_pid_file() {
+    if [[ ! -f "$CORE_PID_FILE" ]]; then
+        return 0
+    fi
+
+    local pid cwd
+    pid="$(tr -cd '0-9' < "$CORE_PID_FILE")"
+    if [[ -z "$pid" || "$pid" == "$$" || "$pid" == "$PPID" ]]; then
+        return 0
+    fi
+
+    cwd="$(process_cwd "$pid")"
+    if [[ "$cwd" == "$ROOT_DIR" ]]; then
+        append_pid "$pid"
+    fi
+}
+
 unique_pids() {
     if [[ "${#PIDS[@]}" -eq 0 ]]; then
         return 0
@@ -194,6 +212,7 @@ wait_for_exit() {
 
 PIDS=()
 append_run_loop_pid
+append_core_pid_file
 append_socket_owners
 append_pgrep "$ROOT_DIR/src/rust-core/target/release/dexter-core"
 append_pgrep "$ROOT_DIR/src/rust-core/target/debug/dexter-core"
@@ -236,4 +255,5 @@ rm -f "$SOCKET" "$SHELL_SOCKET"
 if [[ "$CORE_ONLY" -eq 0 ]]; then
     rm -f "$RUN_PID_FILE"
 fi
+rm -f "$CORE_PID_FILE"
 say "==> Dexter stopped"

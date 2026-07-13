@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     fs::{self, OpenOptions},
@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -33,6 +33,7 @@ pub const AMBIENT_ACKNOWLEDGEMENTS_FILENAME: &str = "ambient_acknowledgements.js
 const DEFAULT_ACTION_FAILURE_TRIGGER: &str = "Dexter action failures";
 const DEFAULT_DEGRADED_HEALTH_TRIGGER: &str = "Dexter degraded health";
 const DEFAULT_COMPONENT_RESTART_FAILURE_TRIGGER: &str = "Dexter component restart failures";
+const AMBIENT_INBOX_MAX_AGE_SECS: i64 = 10 * 60;
 
 #[derive(Debug)]
 pub enum AmbientStoreError {
@@ -174,6 +175,292 @@ impl AmbientEvent {
             payload,
         }
     }
+}
+
+pub fn is_action_failure_trigger_notice(event: &AmbientEvent) -> bool {
+    if ambient_key(&event.kind) != "triggermatched" {
+        return false;
+    }
+
+    let matched_kind = ambient_payload_string(event, "matched_event_kind")
+        .map(|value| ambient_key(&value))
+        .unwrap_or_default();
+    if matched_kind == "actionfailed" {
+        return true;
+    }
+
+    let trigger_name = ambient_payload_string(event, "trigger_name")
+        .map(|value| ambient_key(&value))
+        .unwrap_or_default();
+    if trigger_name == ambient_key(DEFAULT_ACTION_FAILURE_TRIGGER) {
+        return true;
+    }
+
+    ambient_key(&event.title).contains("dexteractionfailures")
+}
+
+pub fn display_ambient_event_kind(event: &AmbientEvent) -> String {
+    if is_action_failure_trigger_notice(event) {
+        "action_failed".to_string()
+    } else if is_trigger_followup_event(event) {
+        match ambient_key(&event.kind).as_str() {
+            "triggermatched" => "ambient_notice".to_string(),
+            "triggeractionapprovalrequested" => "ambient_approval_needed".to_string(),
+            "triggertaskcompleted" => "ambient_task_completed".to_string(),
+            _ => "ambient_notice".to_string(),
+        }
+    } else {
+        one_line(&event.kind)
+    }
+}
+
+pub fn display_ambient_event_title(event: &AmbientEvent) -> String {
+    if is_action_failure_trigger_notice(event) {
+        "Action failure noticed".to_string()
+    } else if is_trigger_followup_event(event) {
+        trigger_followup_display_title(event)
+    } else {
+        one_line(&event.title)
+    }
+}
+
+pub fn display_ambient_event_summary(event: &AmbientEvent) -> String {
+    if is_action_failure_trigger_notice(event) {
+        let description = action_failure_notice_description(event)
+            .unwrap_or_else(|| "A Dexter action failed.".to_string());
+        let description_key = ambient_key(&description);
+        if description_key.contains("openwhy") || description_key.contains("makewhy") {
+            description
+        } else {
+            format!(
+                "{description} Open Why or run `make why` for the action receipt before retrying."
+            )
+        }
+    } else if is_trigger_followup_event(event) {
+        trigger_followup_display_summary(event)
+    } else {
+        one_line(&event.summary)
+    }
+}
+
+pub fn action_failure_notice_description(event: &AmbientEvent) -> Option<String> {
+    ambient_payload_string(event, "matched_event_summary")
+        .or_else(|| {
+            ambient_payload_string(event, "matched_action_description")
+                .map(|description| format!("{description} failed."))
+        })
+        .or_else(|| {
+            let summary = one_line(&event.summary);
+            if summary.is_empty() || ambient_key(&summary).starts_with("ambienttrigger") {
+                None
+            } else {
+                Some(summary)
+            }
+        })
+}
+
+pub fn present_ambient_event_for_operator(event: &AmbientEvent) -> AmbientEvent {
+    let mut presented = event.clone();
+    presented.kind = display_ambient_event_kind(event);
+    presented.title = display_ambient_event_title(event);
+    presented.summary = display_ambient_event_summary(event);
+    presented
+}
+
+pub fn compact_ambient_events_for_operator(events: Vec<AmbientEvent>) -> Vec<AmbientEvent> {
+    let mut groups: HashMap<String, (usize, Vec<serde_json::Value>)> = HashMap::new();
+    for event in &events {
+        if let Some(group_key) = operator_group_key(event) {
+            let entry = groups.entry(group_key).or_insert_with(|| (0, Vec::new()));
+            entry.0 = entry.0.saturating_add(1);
+            if let Some(event_id) = operator_event_id_value(event) {
+                entry.1.push(event_id);
+            }
+        }
+    }
+
+    let mut emitted_groups = HashSet::new();
+    let mut compacted = Vec::with_capacity(events.len());
+
+    for event in events {
+        if let Some(group_key) = operator_group_key(&event) {
+            if emitted_groups.contains(&group_key) {
+                continue;
+            }
+            emitted_groups.insert(group_key.clone());
+            let mut presented = present_ambient_event_for_operator(&event);
+            let (group_count, grouped_event_ids) =
+                groups.get(&group_key).cloned().unwrap_or((1, Vec::new()));
+            apply_operator_group_copy(&mut presented, &event, group_count);
+            let mut payload = presented.payload.as_object().cloned().unwrap_or_default();
+            payload.insert(
+                "grouped_event_ids".to_string(),
+                serde_json::Value::Array(grouped_event_ids),
+            );
+            payload.insert(
+                "grouped_event_count".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(group_count as u64)),
+            );
+            presented.payload = serde_json::Value::Object(payload);
+            compacted.push(presented);
+        } else {
+            compacted.push(present_ambient_event_for_operator(&event));
+        }
+    }
+
+    compacted
+}
+
+fn is_trigger_followup_event(event: &AmbientEvent) -> bool {
+    matches!(
+        ambient_key(&event.kind).as_str(),
+        "triggermatched" | "triggeractionapprovalrequested" | "triggertaskcompleted"
+    )
+}
+
+fn operator_group_key(event: &AmbientEvent) -> Option<String> {
+    if is_action_failure_trigger_notice(event) {
+        return Some("trigger:action_failure".to_string());
+    }
+    if !is_trigger_followup_event(event) {
+        return None;
+    }
+
+    let trigger_name = trigger_followup_name(event);
+    let matched_kind = ambient_payload_string(event, "matched_event_kind")
+        .map(|value| ambient_key(&value))
+        .unwrap_or_default();
+    Some(format!(
+        "trigger:{}:{}:{}",
+        ambient_key(&event.kind),
+        ambient_key(&trigger_name),
+        matched_kind
+    ))
+}
+
+fn operator_event_id_value(event: &AmbientEvent) -> Option<serde_json::Value> {
+    let event_id = event.event_id.trim();
+    if event_id.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::String(event_id.to_string()))
+    }
+}
+
+fn apply_operator_group_copy(
+    presented: &mut AmbientEvent,
+    source_event: &AmbientEvent,
+    group_count: usize,
+) {
+    if group_count <= 1 {
+        return;
+    }
+
+    let extra_count = group_count.saturating_sub(1);
+    if is_action_failure_trigger_notice(source_event) {
+        presented.title = format!("{group_count} action failures noticed");
+        presented.summary = format!(
+            "Latest: {} {extra_count} more recent action-failure notice{} grouped.",
+            display_ambient_event_summary(source_event),
+            if extra_count == 1 { "" } else { "s" }
+        );
+        return;
+    }
+
+    presented.title = format!("{} ({group_count} similar notices)", presented.title);
+    presented.summary = format!(
+        "Latest: {} {extra_count} more similar ambient notice{} grouped.",
+        display_ambient_event_summary(source_event),
+        if extra_count == 1 { "" } else { "s" }
+    );
+}
+
+fn trigger_followup_name(event: &AmbientEvent) -> String {
+    ambient_payload_string(event, "trigger_name")
+        .or_else(|| strip_trigger_title_prefix(&event.title))
+        .unwrap_or_else(|| "ambient condition".to_string())
+}
+
+fn strip_trigger_title_prefix(title: &str) -> Option<String> {
+    let title = one_line(title);
+    for prefix in [
+        "Trigger matched:",
+        "Trigger needs approval:",
+        "Trigger task completed:",
+    ] {
+        if let Some(rest) = title.strip_prefix(prefix) {
+            let rest = one_line(rest);
+            if !rest.is_empty() {
+                return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+fn trigger_followup_display_title(event: &AmbientEvent) -> String {
+    let trigger_name = trigger_followup_name(event);
+    let trigger_key = ambient_key(&trigger_name);
+    match ambient_key(&event.kind).as_str() {
+        "triggermatched" if trigger_key == ambient_key(DEFAULT_DEGRADED_HEALTH_TRIGGER) => {
+            "Health warning noticed".to_string()
+        }
+        "triggermatched"
+            if trigger_key == ambient_key(DEFAULT_COMPONENT_RESTART_FAILURE_TRIGGER) =>
+        {
+            "Component restart warning noticed".to_string()
+        }
+        "triggermatched" => format!("Ambient notice: {trigger_name}"),
+        "triggeractionapprovalrequested" => format!("Ambient approval needed: {trigger_name}"),
+        "triggertaskcompleted" => format!("Ambient task completed: {trigger_name}"),
+        _ => format!("Ambient notice: {trigger_name}"),
+    }
+}
+
+fn trigger_followup_display_summary(event: &AmbientEvent) -> String {
+    let trigger_name = trigger_followup_name(event);
+    let matched_summary = ambient_payload_string(event, "matched_event_summary");
+    let matched_title = ambient_payload_string(event, "matched_event_title");
+    let matched_kind = ambient_payload_string(event, "matched_event_kind");
+    let source_description = matched_summary
+        .or(matched_title)
+        .or_else(|| matched_kind.map(|kind| format!("A {kind} event occurred.")))
+        .unwrap_or_else(|| "An ambient condition changed.".to_string());
+
+    match ambient_key(&event.kind).as_str() {
+        "triggeractionapprovalrequested" => format!(
+            "{source_description} Approval is required before Dexter runs the ambient action for \"{trigger_name}\"."
+        ),
+        "triggertaskcompleted" => ambient_payload_string(event, "task_result")
+            .unwrap_or_else(|| format!("{source_description} Dexter completed the ambient task for \"{trigger_name}\".")),
+        _ => format!("{source_description} Notice source: {trigger_name}."),
+    }
+}
+
+fn ambient_payload_string(event: &AmbientEvent, key: &str) -> Option<String> {
+    event
+        .payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(one_line)
+        .filter(|value| !value.is_empty())
+}
+
+fn one_line(value: &str) -> String {
+    value
+        .replace('\r', " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn ambient_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -433,6 +720,7 @@ pub fn unread_trigger_matches(
     let content = fs::read_to_string(&path)?;
     let lines: Vec<&str> = content.lines().collect();
     let mut events = Vec::with_capacity(limit.min(lines.len()));
+    let now = Utc::now();
     for (idx, line) in lines.iter().enumerate().rev() {
         let line = line.trim();
         if line.is_empty() {
@@ -447,6 +735,9 @@ pub fn unread_trigger_matches(
         if !is_inbox_event_kind(&event.kind) || event.status != AmbientEventStatus::New {
             continue;
         }
+        if is_stale_inbox_event(&event, now) {
+            continue;
+        }
         if acknowledged.contains(&event.event_id) {
             continue;
         }
@@ -457,6 +748,15 @@ pub fn unread_trigger_matches(
     }
 
     Ok((path, events))
+}
+
+fn is_stale_inbox_event(event: &AmbientEvent, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&event.timestamp)
+        .map(|timestamp| {
+            now.signed_duration_since(timestamp.with_timezone(&Utc))
+                > Duration::seconds(AMBIENT_INBOX_MAX_AGE_SECS)
+        })
+        .unwrap_or(false)
 }
 
 fn is_inbox_event_kind(kind: &str) -> bool {
@@ -604,15 +904,13 @@ fn build_trigger_notice_event(
     event: &AmbientEvent,
     trigger_match: &AmbientTriggerMatch,
 ) -> AmbientEvent {
+    let (title, summary) = trigger_notice_copy(event, trigger_match);
     AmbientEvent::new(
         "trigger",
         "trigger_matched",
         event.severity,
-        format!("Trigger matched: {}", trigger_match.name),
-        format!(
-            "Ambient trigger '{}' matched event '{}'.",
-            trigger_match.name, event.kind
-        ),
+        title,
+        summary,
         trigger_followup_payload(event, trigger_match, None),
     )
 }
@@ -660,12 +958,49 @@ fn trigger_followup_payload(
         "action": trigger_match.action.as_str(),
         "matched_event_id": event.event_id,
         "matched_event_kind": event.kind,
-        "matched_event_title": event.title
+        "matched_event_title": event.title,
+        "matched_event_summary": event.summary
     });
+    if let Some(description) = event
+        .payload
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        payload["matched_action_description"] = serde_json::Value::String(description.to_string());
+    }
     if let Some(task_result) = task_result {
         payload["task_result"] = serde_json::Value::String(task_result.to_string());
     }
     payload
+}
+
+fn trigger_notice_copy(
+    event: &AmbientEvent,
+    trigger_match: &AmbientTriggerMatch,
+) -> (String, String) {
+    if trigger_match.name == DEFAULT_ACTION_FAILURE_TRIGGER && event.kind == "action_failed" {
+        let description = event
+            .payload
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("the latest Dexter action");
+        return (
+            "Action failure noticed".to_string(),
+            format!("{description} failed. Open Why or run `make why` for the action receipt."),
+        );
+    }
+
+    (
+        format!("Trigger matched: {}", trigger_match.name),
+        format!(
+            "Ambient trigger '{}' matched event '{}'.",
+            trigger_match.name, event.kind
+        ),
+    )
 }
 
 fn deterministic_task_summary(event: &AmbientEvent) -> String {
@@ -927,6 +1262,45 @@ mod tests {
     }
 
     #[test]
+    fn action_failure_trigger_notice_names_failed_action_not_trigger_wrapper() {
+        let temp = TempDir::new().expect("tempdir");
+        let store = AmbientEventStore::new(temp.path());
+        store
+            .write_triggers(&[AmbientTrigger::new(
+                DEFAULT_ACTION_FAILURE_TRIGGER,
+                Some("action_failed".to_string()),
+                AmbientSeverity::Warn,
+                AmbientTriggerAction::NotifyOnly,
+            )])
+            .expect("write triggers");
+
+        let (_event, emitted) = store
+            .record_event_and_evaluate(
+                "action",
+                "action_failed",
+                AmbientSeverity::Warn,
+                "Action failed",
+                "Run: lsof -i :80 failed.",
+                json!({"description": "Run: lsof -i :80"}),
+            )
+            .expect("record failed action");
+
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].kind, "trigger_matched");
+        assert_eq!(emitted[0].title, "Action failure noticed");
+        assert!(emitted[0].summary.contains("Run: lsof -i :80 failed"));
+        assert!(emitted[0].summary.contains("make why"));
+        assert_eq!(
+            emitted[0].payload["matched_action_description"],
+            serde_json::Value::String("Run: lsof -i :80".to_string())
+        );
+        assert_eq!(
+            emitted[0].payload["matched_event_summary"],
+            serde_json::Value::String("Run: lsof -i :80 failed.".to_string())
+        );
+    }
+
+    #[test]
     fn ask_approval_trigger_emits_operator_approval_notice() {
         let temp = TempDir::new().expect("tempdir");
         let store = AmbientEventStore::new(temp.path());
@@ -1053,6 +1427,238 @@ mod tests {
             .find(|event| event.event_id == trigger_event.event_id)
             .expect("trigger event should remain in history");
         assert_eq!(acknowledged.status, AmbientEventStatus::Acknowledged);
+    }
+
+    #[test]
+    fn unread_trigger_matches_excludes_stale_backlog_events() {
+        let temp = TempDir::new().expect("tempdir");
+        let store = AmbientEventStore::new(temp.path());
+        let mut stale = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'action_failed'.",
+            json!({"matched_event_kind": "action_failed"}),
+        );
+        stale.timestamp =
+            (Utc::now() - Duration::seconds(AMBIENT_INBOX_MAX_AGE_SECS + 1)).to_rfc3339();
+        store.append_event(&stale).expect("append stale event");
+
+        let (_path, unread) = store.unread_trigger_matches(5).expect("read inbox");
+        assert!(
+            unread.is_empty(),
+            "stale trigger backlog should remain in history but not surface in proactive HUD inbox"
+        );
+
+        let (_path, history) = store.recent_events(5).expect("read history");
+        assert!(
+            history.iter().any(|event| event.event_id == stale.event_id),
+            "stale trigger backlog should remain inspectable in ambient history"
+        );
+    }
+
+    #[test]
+    fn action_failure_notice_display_tolerates_compact_kind_payload() {
+        let event = AmbientEvent::new(
+            "trigger",
+            "triggermatched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'actionfailed'.",
+            json!({
+                "trigger_name": "Dexter action failures",
+                "matched_event_kind": "actionfailed",
+                "matched_action_description": "Run: false"
+            }),
+        );
+
+        assert!(is_action_failure_trigger_notice(&event));
+        assert_eq!(display_ambient_event_kind(&event), "action_failed");
+        assert_eq!(
+            display_ambient_event_title(&event),
+            "Action failure noticed"
+        );
+        assert_eq!(
+            display_ambient_event_summary(&event),
+            "Run: false failed. Open Why or run `make why` for the action receipt before retrying."
+        );
+    }
+
+    #[test]
+    fn present_ambient_event_for_operator_removes_trigger_wrapper_copy() {
+        let event = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'action_failed'.",
+            json!({
+                "trigger_name": "Dexter action failures",
+                "matched_event_kind": "action_failed",
+                "matched_action_description": "Run: false"
+            }),
+        );
+
+        let presented = present_ambient_event_for_operator(&event);
+
+        assert_eq!(presented.kind, "action_failed");
+        assert_eq!(presented.title, "Action failure noticed");
+        assert!(presented.summary.contains("Run: false failed."));
+        assert!(!presented.title.contains("Trigger matched"));
+        assert!(!presented.summary.contains("Ambient trigger"));
+    }
+
+    #[test]
+    fn present_ambient_event_for_operator_translates_generic_trigger_notice() {
+        let event = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Ambient smoke health warnings",
+            "Ambient trigger 'Ambient smoke health warnings' matched event 'health_status_changed'.",
+            json!({
+                "trigger_name": "Ambient smoke health warnings",
+                "matched_event_kind": "health_status_changed",
+                "matched_event_title": "Dexter health pending",
+                "matched_event_summary": "Dexter is still warming PRIMARY."
+            }),
+        );
+
+        let presented = present_ambient_event_for_operator(&event);
+
+        assert_eq!(presented.kind, "ambient_notice");
+        assert_eq!(
+            presented.title,
+            "Ambient notice: Ambient smoke health warnings"
+        );
+        assert!(presented
+            .summary
+            .contains("Dexter is still warming PRIMARY."));
+        assert!(presented
+            .summary
+            .contains("Notice source: Ambient smoke health warnings."));
+        assert!(!presented.title.contains("Trigger matched"));
+        assert!(!presented.summary.contains("Ambient trigger"));
+    }
+
+    #[test]
+    fn compact_ambient_events_groups_repeated_action_failure_notices() {
+        let mut first = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'action_failed'.",
+            json!({
+                "trigger_name": "Dexter action failures",
+                "matched_event_kind": "action_failed",
+                "matched_action_description": "Run: first"
+            }),
+        );
+        first.event_id = "event-first".to_string();
+        let mut second = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'action_failed'.",
+            json!({
+                "trigger_name": "Dexter action failures",
+                "matched_event_kind": "action_failed",
+                "matched_action_description": "Run: second"
+            }),
+        );
+        second.event_id = "event-second".to_string();
+        let health = AmbientEvent::new(
+            "health",
+            "health_status_changed",
+            AmbientSeverity::Info,
+            "Dexter health ready",
+            "Daemon health changed to ready.",
+            json!({}),
+        );
+
+        let compacted = compact_ambient_events_for_operator(vec![first, second, health]);
+
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].kind, "action_failed");
+        assert_eq!(compacted[0].title, "2 action failures noticed");
+        assert!(compacted[0].summary.contains("Latest: Run: first failed."));
+        assert!(compacted[0]
+            .summary
+            .contains("1 more recent action-failure notice grouped."));
+        assert_eq!(compacted[1].kind, "health_status_changed");
+        let grouped = compacted[0]
+            .payload
+            .get("grouped_event_ids")
+            .and_then(serde_json::Value::as_array)
+            .expect("grouped ids");
+        assert_eq!(
+            grouped,
+            &vec![
+                serde_json::Value::String("event-first".to_string()),
+                serde_json::Value::String("event-second".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_ambient_events_groups_repeated_generic_trigger_notices() {
+        let mut first = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Ambient smoke health warnings",
+            "Ambient trigger 'Ambient smoke health warnings' matched event 'health_status_changed'.",
+            json!({
+                "trigger_name": "Ambient smoke health warnings",
+                "matched_event_kind": "health_status_changed",
+                "matched_event_summary": "Dexter is still warming PRIMARY."
+            }),
+        );
+        first.event_id = "health-trigger-first".to_string();
+        let mut second = first.clone();
+        second.event_id = "health-trigger-second".to_string();
+        second.payload["matched_event_summary"] =
+            serde_json::Value::String("Dexter is still warming EMBED.".to_string());
+        let daemon_started = AmbientEvent::new(
+            "daemon",
+            "daemon_started",
+            AmbientSeverity::Info,
+            "Dexter core started",
+            "Dexter daemon started.",
+            json!({}),
+        );
+
+        let compacted = compact_ambient_events_for_operator(vec![first, second, daemon_started]);
+
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].kind, "ambient_notice");
+        assert_eq!(
+            compacted[0].title,
+            "Ambient notice: Ambient smoke health warnings (2 similar notices)"
+        );
+        assert!(compacted[0]
+            .summary
+            .contains("Latest: Dexter is still warming PRIMARY."));
+        assert!(compacted[0]
+            .summary
+            .contains("1 more similar ambient notice grouped."));
+        assert!(!compacted[0].summary.contains("Ambient trigger"));
+        assert_eq!(compacted[1].kind, "daemon_started");
+        let grouped = compacted[0]
+            .payload
+            .get("grouped_event_ids")
+            .and_then(serde_json::Value::as_array)
+            .expect("grouped ids");
+        assert_eq!(
+            grouped,
+            &vec![
+                serde_json::Value::String("health-trigger-first".to_string()),
+                serde_json::Value::String("health-trigger-second".to_string())
+            ]
+        );
     }
 
     #[test]

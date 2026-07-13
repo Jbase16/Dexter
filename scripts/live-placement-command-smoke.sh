@@ -101,7 +101,7 @@ SWIFT_PID="$!"
 wait_for_log "$SWIFT_LOG" "[HUDSmoke] idleOnly" 90 \
     || fail "Swift app did not reach idle smoke state"
 
-for command in snap start stop; do
+for command in snap toggle toggle; do
     bash "$ROOT_DIR/scripts/dexter-place.sh" "$command"
     wait_for_log "$SWIFT_LOG" "[HUDSmoke] placement command=$command" 10 \
         || fail "Swift app did not receive placement command: $command"

@@ -20,7 +20,8 @@ must pass clicks through to the app underneath.
   - all transparent edge samples return `false`;
   - the rendered center returns `true`;
   - `isMovableByWindowBackground` remains disabled;
-  - the window itself does not set global `ignoresMouseEvents`.
+  - the window-level mouse-event gate enables events only while Dexter is
+    intentionally interactive.
 - `make live-smoke-placement-command` proves the external
   `scripts/dexter-place.sh` path reaches the running Swift app through
   `DistributedNotificationCenter`.
@@ -31,6 +32,13 @@ The prior smoke only checked a corner and the center. That would catch a square
 transparent blocker, but not a vertical or horizontal invisible strip through
 the middle of the entity window. The new cardinal-edge samples specifically
 guard against that regression.
+
+Phase 53 tightened the same fix at the window-server boundary: the panel now
+keeps `ignoresMouseEvents` enabled while the cursor is outside the rendered orb,
+then disables it only while the pointer is over Dexter or while an intentional
+placement/drag is active. That preserves click-through behavior even when
+AppKit would otherwise treat the transparent top-level panel as a rectangle
+before view-level hit testing can decline the event.
 
 ## Verification
 

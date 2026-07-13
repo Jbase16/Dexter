@@ -17,6 +17,10 @@ use crate::action::{ActionOutcome, ActionSpec};
 const SCHEMA_VERSION: &str = "context_turn_record_v1";
 const USER_PREVIEW_CHARS: usize = 180;
 const OUTPUT_PREVIEW_CHARS: usize = 240;
+const ACTION_DIAGNOSTIC_DETAIL_CHARS: usize = 240;
+const ACTION_DIAGNOSTIC_RECOVERY_CHARS: usize = 240;
+const ACTION_DIAGNOSTIC_TARGET_CHARS: usize = 320;
+const ACTION_DIAGNOSTIC_EVIDENCE_CHARS: usize = 520;
 
 #[derive(Debug, Error)]
 pub enum TurnRecordError {
@@ -98,6 +102,25 @@ pub struct ActionRecord {
     pub stdout_hash: Option<String>,
     pub stderr_hash: Option<String>,
     pub error_kind: Option<String>,
+    pub diagnostic: Option<ActionDiagnosticRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionDiagnosticSource {
+    Browser,
+    UiWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionDiagnosticRecord {
+    pub source: ActionDiagnosticSource,
+    pub failure_kind: String,
+    pub recovery_directive: Option<String>,
+    pub recovery_hint: Option<String>,
+    pub detail_preview: Option<String>,
+    pub target_preview: Option<String>,
+    pub evidence_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,20 +237,20 @@ impl TurnRecordAggregator {
             .get_mut(trace_id)
             .ok_or_else(|| TurnRecordError::MissingTrace(trace_id.to_string()))?;
         record.updated_at = Utc::now();
-        let (action_id, stdout_hash, stderr_hash, error_kind, outcome_label, close_reason) =
-            action_summary(outcome);
+        let summary = action_summary(outcome);
         record.action = Some(ActionRecord {
-            action_id,
+            action_id: summary.action_id,
             receipt_id: None,
             action_kind: action_type.to_string(),
             policy: policy.map(ToOwned::to_owned),
             duration_ms: None,
-            stdout_hash,
-            stderr_hash,
-            error_kind,
+            stdout_hash: summary.stdout_hash,
+            stderr_hash: summary.stderr_hash,
+            error_kind: summary.error_kind,
+            diagnostic: summary.diagnostic,
         });
-        record.outcome_label = outcome_label;
-        record.close_reason = close_reason;
+        record.outcome_label = summary.outcome_label;
+        record.close_reason = summary.close_reason;
         let cloned = record.clone();
         self.write_record(&cloned)
     }
@@ -362,16 +385,17 @@ fn action_kind(spec: &ActionSpec) -> &'static str {
     }
 }
 
-fn action_summary(
-    outcome: &ActionOutcome,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    TurnOutcomeLabel,
-    TurnCloseReason,
-) {
+struct ActionSummary {
+    action_id: Option<String>,
+    stdout_hash: Option<String>,
+    stderr_hash: Option<String>,
+    error_kind: Option<String>,
+    diagnostic: Option<ActionDiagnosticRecord>,
+    outcome_label: TurnOutcomeLabel,
+    close_reason: TurnCloseReason,
+}
+
+fn action_summary(outcome: &ActionOutcome) -> ActionSummary {
     match outcome {
         ActionOutcome::Completed {
             action_id, output, ..
@@ -379,32 +403,204 @@ fn action_summary(
             // ActionEngine uses `Completed` for semantically successful actions.
             // If future executors distinguish non-zero process exits inside this
             // variant, ledger learning must stop treating this as a success label.
-            (
-                Some(action_id.clone()),
-                Some(fingerprint(output)),
-                None,
-                None,
-                TurnOutcomeLabel::ActionExecutedSuccessfully,
-                TurnCloseReason::ActionCompleted,
-            )
+            ActionSummary {
+                action_id: Some(action_id.clone()),
+                stdout_hash: Some(fingerprint(output)),
+                stderr_hash: None,
+                error_kind: None,
+                diagnostic: None,
+                outcome_label: TurnOutcomeLabel::ActionExecutedSuccessfully,
+                close_reason: TurnCloseReason::ActionCompleted,
+            }
         }
-        ActionOutcome::Rejected { action_id, error } => (
-            Some(action_id.clone()),
-            None,
-            Some(fingerprint(error)),
-            Some(classify_action_error(error).to_string()),
-            TurnOutcomeLabel::ActionRejectedByPolicy,
-            TurnCloseReason::ActionRejected,
-        ),
-        ActionOutcome::PendingApproval { action_id, .. } => (
-            Some(action_id.clone()),
-            None,
-            None,
-            Some("pending_approval".to_string()),
-            TurnOutcomeLabel::Unknown,
-            TurnCloseReason::Open,
-        ),
+        ActionOutcome::Rejected { action_id, error } => ActionSummary {
+            action_id: Some(action_id.clone()),
+            stdout_hash: None,
+            stderr_hash: Some(fingerprint(error)),
+            error_kind: Some(classify_action_error(error).to_string()),
+            diagnostic: structured_action_diagnostic(error),
+            outcome_label: TurnOutcomeLabel::ActionRejectedByPolicy,
+            close_reason: TurnCloseReason::ActionRejected,
+        },
+        ActionOutcome::PendingApproval { action_id, .. } => ActionSummary {
+            action_id: Some(action_id.clone()),
+            stdout_hash: None,
+            stderr_hash: None,
+            error_kind: Some("pending_approval".to_string()),
+            diagnostic: None,
+            outcome_label: TurnOutcomeLabel::Unknown,
+            close_reason: TurnCloseReason::Open,
+        },
     }
+}
+
+fn structured_action_diagnostic(error: &str) -> Option<ActionDiagnosticRecord> {
+    parse_ui_action_diagnostic(error).or_else(|| parse_browser_action_diagnostic(error))
+}
+
+fn parse_ui_action_diagnostic(error: &str) -> Option<ActionDiagnosticRecord> {
+    let (failure_kind, body) = bracketed_failure_body(error, "UI failure [")?;
+    let detail = marker_segment(body, "Detail:")
+        .or_else(|| segment_until_any(body, &["Recovery:", "Next [", "Target:", "Evidence:"]));
+    Some(ActionDiagnosticRecord {
+        source: ActionDiagnosticSource::UiWindow,
+        failure_kind,
+        recovery_directive: next_directive(body),
+        recovery_hint: marker_segment(body, "Recovery:")
+            .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_RECOVERY_CHARS)),
+        detail_preview: detail
+            .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_DETAIL_CHARS)),
+        target_preview: marker_segment(body, "Target:")
+            .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_TARGET_CHARS)),
+        evidence_preview: marker_segment(body, "Evidence:")
+            .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_EVIDENCE_CHARS)),
+    })
+}
+
+fn parse_browser_action_diagnostic(error: &str) -> Option<ActionDiagnosticRecord> {
+    let (failure_kind, body) = bracketed_failure_body(error, "Browser failure [")?;
+    Some(ActionDiagnosticRecord {
+        source: ActionDiagnosticSource::Browser,
+        failure_kind,
+        recovery_directive: next_directive(body),
+        recovery_hint: marker_segment(body, "Recovery:")
+            .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_RECOVERY_CHARS)),
+        detail_preview: segment_until_any(body, &["Recovery:", "Next ["])
+            .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_DETAIL_CHARS)),
+        target_preview: browser_target_preview(body),
+        evidence_preview: browser_evidence_preview(body),
+    })
+}
+
+fn bracketed_failure_body<'a>(error: &'a str, prefix: &str) -> Option<(String, &'a str)> {
+    let rest = error.strip_prefix(prefix)?;
+    let (kind, after_kind) = rest.split_once(']')?;
+    let body = after_kind.trim_start_matches(|c: char| c == ':' || c == '.' || c.is_whitespace());
+    Some((kind.trim().to_string(), body))
+}
+
+fn next_directive(value: &str) -> Option<String> {
+    let (_, rest) = value.split_once("Next [")?;
+    let (directive, _) = rest.split_once(']')?;
+    let directive = directive.trim();
+    if directive.is_empty() {
+        None
+    } else {
+        Some(directive.to_string())
+    }
+}
+
+fn marker_segment(value: &str, marker: &str) -> Option<String> {
+    let (_, rest) = value.split_once(marker)?;
+    segment_until_any(
+        rest,
+        &["Recovery:", "Next [", "Detail:", "Target:", "Evidence:"],
+    )
+}
+
+fn segment_until_any(value: &str, markers: &[&str]) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let end = markers
+        .iter()
+        .filter_map(|marker| trimmed.find(marker))
+        .filter(|idx| *idx > 0)
+        .min()
+        .unwrap_or(trimmed.len());
+    let segment = trimmed[..end].trim().trim_end_matches('.').trim();
+    if segment.is_empty() {
+        None
+    } else {
+        Some(segment.to_string())
+    }
+}
+
+fn browser_target_preview(body: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for field in ["selector", "page_url", "page_title"] {
+        if let Some(value) = delimited_field(body, field) {
+            parts.push(format!("{field}={value}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(compact_diagnostic_text(
+            &parts.join("; "),
+            ACTION_DIAGNOSTIC_TARGET_CHARS,
+        ))
+    }
+}
+
+fn browser_evidence_preview(body: &str) -> Option<String> {
+    delimited_field(body, "replan_page_state")
+        .or_else(|| delimited_field(body, "error"))
+        .map(|value| compact_diagnostic_text(&value, ACTION_DIAGNOSTIC_EVIDENCE_CHARS))
+}
+
+fn delimited_field(value: &str, field: &str) -> Option<String> {
+    let marker = format!("{field}=");
+    let start = value.find(&marker)? + marker.len();
+    let rest = &value[start..];
+    let end = rest
+        .find("; ")
+        .or_else(|| rest.find(" Recovery:"))
+        .or_else(|| rest.find(" Next ["))
+        .unwrap_or(rest.len());
+    let field_value = rest[..end].trim().trim_end_matches('.').trim();
+    if field_value.is_empty() {
+        None
+    } else {
+        Some(field_value.to_string())
+    }
+}
+
+fn compact_diagnostic_text(value: &str, max_chars: usize) -> String {
+    let redacted = redact_sensitive_fields(value);
+    let cleaned = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.chars().count() <= max_chars {
+        return cleaned;
+    }
+    let mut truncated = cleaned
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn redact_sensitive_fields(value: &str) -> String {
+    let mut output = String::new();
+    let mut rest = value;
+    while let Some(idx) = rest.find("text=") {
+        output.push_str(&rest[..idx]);
+        output.push_str("text=<redacted>");
+        let after_marker = &rest[idx + "text=".len()..];
+        let skip = sensitive_field_value_len(after_marker);
+        rest = &after_marker[skip..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn sensitive_field_value_len(value: &str) -> usize {
+    if let Some(remaining) = value.strip_prefix("<redacted>") {
+        return value.len() - remaining.len();
+    }
+    if let Some(stripped) = value.strip_prefix('\'') {
+        return stripped
+            .find('\'')
+            .map(|idx| idx + 2)
+            .unwrap_or(value.len());
+    }
+    if let Some(stripped) = value.strip_prefix('"') {
+        return stripped.find('"').map(|idx| idx + 2).unwrap_or(value.len());
+    }
+    value
+        .find(|c: char| c.is_whitespace() || c == ';' || c == '.')
+        .unwrap_or(value.len())
 }
 
 fn classify_action_error(error: &str) -> &'static str {
@@ -430,6 +626,7 @@ fn outcome_for_close_reason(reason: TurnCloseReason) -> TurnOutcomeLabel {
         TurnCloseReason::CancelledByUser | TurnCloseReason::BargeIn => {
             TurnOutcomeLabel::UserCancelled
         }
+        TurnCloseReason::GenerationFailed => TurnOutcomeLabel::GenerationFailed,
         _ => TurnOutcomeLabel::Unknown,
     }
 }
@@ -574,6 +771,89 @@ mod tests {
         let json = fs::read_to_string(recorder.record_path_for_trace("trace-privacy")).unwrap();
         assert!(!json.contains("PRIVATE_SECRET_CONTEXT_PAYLOAD"));
         assert!(json.contains("user_text_hash"));
+    }
+
+    #[test]
+    fn action_result_records_ui_failure_diagnostic_without_raw_typed_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = TurnRecordAggregator::new(tmp.path());
+        recorder
+            .start_turn(dispatch_input("trace-ui-diag"))
+            .unwrap();
+        let outcome = ActionOutcome::Rejected {
+            action_id: "action-ui".to_string(),
+            error: "UI failure [not_typeable]: Recovery: Target a visible editable text field or text area. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly. Detail: ui type failed: matched control is disabled. Target: action=ui_type app=Fixture window='Fixture' role=AXTextField label='Secret field' text='super secret typed value'. Evidence: matched_control: AXTextField | name='Secret field' | enabled=false".to_string(),
+        };
+
+        recorder
+            .attach_action_result("trace-ui-diag", "ui_type", Some("safe"), &outcome)
+            .unwrap();
+
+        let json = fs::read_to_string(recorder.record_path_for_trace("trace-ui-diag")).unwrap();
+        assert!(!json.contains("super secret typed value"));
+        assert!(json.contains("text=<redacted>"));
+
+        let record: ContextTurnRecord = serde_json::from_str(&json).unwrap();
+        let diagnostic = record
+            .action
+            .expect("action record")
+            .diagnostic
+            .expect("ui diagnostic");
+        assert_eq!(diagnostic.source, ActionDiagnosticSource::UiWindow);
+        assert_eq!(diagnostic.failure_kind, "not_typeable");
+        assert_eq!(
+            diagnostic.recovery_directive.as_deref(),
+            Some("snapshot_then_replan")
+        );
+        assert!(diagnostic
+            .target_preview
+            .as_deref()
+            .is_some_and(|target| target.contains("role=AXTextField")));
+        assert!(diagnostic
+            .evidence_preview
+            .as_deref()
+            .is_some_and(|evidence| evidence.contains("enabled=false")));
+    }
+
+    #[test]
+    fn action_result_records_browser_failure_diagnostic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = TurnRecordAggregator::new(tmp.path());
+        recorder
+            .start_turn(dispatch_input("trace-browser-diag"))
+            .unwrap();
+        let outcome = ActionOutcome::Rejected {
+            action_id: "action-browser".to_string(),
+            error: "Browser failure [selector_not_found]: selector=#missing; page_url=file:///tmp/page.html; page_title=Example; error=element not found; replan_page_state=#real-button button \"Real\" Recovery: Inspect or extract the page before retrying with a selector that exists. Next [extract_page_then_replan]: Do not repeat the same selector.".to_string(),
+        };
+
+        recorder
+            .attach_action_result("trace-browser-diag", "browser", Some("safe"), &outcome)
+            .unwrap();
+
+        let record: ContextTurnRecord = serde_json::from_slice(
+            &fs::read(recorder.record_path_for_trace("trace-browser-diag")).unwrap(),
+        )
+        .unwrap();
+        let diagnostic = record
+            .action
+            .expect("action record")
+            .diagnostic
+            .expect("browser diagnostic");
+        assert_eq!(diagnostic.source, ActionDiagnosticSource::Browser);
+        assert_eq!(diagnostic.failure_kind, "selector_not_found");
+        assert_eq!(
+            diagnostic.recovery_directive.as_deref(),
+            Some("extract_page_then_replan")
+        );
+        assert!(diagnostic
+            .target_preview
+            .as_deref()
+            .is_some_and(|target| target.contains("selector=#missing")));
+        assert!(diagnostic
+            .evidence_preview
+            .as_deref()
+            .is_some_and(|evidence| evidence.contains("#real-button")));
     }
 
     #[test]

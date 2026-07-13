@@ -10,7 +10,7 @@ operator-facing readiness surface.
 - Added `make live-smoke-acceptance`.
 - The target runs the union of:
   - operator controls;
-  - runtime health;
+  - runtime health and deterministic local answers;
   - action safety.
 - The target calls `scripts/live-smoke-summary.sh` directly with the combined
   target list, so it produces one timestamped receipt instead of nested

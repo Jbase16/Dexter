@@ -108,9 +108,13 @@ grep -Fq "health_status_changed" "$EVENTS_OUT" \
     || fail "ambient event queue did not include health_status_changed"
 grep -Fq "Dexter health ready" "$EVENTS_OUT" \
     || fail "ambient event queue did not include ready health transition"
-grep -Fq "trigger_matched" "$EVENTS_OUT" \
-    || fail "ambient event queue did not include trigger_matched"
 grep -Fq "Ambient smoke health warnings" "$EVENTS_OUT" \
     || fail "ambient trigger match did not name the temporary trigger"
+grep -Fq "ambient_notice" "$EVENTS_OUT" \
+    || fail "ambient event queue did not include translated ambient_notice"
+grep -Fq "Trigger matched:" "$EVENTS_OUT" \
+    && fail "ambient event queue exposed raw trigger title"
+grep -Fq "trigger_matched" "$EVENTS_OUT" \
+    && fail "ambient event queue exposed raw trigger_matched kind"
 
 say PASS "ambient events smoke passed"

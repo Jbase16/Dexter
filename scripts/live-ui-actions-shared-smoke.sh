@@ -567,24 +567,13 @@ start_core() {
     done
     socket_accepts || fail "shared core did not open socket within 90s"
 
-    waited=0
-    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
-        "$CLI_BIN" --doctor >/tmp/dexter-ui-actions-shared-doctor.out 2>&1 || true
-        if grep -Fq "OK   daemon health      status ready" /tmp/dexter-ui-actions-shared-doctor.out \
-            && grep -Fq "Result: OK - no failed checks." /tmp/dexter-ui-actions-shared-doctor.out; then
-            say INFO "shared core doctor-ready after ${waited}s"
-            return
-        fi
-        if ! kill -0 "$CORE_PID" >/dev/null 2>&1; then
-            fail "shared core exited during warmup"
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    say INFO "last doctor report:"
-    cat /tmp/dexter-ui-actions-shared-doctor.out 2>/dev/null || true
-    fail "shared core did not become doctor-ready within ${CORE_WARMUP_TIMEOUT_SECS}s"
+    bash "$ROOT_DIR/scripts/wait-for-ready.sh" \
+        --cli-bin "$CLI_BIN" \
+        --timeout "$CORE_WARMUP_TIMEOUT_SECS" \
+        --out /tmp/dexter-ui-actions-shared-doctor.out \
+        --label "shared core" \
+        --core-pid "$CORE_PID" \
+        --core-log "$CORE_LOG"
 }
 
 start_fixture() {

@@ -41,13 +41,14 @@ runs:
 
 ```bash
 export OLLAMA_MODELS=/Users/jason/ollama-models
-make configure-ollama-models && make stop && make run
+scripts/restart-dexter-ui.sh
 ```
 
 That gives Dexter a normal Dock/app entry while keeping the live Rust and Swift
 logs visible in the associated Terminal window. The launcher reasserts the local
-hot model store before startup so ordinary Dock launches and HUD restarts use
-the same model-storage assumptions as `make operator-ready`.
+hot model store and passes the Dock app path into the lifecycle script, so
+ordinary Dock launches and HUD restarts use the same detached-core startup,
+readiness, and cleanup path.
 
 ## App Menu
 
@@ -55,22 +56,36 @@ The Dexter menu exposes the controls that should not require hunting for the
 original `make run` terminal:
 
 - `Dexter > New Session`
+- `Dexter > Show Dexter Status`
+- `Dexter > Show Recent Actions`
+- `Dexter > Explain Latest Action`
+- `Dexter > Create Diagnostic Bundle`
 - `Dexter > Move Dexter to Mouse`
-- `Dexter > Start Dexter Placement Drag`
+- `Dexter > Toggle Dexter Placement Drag`
 - `Dexter > Stop Dexter Placement Drag`
 - `Dexter > Restart Dexter`
 - `Dexter > Quit Dexter`
 
 `Restart Dexter` and `Quit Dexter` first show a short HUD confirmation, then
 restart or terminate the Swift app and Rust core. `New Session` keeps the app
-running and opens a fresh gRPC session.
+running and opens a fresh gRPC session. `Create Diagnostic Bundle` writes the
+same local markdown report as `make diagnostic-bundle` and shows the report
+paths in the HUD.
+
+The restart path is Terminal-backed for live logs, but the lifecycle itself is
+centralized in `scripts/restart-dexter-ui.sh`: it reasserts
+`OLLAMA_MODELS`, uses `make restart-core` for the detached core, tails
+`/tmp/dexter-core.log`, runs `make run-swift`, and stops the core when that
+Terminal-backed Swift session exits.
 
 Regression coverage:
 
 ```bash
 make live-smoke-operator-controls
+make live-smoke-detached-core
 make live-smoke-hud-new-session
 make live-smoke-hud-lifecycle
+make live-smoke-hud-diagnostic-bundle
 make live-smoke-process-control
 make live-smoke-run-loop-lifecycle
 make live-smoke-stale-swift-stop
@@ -80,9 +95,11 @@ make live-smoke-dock-launcher
 ```
 
 `make live-smoke-operator-controls` is the focused acceptance slice for the
-operator-facing controls: Dock launcher metadata, external stop, labeled stop
-output, UI restart/quit through the normal run loop, stale Swift cleanup, and
-placement click-through plus external placement command delivery.
+operator-facing controls: Dock launcher metadata and centralized Terminal
+lifecycle command, detached core lifecycle,
+external stop, labeled stop output, UI restart/quit through the normal run loop,
+stale Swift cleanup, and placement click-through plus external placement
+command delivery.
 
 The new-session smoke launches the real Swift app, triggers the HUD New Session
 path, and verifies the daemon opens a fresh session without restarting the core.
@@ -105,10 +122,15 @@ current directory without starting a live session. The Dock launcher smoke
 installs the wrapper into a temporary app bundle and validates its metadata and
 Terminal-backed launch command without opening Terminal.
 
-For Contacts-backed iMessage sends, `make live-smoke-message-contact` remains
-opt-in because it needs a real Contacts entry, but denial mode does not send a
-message. It now verifies the latest action receipt shows a resolved
-Contacts-backed Messages AppleScript target and `Denied before execution.`
+For Contacts-backed iMessage sends, `make live-smoke-message-contact-dry-run`
+is the safest first probe: it asks for a deliberately missing Contacts name and
+verifies Dexter's deterministic text-message parser reaches Rust-side Contacts
+resolution and refuses before approval or delivery. `make
+live-smoke-message-contact` remains opt-in because it needs a real Contacts
+entry, but denial mode does not send a message. It verifies the latest action
+receipt shows a resolved Contacts-backed Messages AppleScript target and
+`Denied before execution.` The local v1 proof used `Jason Phillips` in deny
+mode, which resolves the recipient and proves the approval gate without sending.
 
 ## Placement
 
@@ -174,18 +196,24 @@ Regression coverage:
 ```bash
 make live-smoke-runtime-health
 make live-smoke-startup-readiness
+make live-smoke-local-answers
 make live-smoke-hud-unavailable-health
 ```
 
 `make live-smoke-runtime-health` is the focused acceptance slice for startup
-and health/status behavior: readiness gating, CLI status, HUD status plus worker
-restart, and HUD recovery guidance when the Rust core is unreachable.
+and health/status behavior: readiness gating, deterministic local answers for
+RAM/CPU/Dexter Notices, CLI status, HUD status plus worker restart, and HUD
+recovery guidance when the Rust core is unreachable.
 
 That smoke starts the release core without Swift, verifies the socket gate,
 waits for doctor-clean daemon health through `make wait-for-ready`, and confirms
 the owned daemon exits without stale sockets. The unavailable-health smoke
 launches the real Swift HUD with no Rust core and verifies the health surface
 renders actionable recovery guidance instead of only a connection error.
+The local-answers smoke sends ordinary operator questions like "what's using so
+much RAM right now?" and "what do those Dexter Notices mean?" through
+`dexter-cli` and verifies Dexter answers from macOS process/memory telemetry or
+ambient-event state instead of model speculation.
 
 Worker recovery commands restart only daemon-lifetime Python workers. They do
 not unload, reload, or otherwise churn Ollama models:
@@ -195,6 +223,12 @@ make restart-stt
 make restart-tts
 make restart-browser
 ```
+
+The HUD Status surface exposes the same worker controls directly. Open Status
+from Dexter's HUD and use the restart buttons for STT, TTS, or Browser when a
+worker is stale, noisy, or behaving oddly. These buttons call the daemon
+`RestartComponent` RPC; they do not route through the model and do not execute
+arbitrary actions.
 
 ## Diagnostic bundle
 
@@ -258,6 +292,8 @@ and side effects, with a fresh daemon per target and fail-fast behavior:
 - `dexter-cli --why` can explain the latest blocked action from local evidence;
 - shell, file, browser, AppleScript, window, and UI action lanes hit the right
   policy gate;
+- failed UI/browser action outcomes are persisted as privacy-safe C3 turn
+  records with typed diagnostics;
 - deterministic browser recovery produces typed evidence instead of corrupting
   browser health;
 - safe, denied, approved, and expired actions leave readable audit receipts;
@@ -280,6 +316,7 @@ smokes. Those remain separate because they depend on local Contacts data and,
 in the approve variant, can send a real message:
 
 ```bash
+make live-smoke-message-contact-dry-run
 make live-smoke-message-contact
 DEXTER_SMOKE_CONTACT_NAME="Jason Phillips" DEXTER_SMOKE_ALLOW_REAL_SEND=1 make live-smoke-message-contact-approve
 ```
@@ -294,10 +331,10 @@ make acceptance-status-strict
 
 That report reads `docs/live-smoke-results/live-smoke-*.md` and shows the most
 recent passing receipt for the combined acceptance battery plus operator
-controls, runtime health, and action safety. The diagnostic bundle includes the
-same section so a single report can answer which major acceptance slices have
-already passed. The strict variant exits non-zero if any required acceptance
-slice has no passing saved receipt.
+controls, runtime health, action safety, and the full action/HUD sweep. The
+diagnostic bundle includes the same section so a single report can answer which
+major acceptance slices have already passed. The strict variant exits non-zero
+if any required acceptance slice has no passing saved receipt.
 
 To generate one fresh receipt for all three focused acceptance slices:
 
@@ -309,3 +346,22 @@ That command runs the union of `live-smoke-operator-controls`,
 `live-smoke-runtime-health`, and `live-smoke-action-safety` without nesting
 summary runs. It still leaves opt-in Contacts/iMessage tests and the broader
 experimental/full-suite checks as separate commands.
+
+For the Daily-driver v1 release gate, run:
+
+```bash
+make daily-driver-v1-gate
+```
+
+That runs the combined acceptance battery, the full action/HUD/model-driven
+browser recovery sweep, strict acceptance-status verification, and then prints
+the short manual checklist. To print only the manual checklist:
+
+```bash
+make daily-driver-v1-checklist
+```
+
+The v1 gate still excludes real-send Contacts/iMessage checks unless you opt in
+with the explicit messaging smoke commands above. Voice remains maintenance-only
+for v1: existing STT/TTS health and restart behavior must stay intact, but
+richer voice UX is not a release blocker.

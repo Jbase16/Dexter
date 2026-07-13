@@ -166,24 +166,32 @@ say INFO "driving failed synthetic action"
 "$CLI_BIN" --events --limit 120 >"$EVENTS_OUT"
 "$CLI_BIN" --inbox --limit 120 >"$INBOX_OUT"
 
-grep -Fq "trigger_action_approval_requested" "$EVENTS_OUT" \
-    || fail "ask-approval trigger did not emit approval-request event"
+grep -Fq "ambient_approval_needed" "$EVENTS_OUT" \
+    || fail "ask-approval trigger did not emit translated approval-needed event"
 grep -Fq "$approval_trigger" "$EVENTS_OUT" \
     || fail "approval-request event did not mention unique trigger"
-grep -Fq "waiting for operator approval" "$EVENTS_OUT" \
+grep -Fq "Approval is required" "$EVENTS_OUT" \
     || fail "approval-request event did not include operator approval copy"
-grep -Fq "trigger_task_completed" "$EVENTS_OUT" \
-    || fail "start-task trigger did not emit deterministic task event"
+grep -Fq "ambient_task_completed" "$EVENTS_OUT" \
+    || fail "start-task trigger did not emit translated deterministic task event"
 grep -Fq "$task_trigger" "$EVENTS_OUT" \
     || fail "task event did not mention unique trigger"
 grep -Fq "$token" "$EVENTS_OUT" \
     || fail "task/trigger events did not preserve failed action token"
 grep -Fq "make why" "$EVENTS_OUT" \
     || fail "deterministic task event did not include diagnostic next step"
+grep -Fq "trigger_action_approval_requested" "$EVENTS_OUT" \
+    && fail "ambient events exposed raw approval trigger kind"
+grep -Fq "trigger_task_completed" "$EVENTS_OUT" \
+    && fail "ambient events exposed raw task trigger kind"
 
-grep -Fq "trigger_action_approval_requested" "$INBOX_OUT" \
+grep -Fq "ambient_approval_needed" "$INBOX_OUT" \
     || fail "approval-request event did not appear in ambient inbox"
-grep -Fq "trigger_task_completed" "$INBOX_OUT" \
+grep -Fq "ambient_task_completed" "$INBOX_OUT" \
     || fail "task event did not appear in ambient inbox"
+grep -Fq "trigger_action_approval_requested" "$INBOX_OUT" \
+    && fail "ambient inbox exposed raw approval trigger kind"
+grep -Fq "trigger_task_completed" "$INBOX_OUT" \
+    && fail "ambient inbox exposed raw task trigger kind"
 
 say PASS "ambient trigger action smoke passed"

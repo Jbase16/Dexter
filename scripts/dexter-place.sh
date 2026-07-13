@@ -12,8 +12,11 @@ case "$raw_command" in
   stop|release|end)
     command="stop"
     ;;
+  toggle|switch)
+    command="toggle"
+    ;;
   *)
-    echo "usage: $0 [snap|move|center|start|hold|drag|stop|release|end]" >&2
+    echo "usage: $0 [snap|move|center|start|hold|drag|stop|release|end|toggle|switch]" >&2
     exit 2
     ;;
 esac

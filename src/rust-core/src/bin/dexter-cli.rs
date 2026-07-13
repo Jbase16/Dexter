@@ -1326,9 +1326,12 @@ fn operator_status_ambient_events(
     events: Vec<AmbientEvent>,
     ambient_limit: usize,
 ) -> Vec<AmbientEvent> {
-    events
+    let filtered: Vec<AmbientEvent> = events
         .into_iter()
         .filter(|event| !is_operator_status_smoke_ambient_event(event))
+        .collect();
+    ambient::compact_ambient_events_for_operator(filtered)
+        .into_iter()
         .take(ambient_limit)
         .collect()
 }
@@ -1956,23 +1959,65 @@ fn print_ambient_events(path: &Path, events: &[AmbientEvent]) {
         return;
     }
 
-    for event in events {
+    let events = ambient::compact_ambient_events_for_operator(events.to_vec());
+    for event in &events {
         println!("{}", format_ambient_event(event));
     }
 }
 
 fn format_ambient_event(event: &AmbientEvent) -> String {
-    format!(
+    let kind = ambient::display_ambient_event_kind(event);
+    let title = ambient::display_ambient_event_title(event);
+    let summary = ambient::display_ambient_event_summary(event);
+    let mut formatted = format!(
         "{time}  {severity}  {kind}\n  id: {id}\n  source: {source} | status: {status}\n  title: {title}\n  summary: {summary}\n",
         time = event.timestamp,
         severity = event.severity.as_str().to_ascii_uppercase(),
-        kind = event.kind,
+        kind = kind,
         id = event.event_id,
         source = event.source,
         status = event.status.as_str(),
-        title = one_line(&event.title),
-        summary = one_line(&event.summary),
-    )
+        title = title,
+        summary = summary,
+    );
+    if let Some(meaning) = ambient_event_operator_meaning(event) {
+        formatted.push_str(&format!("  meaning: {meaning}\n"));
+    }
+    formatted
+}
+
+fn ambient_event_operator_meaning(event: &AmbientEvent) -> Option<&'static str> {
+    let kind = ambient::display_ambient_event_kind(event);
+    let is_trigger_notice = event.source == "trigger"
+        || event
+            .payload
+            .get("trigger_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || event
+            .payload
+            .get("grouped_event_ids")
+            .and_then(serde_json::Value::as_array)
+            .is_some();
+    if !is_trigger_notice {
+        return None;
+    }
+
+    match kind.as_str() {
+        "action_failed" => Some(
+            "Dexter observed a failed action receipt; open Why or run `make why` for the concrete failure.",
+        ),
+        "ambient_notice" => Some(
+            "A configured local ambient condition matched recent evidence; this is not a model guess.",
+        ),
+        "ambient_approval_needed" => Some(
+            "A configured ambient condition fired, but Dexter is waiting for explicit operator approval before acting.",
+        ),
+        "ambient_task_completed" => Some(
+            "Dexter completed a deterministic follow-up task for an ambient condition.",
+        ),
+        _ => None,
+    }
 }
 
 fn print_ambient_triggers(path: &Path, triggers: &[AmbientTrigger]) {
@@ -2017,7 +2062,8 @@ fn format_ambient_inbox(
         return out;
     }
 
-    for event in events {
+    let events = ambient::compact_ambient_events_for_operator(events.to_vec());
+    for event in &events {
         out.push_str(&format_ambient_event(event));
     }
     out
@@ -4815,10 +4861,64 @@ mod tests {
         assert!(formatted.contains("Dexter Ambient Inbox"));
         assert!(formatted.contains("source: /tmp/ambient_events.jsonl"));
         assert!(formatted.contains("acknowledgements: /tmp/ambient_acknowledgements.json"));
-        assert!(formatted.contains("WARN  trigger_matched"));
+        assert!(formatted.contains("WARN  action_failed"));
         assert!(formatted.contains("id: event-inbox-1"));
         assert!(formatted.contains("status: new"));
-        assert!(formatted.contains("Dexter action failures"));
+        assert!(formatted.contains("Action failure noticed"));
+        assert!(formatted.contains("meaning: Dexter observed a failed action receipt"));
+        assert!(!formatted.contains("Trigger matched: Dexter action failures"));
+    }
+
+    #[test]
+    fn format_ambient_event_translates_action_failure_trigger_notice() {
+        let mut event = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'action_failed'.",
+            serde_json::json!({
+                "trigger_name": "Dexter action failures",
+                "matched_event_kind": "action_failed",
+                "matched_action_description": "Run: lsof -i :80"
+            }),
+        );
+        event.event_id = "event-action-failed".to_string();
+
+        let formatted = format_ambient_event(&event);
+
+        assert!(formatted.contains("WARN  action_failed"));
+        assert!(formatted.contains("title: Action failure noticed"));
+        assert!(formatted.contains("Run: lsof -i :80 failed."));
+        assert!(formatted.contains("Open Why or run `make why`"));
+        assert!(formatted.contains("meaning: Dexter observed a failed action receipt"));
+        assert!(!formatted.contains("Trigger matched: Dexter action failures"));
+    }
+
+    #[test]
+    fn format_ambient_event_explains_generic_notice_classes() {
+        let mut event = AmbientEvent::new(
+            "trigger",
+            "trigger_action_approval_requested",
+            AmbientSeverity::Warn,
+            "Trigger needs approval: Restart warnings",
+            "Ambient trigger 'Restart warnings' matched event 'component_restart_failed'.",
+            serde_json::json!({
+                "trigger_name": "Restart warnings",
+                "matched_event_kind": "component_restart_failed",
+                "matched_event_summary": "Browser worker restart failed."
+            }),
+        );
+        event.event_id = "event-approval-needed".to_string();
+
+        let formatted = format_ambient_event(&event);
+
+        assert!(formatted.contains("WARN  ambient_approval_needed"));
+        assert!(formatted.contains("title: Ambient approval needed: Restart warnings"));
+        assert!(formatted.contains("summary: Browser worker restart failed."));
+        assert!(formatted.contains("meaning: A configured ambient condition fired"));
+        assert!(!formatted.contains("Trigger needs approval:"));
+        assert!(!formatted.contains("Ambient trigger '"));
     }
 
     #[test]

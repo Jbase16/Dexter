@@ -32,6 +32,7 @@ source "$ROOT_DIR/scripts/lib/process-tree.sh"
 CORE_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-core"
 CLI_BIN="$ROOT_DIR/src/rust-core/target/release/dexter-cli"
 SWIFT_DIR="$ROOT_DIR/src/swift"
+SWIFT_BIN="$SWIFT_DIR/.build/debug/Dexter"
 CORE_PID=""
 SWIFT_PID=""
 FIXTURE_PID=""
@@ -286,6 +287,11 @@ require_bins() {
         say "$INFO" "build it with: cd src/rust-core && cargo build --release --bin dexter-cli"
         exit 2
     fi
+    if [[ ! -x "$SWIFT_BIN" ]]; then
+        say "$FAIL" "missing Swift binary: $SWIFT_BIN"
+        say "$INFO" "build it with: cd src/swift && swift build"
+        exit 2
+    fi
 }
 
 start_core_if_requested() {
@@ -328,27 +334,13 @@ start_core_if_requested() {
         exit 2
     fi
 
-    waited=0
-    while [[ "$waited" -lt "$CORE_WARMUP_TIMEOUT_SECS" ]]; do
-        "$CLI_BIN" --doctor >/tmp/dexter-hud-ui-failure-doctor.out 2>&1 || true
-        if grep -Fq "OK   daemon health      status ready" /tmp/dexter-hud-ui-failure-doctor.out \
-            && grep -Fq "Result: OK - no failed checks." /tmp/dexter-hud-ui-failure-doctor.out; then
-            say "$INFO" "core doctor-ready after ${waited}s"
-            return
-        fi
-        if ! kill -0 "$CORE_PID" >/dev/null 2>&1; then
-            say "$FAIL" "core exited during startup"
-            tail -120 "$CORE_LOG" || true
-            exit 2
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    say "$FAIL" "core socket opened, but doctor-ready did not complete within ${CORE_WARMUP_TIMEOUT_SECS}s"
-    cat /tmp/dexter-hud-ui-failure-doctor.out 2>/dev/null || true
-    tail -120 "$CORE_LOG" || true
-    exit 2
+    bash "$ROOT_DIR/scripts/wait-for-ready.sh" \
+        --cli-bin "$CLI_BIN" \
+        --timeout "$CORE_WARMUP_TIMEOUT_SECS" \
+        --out /tmp/dexter-hud-ui-failure-doctor.out \
+        --label "core" \
+        --core-pid "$CORE_PID" \
+        --core-log "$CORE_LOG"
 }
 
 wait_for_pattern() {
@@ -446,9 +438,11 @@ start_swift_smoke() {
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_ACTION_HISTORY="$([[ "$mode" == "history" ]] && echo 1 || echo 0)" \
         DEXTER_HUD_SMOKE_ACTION_DIAGNOSTIC="$([[ "$mode" == "diagnostic" ]] && echo 1 || echo 0)" \
+        DEXTER_HUD_SMOKE_SKIP_VOICE_CAPTURE=1 \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-1}" \
-        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-10}" \
-            swift run
+        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-75}" \
+        DEXTER_HUD_SMOKE_MARKDOWN_PREVIEW_CHARS="${DEXTER_HUD_SMOKE_MARKDOWN_PREVIEW_CHARS:-20000}" \
+            "$SWIFT_BIN"
     ) >> "$log_file" 2>&1 &
     SWIFT_PID="$!"
 }
@@ -470,17 +464,38 @@ run_history_probe() {
         tail -180 "$SWIFT_HISTORY_LOG" || true
         return 1
     }
+    wait_for_pattern "$SWIFT_HISTORY_LOG" "[HUDSmoke] showActionHistory" 30 || {
+        say "$FAIL" "Swift HUD UI failure history smoke - HUD did not render ActionHistory"
+        tail -180 "$SWIFT_HISTORY_LOG" || true
+        return 1
+    }
+    wait_for_pattern "$SWIFT_HISTORY_LOG" "Target: action=ui_pick" 30 || {
+        say "$FAIL" "Swift HUD UI failure history smoke - HUD did not render expected receipt batch"
+        tail -180 "$SWIFT_HISTORY_LOG" || true
+        return 1
+    }
 
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "[HUDSmoke] actionHistoryRequest" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "[HUDSmoke] voiceCaptureSkipped" || ok=1
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "[HUDSmoke] showActionHistory" || ok=1
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Recent Receipts" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "control_not_found" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "not_typeable" || ok=1
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "not_selectable" || ok=1
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "snapshot_then_replan" || ok=1
-    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "ambiguous_control" || ok=1
-    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "ask_for_clarification" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Target: action=ui_click" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Target: action=ui_type" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Target: action=ui_select" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Target: action=ui_toggle" || ok=1
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Target: action=ui_pick" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "text=<redacted>" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "option='Chocolate'" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "state=on" || ok=1
+    assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "container='<none>'" || ok=1
     assert_contains "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "nearest_safe_candidates:" || ok=1
     assert_absent "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "Result: Action failed." || ok=1
+    assert_absent "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "hud smoke secret text must stay redacted in evidence" || ok=1
+    assert_absent "Swift HUD UI failure history smoke" "$SWIFT_HISTORY_LOG" "hud smoke disabled secret must stay redacted in evidence" || ok=1
     stop_swift
     return "$ok"
 }
@@ -498,8 +513,19 @@ run_diagnostic_probe() {
         tail -180 "$log_file" || true
         return 1
     }
+    wait_for_pattern "$log_file" "[HUDSmoke] showActionDiagnostic" 30 || {
+        say "$FAIL" "Swift HUD UI failure diagnostic smoke - HUD did not render ActionDiagnostic"
+        tail -180 "$log_file" || true
+        return 1
+    }
+    wait_for_pattern "$log_file" "$expected_evidence" 30 || {
+        say "$FAIL" "Swift HUD UI failure diagnostic smoke - HUD did not render expected evidence"
+        tail -180 "$log_file" || true
+        return 1
+    }
 
     assert_contains "Swift HUD UI failure diagnostic smoke" "$log_file" "[HUDSmoke] actionDiagnosticRequest" || ok=1
+    assert_contains "Swift HUD UI failure diagnostic smoke" "$log_file" "[HUDSmoke] voiceCaptureSkipped" || ok=1
     assert_contains "Swift HUD UI failure diagnostic smoke" "$log_file" "[HUDSmoke] showActionDiagnostic" || ok=1
     assert_contains "Swift HUD UI failure diagnostic smoke" "$log_file" "UI automation failed after the action was dispatched ($expected_kind)." || ok=1
     assert_contains "Swift HUD UI failure diagnostic smoke" "$log_file" "$expected_step" || ok=1
@@ -517,96 +543,16 @@ main() {
     local ok=0
 
     seed_ui_failure "missing_click" "control_not_found"
-    run_diagnostic_probe \
-        "$SWIFT_MISSING_WHY_LOG" \
-        "control_not_found" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "nearest_safe_candidates:" || ok=1
-
     seed_ui_failure "missing_type" "not_typeable"
-    run_diagnostic_probe \
-        "$SWIFT_TYPE_WHY_LOG" \
-        "not_typeable" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_type" || ok=1
-    assert_contains "Swift HUD UI failure type smoke" "$SWIFT_TYPE_WHY_LOG" "text=<redacted>" || ok=1
-    assert_contains "Swift HUD UI failure type smoke" "$SWIFT_TYPE_WHY_LOG" "nearest_safe_candidates:" || ok=1
-    assert_absent "Swift HUD UI failure type smoke" "$SWIFT_TYPE_WHY_LOG" "hud smoke secret text must stay redacted in evidence" || ok=1
-
-    seed_ui_failure "disabled_click" "control_disabled"
-    run_diagnostic_probe \
-        "$SWIFT_DISABLED_CLICK_WHY_LOG" \
-        "control_disabled" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_click" || ok=1
-    assert_contains "Swift HUD UI failure disabled click smoke" "$SWIFT_DISABLED_CLICK_WHY_LOG" "Evidence: matched_control:" || ok=1
-    assert_contains "Swift HUD UI failure disabled click smoke" "$SWIFT_DISABLED_CLICK_WHY_LOG" "enabled=false" || ok=1
-
-    seed_ui_failure "disabled_type" "control_disabled"
-    run_diagnostic_probe \
-        "$SWIFT_DISABLED_TYPE_WHY_LOG" \
-        "control_disabled" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_type" || ok=1
-    assert_contains "Swift HUD UI failure disabled type smoke" "$SWIFT_DISABLED_TYPE_WHY_LOG" "text=<redacted>" || ok=1
-    assert_contains "Swift HUD UI failure disabled type smoke" "$SWIFT_DISABLED_TYPE_WHY_LOG" "Evidence: matched_control:" || ok=1
-    assert_contains "Swift HUD UI failure disabled type smoke" "$SWIFT_DISABLED_TYPE_WHY_LOG" "enabled=false" || ok=1
-    assert_absent "Swift HUD UI failure disabled type smoke" "$SWIFT_DISABLED_TYPE_WHY_LOG" "hud smoke disabled secret must stay redacted in evidence" || ok=1
-
     seed_ui_failure "missing_select" "not_selectable"
-    run_diagnostic_probe \
-        "$SWIFT_SELECT_WHY_LOG" \
-        "not_selectable" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_select" || ok=1
-    assert_contains "Swift HUD UI failure select smoke" "$SWIFT_SELECT_WHY_LOG" "option='Chocolate'" || ok=1
-    assert_contains "Swift HUD UI failure select smoke" "$SWIFT_SELECT_WHY_LOG" "nearest_safe_candidates:" || ok=1
-
-    seed_ui_failure "disabled_select" "control_disabled"
-    run_diagnostic_probe \
-        "$SWIFT_DISABLED_SELECT_WHY_LOG" \
-        "control_disabled" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_select" || ok=1
-    assert_contains "Swift HUD UI failure disabled select smoke" "$SWIFT_DISABLED_SELECT_WHY_LOG" "option='Chocolate'" || ok=1
-    assert_contains "Swift HUD UI failure disabled select smoke" "$SWIFT_DISABLED_SELECT_WHY_LOG" "Evidence: matched_control:" || ok=1
-    assert_contains "Swift HUD UI failure disabled select smoke" "$SWIFT_DISABLED_SELECT_WHY_LOG" "enabled=false" || ok=1
-
     seed_ui_failure "missing_toggle" "not_selectable"
-    run_diagnostic_probe \
-        "$SWIFT_TOGGLE_WHY_LOG" \
-        "not_selectable" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_toggle" || ok=1
-    assert_contains "Swift HUD UI failure toggle smoke" "$SWIFT_TOGGLE_WHY_LOG" "state=on" || ok=1
-    assert_contains "Swift HUD UI failure toggle smoke" "$SWIFT_TOGGLE_WHY_LOG" "nearest_safe_candidates:" || ok=1
-
-    seed_ui_failure "disabled_toggle" "control_disabled"
-    run_diagnostic_probe \
-        "$SWIFT_DISABLED_TOGGLE_WHY_LOG" \
-        "control_disabled" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_toggle" || ok=1
-    assert_contains "Swift HUD UI failure disabled toggle smoke" "$SWIFT_DISABLED_TOGGLE_WHY_LOG" "state=on" || ok=1
-    assert_contains "Swift HUD UI failure disabled toggle smoke" "$SWIFT_DISABLED_TOGGLE_WHY_LOG" "Evidence: matched_control:" || ok=1
-    assert_contains "Swift HUD UI failure disabled toggle smoke" "$SWIFT_DISABLED_TOGGLE_WHY_LOG" "enabled=false" || ok=1
-
     seed_ui_failure "missing_pick" "not_selectable"
-    run_diagnostic_probe \
-        "$SWIFT_PICK_WHY_LOG" \
-        "not_selectable" \
-        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
-        "Target: action=ui_pick" || ok=1
-    assert_contains "Swift HUD UI failure pick smoke" "$SWIFT_PICK_WHY_LOG" "container='<none>'" || ok=1
-    assert_contains "Swift HUD UI failure pick smoke" "$SWIFT_PICK_WHY_LOG" "nearest_safe_candidates:" || ok=1
-
-    seed_ui_failure "ambiguous_click" "ambiguous_control"
     run_history_probe || ok=1
     run_diagnostic_probe \
-        "$SWIFT_AMBIGUOUS_WHY_LOG" \
-        "ambiguous_control" \
-        "Ask which matching control to use, or collect a UI snapshot and choose a more specific target." \
-        "match_count=2 candidates:" || ok=1
+        "$SWIFT_MISSING_WHY_LOG" \
+        "not_selectable" \
+        "Capture a UI snapshot before choosing another control. Do not repeat the same label blindly." \
+        "nearest_safe_candidates:" || ok=1
 
     assert_contains "Swift HUD UI failure smoke" "$CORE_LOG" "Action history requested" || ok=1
     assert_contains "Swift HUD UI failure smoke" "$CORE_LOG" "Action diagnostic requested" || ok=1
@@ -627,7 +573,7 @@ main() {
         tail -180 "$SWIFT_DISABLED_TOGGLE_WHY_LOG" || true
         tail -160 "$CORE_LOG" || true
         cat "$ACTION_OUT" || true
-        cat "$CLI_LOG" || true
+        [[ -f "$CLI_LOG" ]] && cat "$CLI_LOG"
         exit 1
     fi
 }

@@ -7,7 +7,10 @@ CLI_BIN="$RUST_DIR/target/release/dexter-cli"
 CORE_LOG="/tmp/dexter-ui-click-core.log"
 ACTION_OUT="/tmp/dexter-ui-click.out"
 RECENT_OUT="/tmp/dexter-ui-click-recent.out"
-SMOKE_APP="/tmp/DexterUIClickSmoke.app"
+FIXTURE_SWIFT="/tmp/DexterUIClickSmoke.swift"
+FIXTURE_BIN="/tmp/DexterUIClickSmoke"
+FIXTURE_OUT="/tmp/dexter-ui-click-fixture-value.txt"
+FIXTURE_PID=""
 SOCKET="/tmp/dexter.sock"
 
 say() {
@@ -18,7 +21,7 @@ say() {
 
 fail() {
     say FAIL "$*"
-    for file in "$ACTION_OUT" "$RECENT_OUT"; do
+    for file in "$ACTION_OUT" "$RECENT_OUT" "$FIXTURE_OUT"; do
         if [[ -f "$file" ]]; then
             say INFO "$file:"
             cat "$file" || true
@@ -29,6 +32,55 @@ fail() {
         tail -n 100 "$CORE_LOG" || true
     fi
     exit 1
+}
+
+write_fixture_source() {
+    cat >"$FIXTURE_SWIFT" <<'SWIFT'
+import AppKit
+import Foundation
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var window: NSWindow?
+    private let outputPath: String
+
+    init(outputPath: String) {
+        self.outputPath = outputPath
+        super.init()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 180, y: 180, width: 360, height: 160),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Dexter UI Click Smoke"
+
+        let button = NSButton(title: "OK", target: self, action: #selector(okClicked))
+        button.frame = NSRect(x: 132, y: 66, width: 96, height: 32)
+        button.identifier = NSUserInterfaceItemIdentifier("okButton")
+        button.setAccessibilityLabel("OK")
+        button.setAccessibilityIdentifier("okButton")
+
+        window.contentView?.addSubview(button)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
+    }
+
+    @objc private func okClicked(_ sender: NSButton) {
+        try? "clicked".write(toFile: outputPath, atomically: true, encoding: .utf8)
+    }
+}
+
+let outputPath = CommandLine.arguments.dropFirst().first ?? "/tmp/dexter-ui-click-fixture-value.txt"
+let app = NSApplication.shared
+let delegate = AppDelegate(outputPath: outputPath)
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()
+SWIFT
 }
 
 socket_accepts() {
@@ -59,8 +111,12 @@ PY
 }
 
 cleanup() {
-    pkill -f DexterUIClickSmoke >/dev/null 2>&1 || true
-    rm -rf "$SMOKE_APP"
+    if [[ -n "$FIXTURE_PID" ]]; then
+        kill "$FIXTURE_PID" >/dev/null 2>&1 || true
+        wait "$FIXTURE_PID" >/dev/null 2>&1 || true
+    fi
+    pkill -f "$FIXTURE_BIN" >/dev/null 2>&1 || true
+    rm -f "$FIXTURE_SWIFT" "$FIXTURE_BIN" "$FIXTURE_OUT"
     make -C "$ROOT_DIR" stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -69,8 +125,11 @@ if socket_accepts; then
     fail "a Dexter daemon is already accepting connections; stop it before running this smoke"
 fi
 
-rm -f "$CORE_LOG" "$ACTION_OUT" "$RECENT_OUT"
-rm -rf "$SMOKE_APP"
+rm -f "$CORE_LOG" "$ACTION_OUT" "$RECENT_OUT" "$FIXTURE_OUT" "$FIXTURE_SWIFT" "$FIXTURE_BIN"
+
+say INFO "building temporary AppKit click fixture"
+write_fixture_source
+swiftc "$FIXTURE_SWIFT" -o "$FIXTURE_BIN"
 
 say INFO "building release core and CLI"
 cd "$RUST_DIR"
@@ -82,13 +141,11 @@ make -C "$ROOT_DIR" run-core >"$CORE_LOG" 2>&1 &
 say INFO "waiting for daemon readiness"
 make -C "$ROOT_DIR" wait-for-ready >/dev/null
 
-say INFO "creating temporary click fixture app"
-osacompile -o "$SMOKE_APP" \
-    -e 'display dialog "Dexter UI Click Smoke" buttons {"OK"} default button "OK" giving up after 30' \
-    >/dev/null
-open -n "$SMOKE_APP"
+say INFO "starting temporary UI click fixture"
+"$FIXTURE_BIN" "$FIXTURE_OUT" >/tmp/dexter-ui-click-fixture.log 2>&1 &
+FIXTURE_PID="$!"
 
-say INFO "waiting for temporary app to expose Accessibility elements"
+say INFO "waiting for fixture Accessibility surface"
 for _ in {1..40}; do
     if osascript <<'APPLESCRIPT' >/dev/null 2>&1
 tell application "System Events"
@@ -122,6 +179,18 @@ if grep -Fq "approval required" "$ACTION_OUT"; then
     fail "ordinary ui_click unexpectedly required approval"
 fi
 
+say INFO "waiting for fixture to observe clicked value"
+for _ in {1..40}; do
+    if [[ -f "$FIXTURE_OUT" ]] && [[ "$(cat "$FIXTURE_OUT")" == "clicked" ]]; then
+        break
+    fi
+    sleep 0.25
+done
+[[ -f "$FIXTURE_OUT" ]] \
+    || fail "fixture did not write observed clicked value"
+[[ "$(cat "$FIXTURE_OUT")" == "clicked" ]] \
+    || fail "fixture button action did not observe the UI click"
+
 "$CLI_BIN" --actions recent --limit 20 >"$RECENT_OUT"
 grep -Fq "ui_click" "$RECENT_OUT" \
     || fail "recent action receipts did not include ui_click action type"
@@ -131,9 +200,5 @@ grep -Fq "EXECUTED" "$RECENT_OUT" \
     || fail "recent action receipts did not record execution"
 grep -Fq "Succeeded: pressed UI control:" "$RECENT_OUT" \
     || fail "recent action receipts did not record pressed control"
-
-if pgrep -f DexterUIClickSmoke >/dev/null 2>&1; then
-    fail "temporary dialog app was still running after ui_click"
-fi
 
 say PASS "ui_click action smoke passed"

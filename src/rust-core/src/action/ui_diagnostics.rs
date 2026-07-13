@@ -36,6 +36,16 @@ impl UiRecoveryDirective {
         }
     }
 
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "no_retry_surface_to_operator" => Some(Self::NoRetrySurfaceToOperator),
+            "snapshot_then_replan" => Some(Self::SnapshotThenReplan),
+            "inspect_window_then_replan" => Some(Self::InspectWindowThenReplan),
+            "ask_for_clarification" => Some(Self::AskForClarification),
+            _ => None,
+        }
+    }
+
     pub fn instruction(self) -> &'static str {
         match self {
             Self::NoRetrySurfaceToOperator => {
@@ -372,6 +382,15 @@ mod tests {
             UiRecoveryDirective::SnapshotThenReplan
         );
         assert!(diagnostic.operator_message().contains("control_not_found"));
+    }
+
+    #[test]
+    fn parses_recovery_directive_from_str() {
+        assert_eq!(
+            UiRecoveryDirective::from_str("snapshot_then_replan"),
+            Some(UiRecoveryDirective::SnapshotThenReplan)
+        );
+        assert_eq!(UiRecoveryDirective::from_str("mystery"), None);
     }
 
     #[test]

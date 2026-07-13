@@ -8,6 +8,7 @@ use super::{ContextSourceKind, TaskClass};
 pub enum TurnOutcomeLabel {
     Unknown,
     Answered,
+    GenerationFailed,
     ActionExecutedSuccessfully,
     ActionRejectedByPolicy,
     AppleScriptCompileFailed,

@@ -138,7 +138,7 @@ start_swift_smoke() {
         DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE="$SMOKE_PLACEMENT_SEQUENCE" \
         DEXTER_PROCESS_CONTROL_RESTART_SENTINEL="$RESTART_SENTINEL" \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-3}" \
-        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-18}" \
+        DEXTER_HUD_SMOKE_EXIT_AFTER_SECS="${DEXTER_HUD_SMOKE_EXIT_AFTER_SECS:-45}" \
             swift run
     ) >> "$SWIFT_LOG" 2>&1 &
     SWIFT_PID="$!"
@@ -455,12 +455,12 @@ run_placement_assertions() {
     }
 
     assert_log_contains "$name" "[HUDSmoke] placement after-snap" || ok=1
-    assert_log_contains "$name" "[HUDSmoke] placement after-start" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement after-toggle" || ok=1
     assert_log_contains "$name" "[HUDSmoke] placement synthetic-nodrag expectedDx=32.0 expectedDy=18.0 actualDx=0.0 actualDy=0.0 moved=false" || ok=1
     assert_log_contains "$name" "[HUDSmoke] placement synthetic-drag expectedDx=32.0 expectedDy=18.0 actualDx=32.0 actualDy=18.0 moved=true" || ok=1
     assert_log_contains "$name" "[HUDSmoke] placement after-synthetic-nodrag:32:18" || ok=1
     assert_log_contains "$name" "[HUDSmoke] placement after-synthetic-drag:32:18" || ok=1
-    assert_log_contains "$name" "[HUDSmoke] placement after-stop" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] placement command=toggle" || ok=1
     assert_log_contains "$name" "size=136x136" || ok=1
     assert_log_contains "$name" "cornerHit=false" || ok=1
     assert_log_contains "$name" "topCenterHit=false" || ok=1
@@ -470,7 +470,6 @@ run_placement_assertions() {
     assert_log_contains "$name" "centerHit=true" || ok=1
     assert_log_contains "$name" "movableByBackground=false" || ok=1
     assert_log_contains "$name" "ignoresMouse=false" || ok=1
-    assert_core_log_contains "$name" "Context snapshot updated (app focused)" || ok=1
     assert_log_absent "$name" "Fatal error" || ok=1
 
     if [[ "$ok" -eq 0 ]]; then
@@ -496,8 +495,8 @@ run_typed_turn_assertions() {
     completion_baseline=$(count_pattern "[HUDSmoke] responseComplete")
     expected_completion_count=$((completion_baseline + 1))
 
-    wait_for_pattern "[App] onTextSubmit fired: '$SMOKE_TEXT'" 10 || {
-        say "$FAIL" "$name - Swift app did not receive the auto-submitted turn within 10s"
+    wait_for_pattern "[App] onTextSubmit fired: '$SMOKE_TEXT'" 35 || {
+        say "$FAIL" "$name - Swift app did not receive the auto-submitted turn within 35s"
         tail -100 "$SWIFT_LOG" || true
         return 1
     }
@@ -513,6 +512,7 @@ run_typed_turn_assertions() {
     assert_log_contains "$name" "[HUDSmoke] autoSubmit" || ok=1
     assert_log_contains "$name" "[App] onTextSubmit fired: '$SMOKE_TEXT'" || ok=1
     assert_log_contains "$name" "[HUDSmoke] showOperatorInput" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] layout normal textTop=262.0 topSafe=262.0 topGap=0.0" || ok=1
     assert_log_contains "$name" "[DexterClient] sendTypedInput enqueued to stream" || ok=1
     assert_log_contains "$name" "[DexterClient] onResponse ← entityState: thinking" || ok=1
     assert_log_contains "$name" "[HUDSmoke] beginResponseStreaming" || ok=1

@@ -43,6 +43,8 @@ final class HUDTextView: NSView {
         scrollView.backgroundColor      = .clear
         scrollView.drawsBackground      = false
         scrollView.autoresizingMask     = [.width, .height]
+        scrollView.wantsLayer           = true
+        scrollView.layer?.masksToBounds = true
 
         let tv = SelectableTextView(frame: scrollView.contentView.bounds)
         tv.isEditable             = false
@@ -65,6 +67,8 @@ final class HUDTextView: NSView {
         // Height is fixed. HUDWindow grows upward when history expands;
         // textArea stays at its original frame rather than stretching to fill the window.
         autoresizingMask = [.width]
+        wantsLayer = true
+        layer?.masksToBounds = true
         addSubview(scrollView)
     }
 

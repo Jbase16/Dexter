@@ -28,6 +28,7 @@
 /// that indicates an unrecoverable session state — it means the gRPC send channel to
 /// Swift has been dropped, and the reader task will exit and call `shutdown()`.
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -42,8 +43,10 @@ use tracing::{debug, error, info, warn};
 use crate::{
     action::{
         engine::{ActionReceiptMetadata, BrowserActionKind},
+        ui_diagnostics::{UiFailureKind, UiRecoveryDirective},
         ActionEngine, ActionOutcome, ActionResult, ActionSpec, ExecutorHandle, PolicyEngine,
     },
+    ambient::{self, AmbientEvent, AmbientEventStore},
     browser::diagnostics::{
         classify_worker_error_kind, BrowserFailureKind, BrowserRecoveryDirective,
     },
@@ -58,7 +61,7 @@ use crate::{
         SCREEN_CAPTURE_TIMEOUT_SECS,
     },
     context::{
-        diagnostics::CompiledContextDiagnostics,
+        diagnostics::{CompiledContextDiagnostics, CompilerScope, TokenCostMethod},
         turn_record::{
             GenerationRecordInput, TurnCloseReason, TurnDispatchInput, TurnRecordAggregator,
         },
@@ -71,7 +74,9 @@ use crate::{
     },
     context_observer::{ContextObserver, ContextSnapshot},
     inference::{
-        engine::{GenerationRequest, InferenceEngine, OllamaPsEntry, TokenChunk},
+        engine::{
+            GenerationRequest, InferenceEngine, Message, MessageOrigin, OllamaPsEntry, TokenChunk,
+        },
         error::InferenceError,
         models::ModelId,
         retrieval_classifier::is_retrieval_first_query,
@@ -174,6 +179,32 @@ fn neutralize_role_markers(content: &str) -> String {
     out
 }
 
+fn recall_entry_duplicates_live_history(content: &str, messages: &[Message]) -> bool {
+    let mut compared = 0usize;
+    let mut matched = 0usize;
+    for line in content.lines() {
+        let (role, value) = if let Some(value) = line.strip_prefix("User: ") {
+            ("user", value)
+        } else if let Some(value) = line.strip_prefix("Assistant: ") {
+            ("assistant", value)
+        } else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        compared += 1;
+        if messages
+            .iter()
+            .any(|message| message.role == role && message.content.trim() == value)
+        {
+            matched += 1;
+        }
+    }
+    compared > 0 && matched == compared
+}
+
 /// Strip injected context labels from model-generated text before recording.
 ///
 /// Two failure modes require two passes:
@@ -242,6 +273,42 @@ const COMEDY_MODE_INSTRUCTION: &str = concat!(
     "When the operator asks for a specific number of jokes, return exactly that many in one response. ",
     "For another/different/try-again follow-ups, read the recent assistant jokes in the conversation and use a fresh setup, punchline, and premise instead of repeating or lightly rewording one."
 );
+const TRUTHFULNESS_AUDIT_INSTRUCTION: &str = concat!(
+    "TRUTHFULNESS AUDIT: The operator is challenging a prior factual or capability claim. ",
+    "Do not agree, deny, apologize, or retract a claim merely to match the operator's framing. ",
+    "Audit the visible conversation evidence first. Treat host-produced reports containing ",
+    "'Measured just now' or 'local macOS process table' as deterministic local evidence, not model guesses. ",
+    "Do not claim that a lookup, command, action, or measurement occurred unless a tool result, action receipt, ",
+    "or deterministic host report proves it. State which prior claims are supported, unsupported, or contradicted. ",
+    "Never invent a confession, capability limitation, or completed lookup."
+);
+
+fn is_truthfulness_challenge(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    [
+        "you lied",
+        "did you lie",
+        "you are lying",
+        "you're lying",
+        "that was a lie",
+        "you made that up",
+        "made that up",
+        "made it up",
+        "you hallucinated",
+        "that's not true",
+        "that is not true",
+        "that isn't accurate",
+        "that is not accurate",
+        "that's inaccurate",
+        "that is inaccurate",
+        "you didn't actually",
+        "you did not actually",
+        "that's completely wrong",
+        "that is completely wrong",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
 
 fn audio_trace_id_from_payload(payload: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
@@ -433,6 +500,31 @@ struct BrowserRecoveryGuard {
     replacement_action_succeeded: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UiRecoveryGuard {
+    target: UiActionTarget,
+    failure_kind: UiFailureKind,
+    directive: UiRecoveryDirective,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UiActionTarget {
+    action_type: &'static str,
+    app_name: Option<String>,
+    role: Option<String>,
+    label: Option<String>,
+    option: Option<String>,
+    state: Option<bool>,
+    container_label: Option<String>,
+    title_contains: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeterministicMessageSendIntent {
+    recipient: String,
+    body: String,
+}
+
 /// Phase 36: detect whether `spec` represents a terminal iMessage send workflow.
 ///
 /// Matches AppleScript bodies that address the Messages app AND invoke `send` —
@@ -584,6 +676,258 @@ fn browser_error_field(error: &str, field: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
+}
+
+fn ui_recovery_guard_from_failure(spec: &ActionSpec, error: &str) -> Option<UiRecoveryGuard> {
+    let target = ui_action_target(spec)?;
+    let failure_kind = ui_failure_kind_from_error(error)?;
+    let directive = ui_recovery_directive_from_error(error)?;
+    if directive == UiRecoveryDirective::NoRetrySurfaceToOperator {
+        return None;
+    }
+    Some(UiRecoveryGuard {
+        target,
+        failure_kind,
+        directive,
+    })
+}
+
+fn ui_recovery_guard_correction(
+    guard: Option<&UiRecoveryGuard>,
+    spec: &ActionSpec,
+) -> Option<String> {
+    let guard = guard?;
+    let target = ui_action_target(spec)?;
+    if target != guard.target {
+        return None;
+    }
+
+    Some(format!(
+        "UI recovery guard blocked a repeated target.\n\
+         Failure: {}.\n\
+         Repeated target: {}.\n\
+         Next [{}]: {}\n\
+         Allowed next actions: {}\n\
+         Do not repeat the same UI/window ActionSpec unless fresh snapshot, window inspection, or operator clarification changes the target.",
+        guard.failure_kind.as_str(),
+        target.operator_label(),
+        guard.directive.as_str(),
+        guard.directive.instruction(),
+        ui_recovery_guard_allowed_next_actions(guard.directive)
+    ))
+}
+
+fn ui_recovery_guard_allowed_next_actions(directive: UiRecoveryDirective) -> &'static str {
+    match directive {
+        UiRecoveryDirective::SnapshotThenReplan => {
+            "run ui_snapshot for the relevant app, then choose a visible specific control from that evidence, or ask for clarification"
+        }
+        UiRecoveryDirective::InspectWindowThenReplan => {
+            "run window_inspect or window_focus to confirm the active window before choosing another target, or ask for clarification"
+        }
+        UiRecoveryDirective::AskForClarification => {
+            "ask the operator which matching app, window, or control they mean; do not emit another UI action for this ambiguous target"
+        }
+        UiRecoveryDirective::NoRetrySurfaceToOperator => {
+            "surface the failure to the operator; do not emit another UI action until the underlying issue changes"
+        }
+    }
+}
+
+fn ui_action_target(spec: &ActionSpec) -> Option<UiActionTarget> {
+    match spec {
+        ActionSpec::WindowFocus {
+            app_name,
+            title_contains,
+            ..
+        } => Some(UiActionTarget {
+            action_type: "window_focus",
+            app_name: Some(normalize_ui_target_value(app_name)),
+            role: None,
+            label: None,
+            option: None,
+            state: None,
+            container_label: None,
+            title_contains: title_contains
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+        }),
+        ActionSpec::WindowInspect { app_name, .. } => Some(UiActionTarget {
+            action_type: "window_inspect",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: None,
+            label: None,
+            option: None,
+            state: None,
+            container_label: None,
+            title_contains: None,
+        }),
+        ActionSpec::UiSnapshot { app_name, .. } => Some(UiActionTarget {
+            action_type: "ui_snapshot",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: None,
+            label: None,
+            option: None,
+            state: None,
+            container_label: None,
+            title_contains: None,
+        }),
+        ActionSpec::UiClick {
+            app_name,
+            role,
+            label,
+            ..
+        } => Some(UiActionTarget {
+            action_type: "ui_click",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: role.as_ref().map(|value| normalize_ui_target_value(value)),
+            label: Some(normalize_ui_target_value(label)),
+            option: None,
+            state: None,
+            container_label: None,
+            title_contains: None,
+        }),
+        ActionSpec::UiType {
+            app_name,
+            role,
+            label,
+            ..
+        } => Some(UiActionTarget {
+            action_type: "ui_type",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: role.as_ref().map(|value| normalize_ui_target_value(value)),
+            label: label.as_ref().map(|value| normalize_ui_target_value(value)),
+            option: None,
+            state: None,
+            container_label: None,
+            title_contains: None,
+        }),
+        ActionSpec::UiSelect {
+            app_name,
+            role,
+            label,
+            option,
+            ..
+        } => Some(UiActionTarget {
+            action_type: "ui_select",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: role.as_ref().map(|value| normalize_ui_target_value(value)),
+            label: Some(normalize_ui_target_value(label)),
+            option: Some(normalize_ui_target_value(option)),
+            state: None,
+            container_label: None,
+            title_contains: None,
+        }),
+        ActionSpec::UiToggle {
+            app_name,
+            role,
+            label,
+            state,
+            ..
+        } => Some(UiActionTarget {
+            action_type: "ui_toggle",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: role.as_ref().map(|value| normalize_ui_target_value(value)),
+            label: Some(normalize_ui_target_value(label)),
+            option: None,
+            state: Some(*state),
+            container_label: None,
+            title_contains: None,
+        }),
+        ActionSpec::UiPick {
+            app_name,
+            role,
+            label,
+            container_label,
+            ..
+        } => Some(UiActionTarget {
+            action_type: "ui_pick",
+            app_name: app_name
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            role: role.as_ref().map(|value| normalize_ui_target_value(value)),
+            label: Some(normalize_ui_target_value(label)),
+            option: None,
+            state: None,
+            container_label: container_label
+                .as_ref()
+                .map(|value| normalize_ui_target_value(value)),
+            title_contains: None,
+        }),
+        _ => None,
+    }
+}
+
+fn normalize_ui_target_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+impl UiActionTarget {
+    fn operator_label(&self) -> String {
+        let mut parts = vec![self.action_type.to_string()];
+        if let Some(app) = self.app_name.as_deref() {
+            parts.push(format!("app `{app}`"));
+        }
+        if let Some(role) = self.role.as_deref() {
+            parts.push(format!("role `{role}`"));
+        }
+        if let Some(label) = self.label.as_deref() {
+            parts.push(format!("label `{label}`"));
+        }
+        if let Some(option) = self.option.as_deref() {
+            parts.push(format!("option `{option}`"));
+        }
+        if let Some(state) = self.state {
+            parts.push(format!("state `{}`", if state { "on" } else { "off" }));
+        }
+        if let Some(container) = self.container_label.as_deref() {
+            parts.push(format!("container `{container}`"));
+        }
+        if let Some(title) = self.title_contains.as_deref() {
+            parts.push(format!("window title containing `{title}`"));
+        }
+        parts.join(" ")
+    }
+}
+
+fn ui_failure_kind_from_error(error: &str) -> Option<UiFailureKind> {
+    let rest = error.strip_prefix("UI failure [")?;
+    let (kind, _) = rest.split_once(']')?;
+    match kind {
+        "app_not_running" => Some(UiFailureKind::AppNotRunning),
+        "no_front_window" => Some(UiFailureKind::NoFrontWindow),
+        "control_not_found" => Some(UiFailureKind::ControlNotFound),
+        "ambiguous_control" => Some(UiFailureKind::AmbiguousControl),
+        "control_disabled" => Some(UiFailureKind::ControlDisabled),
+        "not_typeable" => Some(UiFailureKind::NotTypeable),
+        "not_selectable" => Some(UiFailureKind::NotSelectable),
+        "option_not_found" => Some(UiFailureKind::OptionNotFound),
+        "action_timeout" => Some(UiFailureKind::ActionTimeout),
+        "accessibility_denied" => Some(UiFailureKind::AccessibilityDenied),
+        "applescript_failed" => Some(UiFailureKind::AppleScriptFailed),
+        "unknown" => Some(UiFailureKind::Unknown),
+        _ => None,
+    }
+}
+
+fn ui_recovery_directive_from_error(error: &str) -> Option<UiRecoveryDirective> {
+    let marker = "Next [";
+    let start = error.find(marker)? + marker.len();
+    let rest = &error[start..];
+    let (directive, _) = rest.split_once(']')?;
+    UiRecoveryDirective::from_str(directive)
 }
 
 /// Lifecycle stage of a single interaction.
@@ -836,11 +1180,28 @@ impl SharedDaemonState {
             "FAST warmup phase complete"
         );
 
-        // Step 5: PRIMARY model (await). Routed-PRIMARY queries depend on this.
+        // Step 5: PRIMARY model readiness. If Ollama already reports the PRIMARY
+        // runner fully resident, accept that as startup readiness and skip the
+        // blocking one-token strict probe. Live measurement on 2026-06-29 showed
+        // gemma4:26b-mlx can be fully resident before startup and still spend
+        // 106s servicing the strict probe (`load_ms=42`, `prompt_eval_ms=0`,
+        // `eval_ms=74608`, `unreported_ms=31615`). Repeating that ritual on
+        // every smoke launch proves little and delays readiness; non-resident or
+        // partial residency still falls back to the strict probe.
         log_startup_phase(startup_started_at, "primary_residency_probe_start");
-        log_primary_ollama_residency(&engine, &cfg.models.primary, startup_started_at).await;
-        log_startup_phase(startup_started_at, "primary_warmup_start");
-        warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
+        let primary_ready_from_residency =
+            log_primary_ollama_residency(&engine, &cfg.models.primary, startup_started_at).await;
+        if primary_ready_from_residency {
+            self.primary_model_warm.store(true, Ordering::SeqCst);
+            info!(
+                startup_elapsed_ms = elapsed_ms(startup_started_at),
+                model = %cfg.models.primary,
+                "PRIMARY startup readiness accepted from resident Ollama runner — strict generation warmup skipped"
+            );
+        } else {
+            log_startup_phase(startup_started_at, "primary_warmup_start");
+            warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
+        }
         info!(
             startup_elapsed_ms = elapsed_ms(startup_started_at),
             primary_model_warm = self.primary_model_warm.load(Ordering::SeqCst),
@@ -1022,13 +1383,14 @@ async fn log_primary_ollama_residency(
     engine: &InferenceEngine,
     primary_model: &str,
     startup_started_at: Instant,
-) {
+) -> bool {
     match engine.ps().await {
         Ok(models) => {
             let primary = models
                 .iter()
                 .find(|entry| ollama_ps_entry_matches_model(entry, primary_model));
             if let Some(entry) = primary {
+                let fully_resident = primary_startup_ready_from_ps_entry(entry);
                 info!(
                     startup_elapsed_ms = elapsed_ms(startup_started_at),
                     model = %primary_model,
@@ -1036,11 +1398,12 @@ async fn log_primary_ollama_residency(
                     resident_name = %entry.name,
                     resident_size_gb = entry.size as f64 / 1_073_741_824.0,
                     resident_vram_gb = entry.size_vram as f64 / 1_073_741_824.0,
-                    resident_fully_in_vram = entry.size_vram >= entry.size,
+                    resident_fully_in_vram = fully_resident,
                     resident_expires_at = %entry.expires_at,
                     resident_count = models.len(),
                     "PRIMARY Ollama residency before startup warmup"
                 );
+                fully_resident
             } else {
                 info!(
                     startup_elapsed_ms = elapsed_ms(startup_started_at),
@@ -1049,19 +1412,27 @@ async fn log_primary_ollama_residency(
                     resident_count = models.len(),
                     "PRIMARY Ollama residency before startup warmup"
                 );
+                false
             }
         }
-        Err(e) => warn!(
-            error = %e,
-            startup_elapsed_ms = elapsed_ms(startup_started_at),
-            model = %primary_model,
-            "PRIMARY Ollama residency probe failed before startup warmup"
-        ),
+        Err(e) => {
+            warn!(
+                error = %e,
+                startup_elapsed_ms = elapsed_ms(startup_started_at),
+                model = %primary_model,
+                "PRIMARY Ollama residency probe failed before startup warmup"
+            );
+            false
+        }
     }
 }
 
 fn ollama_ps_entry_matches_model(entry: &OllamaPsEntry, model: &str) -> bool {
     entry.name == model || entry.name.starts_with(&format!("{model}:"))
+}
+
+fn primary_startup_ready_from_ps_entry(entry: &OllamaPsEntry) -> bool {
+    entry.size > 0 && entry.size_vram >= entry.size
 }
 
 async fn drain_warmup_stream(
@@ -1215,6 +1586,7 @@ pub struct CoreOrchestrator {
     model_config: ModelConfig,
     session_mgr: SessionStateManager,
     turn_records: TurnRecordAggregator,
+    ambient_store: AmbientEventStore,
     latest_context_diagnostics: Option<CompiledContextDiagnostics>,
     context_observer: ContextObserver, // Phase 7 — machine context aggregator
     shared: SharedDaemonState,         // Daemon-lifetime shared status/context state
@@ -1386,6 +1758,11 @@ pub struct CoreOrchestrator {
     /// `Next [extract_page_then_replan]`. Blocks the continuation from repeating
     /// the same selector/action on the same page before it reaches Playwright.
     last_browser_recovery_guard: Option<BrowserRecoveryGuard>,
+    /// UI/window-specific recovery guard armed by failed Accessibility actions
+    /// that return a replan/clarification directive. Blocks the continuation from
+    /// dispatching the same failed UI target again before collecting fresh UI
+    /// evidence or asking the operator for disambiguation.
+    last_ui_recovery_guard: Option<UiRecoveryGuard>,
     /// Residency policy (off / pin+keepalive / pin-retire-keepalive). Read by
     /// `maybe_rewarm_primary` to decide whether to re-pin PRIMARY after a HEAVY
     /// swap. Sourced from `[residency]` in config; defaults to `pin_keepalive`.
@@ -1473,6 +1850,7 @@ impl CoreOrchestrator {
             residency_mode: cfg.residency.mode,
             session_mgr,
             turn_records: TurnRecordAggregator::new(&cfg.core.state_dir),
+            ambient_store: AmbientEventStore::new(&cfg.core.state_dir),
             latest_context_diagnostics: None,
             context_observer: ContextObserver::new(),
             shared: shared.clone(),
@@ -1515,6 +1893,7 @@ impl CoreOrchestrator {
             voice_mode: false,              // Phase 34
             last_agentic_action_json: None, // Phase 35
             last_browser_recovery_guard: None,
+            last_ui_recovery_guard: None,
             pending_primary_rewarm: false, // Phase 37.5 / B5
         })
     }
@@ -2407,68 +2786,96 @@ impl CoreOrchestrator {
         // 7a. Phase 19 — Uncertainty sentinel handling.
         let mut response_already_recorded = false;
         if let Some(ref query) = intercepted_q {
-            info!(
-                session  = %self.session_id,
-                trace_id = %trace_id,
-                query    = %query,
-                "Uncertainty sentinel intercepted — retrieving grounding context"
-            );
-            let bridge = Self::bridging_phrase(&trace_id);
-            self.send_text(bridge, false, &trace_id).await?;
+            if is_local_only_uncertainty_query(query) {
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    query = %query,
+                    "Local-only uncertainty query blocked from web retrieval"
+                );
+                let local_response = if let Some(request) = local_process_identity_request(query)
+                    .or_else(|| local_process_identity_request(&content))
+                {
+                    match sample_local_process_identity(request.pid).await {
+                        Ok(process) => {
+                            format_local_process_identity_report(request, process.as_ref())
+                        }
+                        Err(error) => format!(
+                            "I couldn't inspect PID {} from the local macOS process table: {error}. I did not search the web because PIDs are machine-local and temporary.",
+                            request.pid
+                        ),
+                    }
+                } else {
+                    "I couldn't verify that local-machine fact from the deterministic evidence available to this turn. I did not search the web because current state on this Mac cannot be grounded by an internet result.".to_string()
+                };
+                self.send_text(&local_response, true, &trace_id).await?;
+                full_response.push_str(&local_response);
+                self.context.push_assistant(local_response.clone());
+                self.session_mgr.push_turn("assistant", &local_response);
+            } else {
+                info!(
+                    session  = %self.session_id,
+                    trace_id = %trace_id,
+                    query    = %query,
+                    "Uncertainty sentinel intercepted — retrieving grounding context"
+                );
+                let bridge = Self::bridging_phrase(&trace_id);
+                self.send_text(bridge, false, &trace_id).await?;
 
-            let retrieval_result = tokio::time::timeout(
-                std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
-                self.retrieval.retrieve_web_only(query),
-            )
-            .await;
-
-            let tool_content = match retrieval_result {
-                Ok(Ok(result)) => {
-                    info!(
-                        session    = %self.session_id,
-                        source     = %result.source,
-                        confidence = result.confidence,
-                        "Uncertainty retrieval succeeded"
-                    );
-                    format!(
-                        "[Retrieved: {}]\nSource: {}\nConfidence: {:.0}%\n\n{}",
-                        result.query,
-                        result.source,
-                        result.confidence * 100.0,
-                        result.text,
-                    )
-                }
-                Ok(Err(e)) => {
-                    warn!(session = %self.session_id, error = %e, "Uncertainty retrieval failed");
-                    format!("[Retrieval failed for: {}]", query)
-                }
-                Err(_timeout) => {
-                    warn!(session = %self.session_id, query = %query, "Uncertainty retrieval timed out");
-                    format!("[Retrieval timed out for: {}]", query)
-                }
-            };
-
-            self.context.push_tool_result(&tool_content);
-
-            let reprompt_messages =
-                self.prepare_messages_for_inference_with_profile(&[], PromptProfile::PrimarySlim);
-            let reprompt_model = self.model_config.primary.clone();
-            let reprompt_response = self
-                .generate_and_stream(
-                    &reprompt_model,
-                    reprompt_messages,
-                    &trace_id,
-                    false,
-                    Some(PRIMARY_NUM_CTX),
-                    None,
+                let retrieval_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
+                    self.retrieval.retrieve_web_only(query),
                 )
-                .await?;
+                .await;
 
-            full_response.push_str(&reprompt_response);
-            if !reprompt_response.is_empty() {
-                self.context
-                    .push_assistant(strip_context_markers(&reprompt_response));
-                self.session_mgr.push_turn("assistant", &reprompt_response);
+                let tool_content = match retrieval_result {
+                    Ok(Ok(result)) => {
+                        info!(
+                            session    = %self.session_id,
+                            source     = %result.source,
+                            confidence = result.confidence,
+                            "Uncertainty retrieval succeeded"
+                        );
+                        format!(
+                            "[Retrieved: {}]\nSource: {}\nConfidence: {:.0}%\n\n{}",
+                            result.query,
+                            result.source,
+                            result.confidence * 100.0,
+                            result.text,
+                        )
+                    }
+                    Ok(Err(e)) => {
+                        warn!(session = %self.session_id, error = %e, "Uncertainty retrieval failed");
+                        format!("[Retrieval failed for: {}]", query)
+                    }
+                    Err(_timeout) => {
+                        warn!(session = %self.session_id, query = %query, "Uncertainty retrieval timed out");
+                        format!("[Retrieval timed out for: {}]", query)
+                    }
+                };
+
+                self.context.push_tool_result(&tool_content);
+
+                let reprompt_messages = self
+                    .prepare_messages_for_inference_with_profile(&[], PromptProfile::PrimarySlim);
+                let reprompt_model = self.model_config.primary.clone();
+                let reprompt_response = self
+                    .generate_and_stream(
+                        &reprompt_model,
+                        reprompt_messages,
+                        &trace_id,
+                        false,
+                        Some(PRIMARY_NUM_CTX),
+                        None,
+                    )
+                    .await?;
+
+                full_response.push_str(&reprompt_response);
+                if !reprompt_response.is_empty() {
+                    self.context
+                        .push_assistant(strip_context_markers(&reprompt_response));
+                    self.session_mgr.push_turn("assistant", &reprompt_response);
+                }
             }
             response_already_recorded = true;
         }
@@ -2517,7 +2924,24 @@ impl CoreOrchestrator {
         }
 
         // 7c. Scan the full response for an embedded action block.
-        let (display_text, action_spec) = extract_action_block(&full_response);
+        let (mut display_text, action_spec) = extract_action_block(&full_response);
+        if action_spec.is_none() && claims_unverified_action_progress(&display_text) {
+            let status = "Host status: no action was dispatched for that response. Nothing is currently running, downloading, or being checked.";
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                "Model claimed action progress without emitting an ActionSpec"
+            );
+            self.send_text(status, false, &trace_id).await?;
+            if !full_response.ends_with('\n') {
+                full_response.push_str("\n\n");
+            }
+            full_response.push_str(status);
+            if !display_text.ends_with('\n') {
+                display_text.push_str("\n\n");
+            }
+            display_text.push_str(status);
+        }
         if let Err(e) = self.turn_records.attach_generation(
             &trace_id,
             &GenerationRecordInput::from(&telemetry),
@@ -2700,6 +3124,13 @@ impl CoreOrchestrator {
                         "Structured iMessage send — missing recipient; refusing send"
                     );
                     let reply = "I need the Contacts name before I can send that.";
+                    self.record_message_send_preflight_failure(
+                        &requested_recipient,
+                        &message_body,
+                        "Structured iMessage send refused before execution: recipient is missing.",
+                        &trace_id,
+                    )
+                    .await?;
                     self.send_text(reply, true, &trace_id).await?;
                     self.context.push_assistant(reply);
                     self.session_mgr.push_turn("assistant", reply);
@@ -2714,6 +3145,13 @@ impl CoreOrchestrator {
                         "Structured iMessage send — missing body; refusing send"
                     );
                     let reply = "What would you like to say?";
+                    self.record_message_send_preflight_failure(
+                        &requested_recipient,
+                        &message_body,
+                        "Structured iMessage send refused before execution: message body is missing.",
+                        &trace_id,
+                    )
+                    .await?;
                     self.send_text(reply, true, &trace_id).await?;
                     self.context.push_assistant(reply);
                     self.session_mgr.push_turn("assistant", reply);
@@ -2754,6 +3192,13 @@ impl CoreOrchestrator {
                                          not going to guess. Add `operator_self_handle = \"+1…\"` \
                                          to the `[behavior]` section of `~/.dexter/config.toml`, \
                                          or name the recipient explicitly.";
+                            self.record_message_send_preflight_failure(
+                                &requested_recipient,
+                                &message_body,
+                                "Structured self-send refused before execution: operator_self_handle is not configured.",
+                                &trace_id,
+                            )
+                            .await?;
                             self.send_text(reply, true, &trace_id).await?;
                             self.context.push_assistant(reply);
                             self.session_mgr.push_turn("assistant", reply);
@@ -2761,6 +3206,27 @@ impl CoreOrchestrator {
                             return Ok(());
                         }
                     }
+                } else if looks_like_message_handle_candidate(&requested_recipient) {
+                    warn!(
+                        session = %self.session_id,
+                        recipient = %requested_recipient,
+                        agentic_depth = result.agentic_depth,
+                        "Structured iMessage send — raw handle-like recipient refused before Contacts name resolution"
+                    );
+                    let reply = "I need the recipient's Contacts name before I can send that. \
+                                 I won't use a raw phone number or email address from the model as the send target.";
+                    self.record_message_send_preflight_failure(
+                        &requested_recipient,
+                        &message_body,
+                        "Structured iMessage send refused before execution: raw phone/email recipients must be resolved through Contacts by name.",
+                        &trace_id,
+                    )
+                    .await?;
+                    self.send_text(reply, true, &trace_id).await?;
+                    self.context.push_assistant(reply);
+                    self.session_mgr.push_turn("assistant", reply);
+                    self.send_state(EntityState::Idle, &trace_id).await?;
+                    return Ok(());
                 } else {
                     match self
                         .resolve_messages_recipient_name_in_contacts(
@@ -2808,6 +3274,15 @@ impl CoreOrchestrator {
                                 "I found more than one Contacts match for {requested_recipient}: \
                                  {options}. Which one should I use?"
                             );
+                            self.record_message_send_preflight_failure(
+                                &requested_recipient,
+                                &message_body,
+                                &format!(
+                                    "Structured iMessage send refused before execution: Contacts name was ambiguous for {requested_recipient} ({options})."
+                                ),
+                                &trace_id,
+                            )
+                            .await?;
                             self.send_text(&reply, true, &trace_id).await?;
                             self.context.push_assistant(&reply);
                             self.session_mgr.push_turn("assistant", &reply);
@@ -2826,6 +3301,15 @@ impl CoreOrchestrator {
                                 "I found {contact_name} in Contacts, but there isn't a phone number \
                                  or iMessage email I can use. I didn't send it."
                             );
+                            self.record_message_send_preflight_failure(
+                                &requested_recipient,
+                                &message_body,
+                                &format!(
+                                    "Structured iMessage send refused before execution: Contacts match {contact_name} has no reachable phone or iMessage email."
+                                ),
+                                &trace_id,
+                            )
+                            .await?;
                             self.send_text(&reply, true, &trace_id).await?;
                             self.context.push_assistant(&reply);
                             self.session_mgr.push_turn("assistant", &reply);
@@ -2842,6 +3326,15 @@ impl CoreOrchestrator {
                             let reply = format!(
                                 "I couldn't find {requested_recipient} in Contacts, so I didn't send it."
                             );
+                            self.record_message_send_preflight_failure(
+                                &requested_recipient,
+                                &message_body,
+                                &format!(
+                                    "Structured iMessage send refused before execution: Contacts name not found for {requested_recipient}."
+                                ),
+                                &trace_id,
+                            )
+                            .await?;
                             self.send_text(&reply, true, &trace_id).await?;
                             self.context.push_assistant(&reply);
                             self.session_mgr.push_turn("assistant", &reply);
@@ -2860,6 +3353,15 @@ impl CoreOrchestrator {
                                 "Contacts lookup failed while resolving {requested_recipient}, so I didn't send it. \
                                  Check Contacts access and try again."
                             );
+                            self.record_message_send_preflight_failure(
+                                &requested_recipient,
+                                &message_body,
+                                &format!(
+                                    "Structured iMessage send refused before execution: Contacts lookup failed for {requested_recipient}: {error}."
+                                ),
+                                &trace_id,
+                            )
+                            .await?;
                             self.send_text(&reply, true, &trace_id).await?;
                             self.context.push_assistant(&reply);
                             self.session_mgr.push_turn("assistant", &reply);
@@ -3105,6 +3607,7 @@ impl CoreOrchestrator {
             // (depth == 0) so it never bleeds across unrelated turns.
             if result.agentic_depth == 0 {
                 self.last_browser_recovery_guard = None;
+                self.last_ui_recovery_guard = None;
             } else if let Some(correction) =
                 browser_recovery_guard_correction(self.last_browser_recovery_guard.as_ref(), &spec)
             {
@@ -3124,6 +3627,29 @@ impl CoreOrchestrator {
                         content.clone(),
                     )
                     .await;
+            }
+
+            if result.agentic_depth > 0 {
+                if let Some(correction) =
+                    ui_recovery_guard_correction(self.last_ui_recovery_guard.as_ref(), &spec)
+                {
+                    warn!(
+                        session       = %self.session_id,
+                        trace_id      = %trace_id,
+                        agentic_depth = result.agentic_depth,
+                        correction    = %correction,
+                        "UI recovery guard blocked repeated failed target action"
+                    );
+                    self.inject_action_status_context("Action FAILED", &correction, &trace_id);
+                    self.send_text(&correction, false, &trace_id).await?;
+                    return self
+                        .spawn_agentic_continuation(
+                            &trace_id,
+                            result.agentic_depth.saturating_add(1),
+                            content.clone(),
+                        )
+                        .await;
+                }
             }
 
             if result.agentic_depth > 0 {
@@ -3273,6 +3799,10 @@ impl CoreOrchestrator {
                     agentic_depth = result.agentic_depth + 1,
                     "Action dispatched to background task"
                 );
+                let started_status = format!(
+                    "Action started: {action_description}. Rust will post a completion or failure receipt when it finishes."
+                );
+                self.send_text(&started_status, false, &trace_id).await?;
 
                 // Phase 38 / Codex finding [10]: track the spawned action so
                 // cancel paths (handle_barge_in, hotkey, shutdown) can abort
@@ -3313,8 +3843,8 @@ impl CoreOrchestrator {
         // or the task is still running.
         //
         // The guard only fires when:
-        //   a) this is an agentic continuation (depth > 0 — never on user-turn
-        //      empty responses, which are valid for e.g. `[SILENT]` sentinels),
+        //   a) this is an agentic continuation (depth > 0; user-turn empty
+        //      responses are handled above as generation failures),
         //   b) no action was dispatched or is pending (no more work queued),
         //   c) there's no visible/recordable text (`record_text` is empty),
         //   d) TTS wasn't active (the model didn't already say something).
@@ -3323,6 +3853,38 @@ impl CoreOrchestrator {
         // the operator at least knows the chain ended rather than staring at an
         // entity that went IDLE with nothing to show for the action(s) it ran.
         let agentic_depth = result.agentic_depth;
+        let user_turn_empty = agentic_depth == 0
+            && !action_is_pending
+            && !action_dispatched
+            && !tts_was_active
+            && record_text.trim().is_empty();
+        if user_turn_empty {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                model = %telemetry.model,
+                token_count = telemetry.token_count,
+                "User turn produced no visible answer — recording generation failure"
+            );
+            let fallback = "I didn't produce a usable answer for that turn. Nothing was completed or verified.";
+            self.context.push_assistant(fallback.to_string());
+            self.session_mgr.push_turn("assistant", fallback);
+            self.send_text(fallback, true, &trace_id).await?;
+            if let Err(error) = self
+                .turn_records
+                .close_turn(&trace_id, TurnCloseReason::GenerationFailed)
+            {
+                debug!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %error,
+                    "Context turn record generation-failed close skipped"
+                );
+            }
+            self.send_state(EntityState::Idle, &trace_id).await?;
+            return Ok(());
+        }
+
         let went_silent = agentic_depth > 0
             && !action_is_pending
             && !action_dispatched
@@ -3947,6 +4509,102 @@ impl CoreOrchestrator {
             }
         }
 
+        // Deterministic provenance audit.
+        //
+        // If the operator challenges an immediately preceding host-generated
+        // local report, do not ask a language model whether the host actually
+        // measured it. The Rust path already knows the report's provenance and
+        // can recheck ephemeral process state directly.
+        if is_truthfulness_challenge(&content) {
+            if let Some(evidence) = latest_deterministic_local_evidence(self.context.messages()) {
+                return self
+                    .dispatch_deterministic_local_evidence_audit(content, trace_id, evidence)
+                    .await;
+            }
+        }
+
+        // Resolve references to a numbered entry in the most recent local
+        // process report from the report itself. The model must not reconstruct
+        // an ephemeral PID or process identity from conversation prose.
+        if let Some(reference) = local_process_report_reference(&content, self.context.messages()) {
+            return self
+                .dispatch_deterministic_process_report_reference(content, trace_id, reference)
+                .await;
+        }
+
+        // Deterministic local process-identity bridge.
+        //
+        // A PID is ephemeral state owned by this Mac. It must never be sent to
+        // web retrieval: only the local process table can identify it correctly.
+        if let Some(process_request) =
+            local_process_identity_request_with_context(&content, self.context.messages())
+        {
+            return self
+                .dispatch_deterministic_process_identity_report(content, trace_id, process_request)
+                .await;
+        }
+
+        // Deterministic local system-status bridge.
+        //
+        // Questions like "what's eating up my RAM right now?" are not command-learning
+        // questions; they are requests for Dexter to inspect this Mac. The answer must
+        // be computed from process metrics, not inferred by the model from a shell table.
+        if let Some(system_check) =
+            local_system_status_request_with_context(&content, self.context.messages())
+        {
+            return self
+                .dispatch_deterministic_system_status_report(content, trace_id, system_check)
+                .await;
+        }
+
+        // Deterministic ambient-notice explanation bridge.
+        //
+        // The HUD's "Dexter Notices" panel is backed by local ambient trigger
+        // events. Questions like "what do these notices mean?" need to read that
+        // local evidence directly instead of asking the model to infer the meaning
+        // of its own operator telemetry.
+        if ambient_notice_explanation_request(&content) {
+            return self
+                .dispatch_deterministic_ambient_notice_report(content, trace_id)
+                .await;
+        }
+
+        // Deterministic Contacts-backed message bridge.
+        //
+        // Simple daily-driver phrasing ("send a text to Jason saying ...") should not
+        // require PRIMARY to parse a huge action prompt before Rust can enforce the
+        // Contacts safety boundary. Parse only explicit recipient+body forms here,
+        // then route through the same structured `message_send` action path used for
+        // model-emitted actions.
+        if let Some(intent) = Self::detect_deterministic_message_send_request(&content) {
+            return self
+                .dispatch_deterministic_message_send_action(content, trace_id, intent)
+                .await;
+        }
+
+        // Command execution follow-up bridge.
+        //
+        // When Dexter answers an informational command query ("run `lsof -i :80`") and
+        // the operator immediately says "check for me" / "run it for me", the next turn
+        // can route as plain FAST chat because the utterance itself has no command text.
+        // That leaves the model in a non-actionable prompt profile where it may describe
+        // or hallucinate terminal output instead of emitting an ActionSpec. If a recent
+        // assistant message contains a single shell command, synthesize the same action
+        // block the model should have emitted and pass it through handle_generation_complete
+        // so policy gates, audit receipts, cancellation, and continuations remain intact.
+        if let Some(command) = self.shell_command_followup_action(&content) {
+            return self
+                .dispatch_deterministic_shell_action(
+                    content,
+                    trace_id,
+                    command,
+                    "operator asked Dexter to run the previously suggested shell command",
+                    "I'll run that.\n\n",
+                    "deterministic-shell-followup",
+                )
+                .await;
+        }
+
         // Humor Engine short-circuit.
         //
         // Joke generation has different failure modes than normal chat: hedge
@@ -4065,6 +4723,19 @@ impl CoreOrchestrator {
                 "{} [domain override: {} → PRIMARY]",
                 decision.reasoning,
                 matched_domains.join(", ")
+            );
+        }
+
+        if matches!(decision.model, ModelId::Fast) && is_truthfulness_challenge(&content) {
+            info!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                "Truthfulness challenge detected — upgrading FAST → PRIMARY for evidence audit"
+            );
+            decision.model = ModelId::Primary;
+            decision.reasoning = format!(
+                "{} [truthfulness audit override: → PRIMARY]",
+                decision.reasoning
             );
         }
 
@@ -5193,11 +5864,136 @@ impl CoreOrchestrator {
         }
     }
 
+    fn update_ui_recovery_guard(
+        &mut self,
+        action_spec: Option<&ActionSpec>,
+        outcome: &ActionOutcome,
+    ) {
+        let Some(spec) = action_spec else {
+            return;
+        };
+        if ui_action_target(spec).is_none() {
+            return;
+        }
+
+        match outcome {
+            ActionOutcome::Completed { .. } => {
+                if matches!(
+                    spec,
+                    ActionSpec::UiSnapshot { .. } | ActionSpec::WindowInspect { .. }
+                ) {
+                    self.last_ui_recovery_guard = None;
+                }
+            }
+            ActionOutcome::Rejected { error, .. } => {
+                self.last_ui_recovery_guard = ui_recovery_guard_from_failure(spec, error);
+            }
+            ActionOutcome::PendingApproval { .. } => {}
+        }
+    }
+
+    async fn record_message_send_preflight_failure(
+        &mut self,
+        recipient: &str,
+        body: &str,
+        error: &str,
+        trace_id: &str,
+    ) -> Result<(), OrchestratorError> {
+        let spec = ActionSpec::MessageSend {
+            recipient: recipient.to_string(),
+            body: body.to_string(),
+            rationale: Some("Structured iMessage send preflight".to_string()),
+        };
+        let category = PolicyEngine::classify(&spec);
+        let action_type = ActionEngine::type_str(&spec);
+        let action_category = ActionEngine::category_str(category);
+        let description = ActionEngine::describe(&spec);
+        let outcome = self
+            .action_engine
+            .record_preflight_failure(&spec, category, error)
+            .await;
+
+        if let Err(e) = self.turn_records.attach_action_result(
+            trace_id,
+            action_type,
+            Some(action_category),
+            &outcome,
+        ) {
+            debug!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %e,
+                "Context turn record message_send preflight attachment skipped"
+            );
+        }
+
+        self.send_action_receipt_for_outcome(
+            &outcome,
+            action_type,
+            action_category,
+            Some(&description),
+            error,
+            None,
+            trace_id,
+        )
+        .await
+    }
+
     /// Submit an exact ActionSpec from the dexter-cli synthetic action path.
     ///
     /// This is intentionally not exposed through the Swift UI. It exists so live
     /// smoke tests can verify the Rust-side policy/approval boundary without
     /// relying on a local model to emit the desired JSON shape.
+    fn start_synthetic_action_turn_record(
+        &mut self,
+        spec: &ActionSpec,
+        description: &str,
+        action_type: &str,
+        trace_id: &str,
+    ) {
+        let task_class = match spec {
+            ActionSpec::Browser { .. }
+            | ActionSpec::WindowFocus { .. }
+            | ActionSpec::WindowInspect { .. }
+            | ActionSpec::UiSnapshot { .. }
+            | ActionSpec::UiClick { .. }
+            | ActionSpec::UiType { .. }
+            | ActionSpec::UiSelect { .. }
+            | ActionSpec::UiToggle { .. }
+            | ActionSpec::UiPick { .. } => TaskClass::UiAction,
+            _ => TaskClass::Unknown,
+        };
+        let dispatch_input = TurnDispatchInput {
+            session_id: self.session_id.clone(),
+            trace_id: trace_id.to_string(),
+            turn_id: trace_id.to_string(),
+            task_class,
+            route_category: Some("SyntheticAction".to_string()),
+            model: Some("synthetic_action".to_string()),
+            user_text: format!("Synthetic {action_type}: {description}"),
+            context_diagnostics: CompiledContextDiagnostics {
+                compiler_version: "synthetic_action_v1".to_string(),
+                scope: CompilerScope::AmbientOnly,
+                token_cost_method: TokenCostMethod::CharHeuristicV1,
+                budget_tokens: 0,
+                reserved_output_tokens: 0,
+                estimated_used_tokens: 0,
+                mandatory_tokens: 0,
+                optional_tokens: 0,
+                included: Vec::new(),
+                dropped: Vec::new(),
+            },
+        };
+        if let Err(e) = self.turn_records.start_turn(dispatch_input) {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %e,
+                "Synthetic action context turn record start failed"
+            );
+        }
+    }
+
     async fn handle_synthetic_action(
         &mut self,
         spec: ActionSpec,
@@ -5214,6 +6010,8 @@ impl CoreOrchestrator {
             description = %description,
             "Synthetic ActionSpec received from dexter-cli"
         );
+
+        self.start_synthetic_action_turn_record(&spec, &description, &action_type, &trace_id);
 
         self.send_state(EntityState::Thinking, &trace_id).await?;
         match self.action_engine.submit(spec, &trace_id).await {
@@ -5247,6 +6045,19 @@ impl CoreOrchestrator {
                 self.action_awaiting_approval = true;
             }
             outcome => {
+                if let Err(e) = self.turn_records.attach_action_result(
+                    &trace_id,
+                    &action_type,
+                    Some(&action_category),
+                    &outcome,
+                ) {
+                    debug!(
+                        session = %self.session_id,
+                        trace_id = %trace_id,
+                        error = %e,
+                        "Synthetic action context turn record attachment skipped"
+                    );
+                }
                 let feedback_text = match &outcome {
                     ActionOutcome::Completed { output, .. } => output.as_str(),
                     ActionOutcome::Rejected { error, .. } => error.as_str(),
@@ -5583,6 +6394,7 @@ impl CoreOrchestrator {
             _ => false,
         };
         self.update_browser_recovery_guard(attempted_action_spec.as_ref(), &result.outcome);
+        self.update_ui_recovery_guard(attempted_action_spec.as_ref(), &result.outcome);
 
         // Inject the action outcome into conversation context so the model knows
         // what happened on the next turn. Without this, every subsequent turn
@@ -5697,7 +6509,7 @@ impl CoreOrchestrator {
             return Ok(());
         }
 
-        let operator_status = action_result_status_text(
+        let operator_status = action_result_followup_status_text(
             &result.outcome,
             result.description.as_deref(),
             &feedback_text,
@@ -5911,7 +6723,7 @@ impl CoreOrchestrator {
             .unwrap_or(false);
 
         if let Some(raw_clip) = self.context_observer.clipboard_summary() {
-            if user_references_clipboard || clipboard_is_fresh {
+            if user_references_clipboard {
                 let fingerprint = crate::context::representation::fingerprint(raw_clip);
                 let mut features = CandidateFeatures {
                     source_weight: 48.0,
@@ -5968,7 +6780,8 @@ impl CoreOrchestrator {
             } else {
                 debug!(
                     session = %self.session_id,
-                    "Clipboard available but stale and user did not reference it - skipping candidate"
+                    clipboard_is_fresh,
+                    "Clipboard available but user did not reference it - skipping candidate"
                 );
             }
         }
@@ -6230,6 +7043,587 @@ impl CoreOrchestrator {
         ACTION_MARKERS.iter().any(|marker| lower.contains(marker))
     }
 
+    fn detect_deterministic_message_send_request(
+        user_text: &str,
+    ) -> Option<DeterministicMessageSendIntent> {
+        let prompt = Self::strip_message_request_prefixes(user_text.trim());
+        if prompt.is_empty() {
+            return None;
+        }
+
+        const VERB_PREFIXES: &[&str] = &[
+            "send a text message to ",
+            "send a text to ",
+            "send text to ",
+            "send a message to ",
+            "send message to ",
+            "send an imessage to ",
+            "send imessage to ",
+            "text ",
+            "message ",
+            "imessage ",
+        ];
+        const BODY_SEPARATORS: &[&str] = &[
+            " saying ",
+            " that says ",
+            " with the message ",
+            " with message ",
+            ": ",
+        ];
+
+        let lower = prompt.to_ascii_lowercase();
+        for prefix in VERB_PREFIXES {
+            let Some(rest_lower) = lower.strip_prefix(prefix) else {
+                continue;
+            };
+            let original_rest = &prompt[prompt.len() - rest_lower.len()..];
+            let original_rest_lower = original_rest.to_ascii_lowercase();
+            for separator in BODY_SEPARATORS {
+                let Some(separator_idx) = original_rest_lower.find(separator) else {
+                    continue;
+                };
+                let recipient =
+                    Self::normalize_message_request_part(&original_rest[..separator_idx]);
+                let body_start = separator_idx + separator.len();
+                let body = Self::normalize_message_request_part(&original_rest[body_start..]);
+                if recipient.is_empty() || body.is_empty() {
+                    return None;
+                }
+                return Some(DeterministicMessageSendIntent { recipient, body });
+            }
+        }
+
+        None
+    }
+
+    fn strip_message_request_prefixes(mut text: &str) -> &str {
+        loop {
+            let trimmed = text.trim_start();
+            let lower = trimmed.to_ascii_lowercase();
+            let next = if lower.starts_with("hey dexter,") {
+                Some(&trimmed["hey dexter,".len()..])
+            } else if lower.starts_with("hey dexter ") {
+                Some(&trimmed["hey dexter ".len()..])
+            } else if lower.starts_with("dexter,") {
+                Some(&trimmed["dexter,".len()..])
+            } else if lower.starts_with("please ") {
+                Some(&trimmed["please ".len()..])
+            } else if lower.starts_with("ok ") {
+                Some(&trimmed["ok ".len()..])
+            } else if lower.starts_with("okay ") {
+                Some(&trimmed["okay ".len()..])
+            } else {
+                None
+            };
+
+            match next {
+                Some(next_text) if next_text.len() != text.len() => text = next_text,
+                _ => return trimmed,
+            }
+        }
+    }
+
+    fn normalize_message_request_part(text: &str) -> String {
+        text.trim()
+            .trim_matches(|c: char| {
+                c.is_ascii_whitespace()
+                    || c == '"'
+                    || c == '\''
+                    || c == '`'
+                    || c == '“'
+                    || c == '”'
+                    || c == '‘'
+                    || c == '’'
+            })
+            .trim_end_matches(|c: char| c == ',' || c == ';')
+            .trim()
+            .to_string()
+    }
+
+    fn shell_command_followup_action(&self, user_text: &str) -> Option<String> {
+        if !is_shell_execution_followup(user_text) {
+            return None;
+        }
+        recent_assistant_shell_command(self.context.messages())
+    }
+
+    fn start_deterministic_message_turn_record(
+        &mut self,
+        content: &str,
+        trace_id: &str,
+        spec: &ActionSpec,
+    ) {
+        let dispatch_input = TurnDispatchInput {
+            session_id: self.session_id.clone(),
+            trace_id: trace_id.to_string(),
+            turn_id: trace_id.to_string(),
+            task_class: TaskClass::Unknown,
+            route_category: Some("DeterministicAction".to_string()),
+            model: Some("deterministic_message_send".to_string()),
+            user_text: content.to_string(),
+            context_diagnostics: CompiledContextDiagnostics {
+                compiler_version: "deterministic_action_v1".to_string(),
+                scope: CompilerScope::AmbientOnly,
+                token_cost_method: TokenCostMethod::CharHeuristicV1,
+                budget_tokens: 0,
+                reserved_output_tokens: 0,
+                estimated_used_tokens: 0,
+                mandatory_tokens: 0,
+                optional_tokens: 0,
+                included: Vec::new(),
+                dropped: Vec::new(),
+            },
+        };
+        if let Err(e) = self.turn_records.start_turn(dispatch_input) {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                action_type = %ActionEngine::type_str(spec),
+                error = %e,
+                "Deterministic message context turn record start failed"
+            );
+        }
+    }
+
+    async fn dispatch_deterministic_message_send_action(
+        &mut self,
+        content: String,
+        trace_id: String,
+        intent: DeterministicMessageSendIntent,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let spec = ActionSpec::MessageSend {
+            recipient: intent.recipient,
+            body: intent.body,
+            rationale: Some("Deterministic Contacts-backed message request".to_string()),
+        };
+        self.start_deterministic_message_turn_record(&content, &trace_id, &spec);
+        let action_json = match serde_json::to_string(&spec) {
+            Ok(json) => json,
+            Err(e) => {
+                error!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %e,
+                    "Failed to serialize deterministic message_send action"
+                );
+                self.send_text(
+                    "I couldn't turn that message request into a local action cleanly.",
+                    true,
+                    &trace_id,
+                )
+                .await?;
+                self.send_state(EntityState::Idle, &trace_id).await?;
+                return Ok(());
+            }
+        };
+        info!(
+            session = %self.session_id,
+            trace_id = %trace_id,
+            "Deterministic message_send action dispatched through Contacts policy"
+        );
+
+        let synthetic = GenerationResult {
+            cancelled: false,
+            full_response: format!("{ACTION_BLOCK_OPEN}{action_json}{ACTION_BLOCK_CLOSE}"),
+            intercepted_q: None,
+            tts_was_active: false,
+            trace_id,
+            content,
+            embed_model: self.model_config.embed.clone(),
+            is_shell_proactive: false,
+            proactive_silent: false,
+            agentic_depth: 0,
+            telemetry: GenerationTelemetry {
+                model: "deterministic_message_send".to_string(),
+                response_len: 0,
+                ..GenerationTelemetry::default()
+            },
+        };
+        self.handle_generation_complete(synthetic).await
+    }
+
+    async fn dispatch_deterministic_shell_action(
+        &mut self,
+        content: String,
+        trace_id: String,
+        command: String,
+        rationale: &'static str,
+        preface: &'static str,
+        telemetry_model: &'static str,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+        self.send_text(preface, false, &trace_id).await?;
+
+        let spec = ActionSpec::Shell {
+            args: vec!["/bin/zsh".to_string(), "-lc".to_string(), command.clone()],
+            working_dir: None,
+            rationale: Some(rationale.to_string()),
+            category_override: None,
+        };
+        let action_json = match serde_json::to_string(&spec) {
+            Ok(json) => json,
+            Err(e) => {
+                error!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %e,
+                    command = %command,
+                    "Failed to serialize deterministic shell action"
+                );
+                self.send_text(
+                    "I couldn't turn that request into a local action cleanly.",
+                    true,
+                    &trace_id,
+                )
+                .await?;
+                self.send_state(EntityState::Idle, &trace_id).await?;
+                return Ok(());
+            }
+        };
+        info!(
+            session = %self.session_id,
+            trace_id = %trace_id,
+            command = %command,
+            "Deterministic shell action dispatched through policy"
+        );
+        let synthetic_response =
+            format!("{preface}\n{ACTION_BLOCK_OPEN}{action_json}{ACTION_BLOCK_CLOSE}");
+        let synthetic = GenerationResult {
+            cancelled: false,
+            full_response: synthetic_response,
+            intercepted_q: None,
+            tts_was_active: false,
+            trace_id,
+            content,
+            embed_model: self.model_config.embed.clone(),
+            is_shell_proactive: false,
+            proactive_silent: false,
+            agentic_depth: 0,
+            telemetry: GenerationTelemetry {
+                model: telemetry_model.to_string(),
+                response_len: 0,
+                ..GenerationTelemetry::default()
+            },
+        };
+        self.handle_generation_complete(synthetic).await
+    }
+
+    fn start_deterministic_answer_turn_record(
+        &mut self,
+        content: &str,
+        trace_id: &str,
+        route_category: &str,
+        model: &str,
+    ) {
+        let dispatch_input = TurnDispatchInput {
+            session_id: self.session_id.clone(),
+            trace_id: trace_id.to_string(),
+            turn_id: trace_id.to_string(),
+            task_class: TaskClass::LocalSystemStatus,
+            route_category: Some(route_category.to_string()),
+            model: Some(model.to_string()),
+            user_text: content.to_string(),
+            context_diagnostics: CompiledContextDiagnostics {
+                compiler_version: "deterministic_local_evidence_v1".to_string(),
+                scope: CompilerScope::AmbientOnly,
+                token_cost_method: TokenCostMethod::CharHeuristicV1,
+                budget_tokens: 0,
+                reserved_output_tokens: 0,
+                estimated_used_tokens: 0,
+                mandatory_tokens: 0,
+                optional_tokens: 0,
+                included: Vec::new(),
+                dropped: Vec::new(),
+            },
+        };
+        if let Err(error) = self.turn_records.start_turn(dispatch_input) {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %error,
+                "Deterministic local-evidence turn record start failed"
+            );
+        }
+    }
+
+    fn finish_deterministic_answer_turn_record(&mut self, trace_id: &str, output: &str) {
+        let telemetry = GenerationRecordInput {
+            first_token_ms: None,
+            total_ms: 0,
+            token_count: 0,
+            cancelled: false,
+            response_len: output.len(),
+            prompt_eval_count: None,
+            prompt_eval_ms: None,
+            load_ms: None,
+            eval_ms: None,
+        };
+        if let Err(error) = self
+            .turn_records
+            .attach_generation(trace_id, &telemetry, output, None)
+        {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %error,
+                "Deterministic local-evidence generation record attachment failed"
+            );
+            return;
+        }
+        if let Err(error) = self
+            .turn_records
+            .close_turn(trace_id, TurnCloseReason::AnsweredNoAction)
+        {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %error,
+                "Deterministic local-evidence turn record close failed"
+            );
+        }
+    }
+
+    async fn dispatch_deterministic_local_evidence_audit(
+        &mut self,
+        content: String,
+        trace_id: String,
+        evidence: DeterministicLocalEvidence,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.start_deterministic_answer_turn_record(
+            &content,
+            &trace_id,
+            "DeterministicLocalEvidenceAudit",
+            "deterministic_local_evidence_audit",
+        );
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let report = match evidence {
+            DeterministicLocalEvidence::Process { pid } => {
+                match sample_local_process_identity(pid).await {
+                    Ok(Some(process)) => format!(
+                        "No. The prior PID answer came from Dexter's Rust host inspecting this Mac; it was not a model guess. I checked PID {pid} again just now: it is `{}` at `{}`, with parent PID {}, {:.1}% CPU, and {:.2} GiB memory using Activity Monitor-style `top` accounting. I did not use a web search. Because a PID is temporary, these values can change between samples.",
+                        process_display_name(&process.executable)
+                            .unwrap_or_else(|| process.executable.clone()),
+                        process.executable,
+                        process.parent_pid,
+                        process.cpu_pct,
+                        process.memory_gib,
+                    ),
+                    Ok(None) => format!(
+                        "No. The prior PID answer came from Dexter's Rust host inspecting the local macOS process table with `ps`; it was not a model guess. PID {pid} is no longer present in the process table, so it appears to have exited since that sample. I did not use a web search."
+                    ),
+                    Err(error) => format!(
+                        "The prior PID answer was generated by Dexter's Rust host from local `ps`, not by model inference. The fresh recheck of PID {pid} failed: {error}. I did not use a web search, and I cannot claim more from the failed recheck."
+                    ),
+                }
+            }
+            DeterministicLocalEvidence::SystemStatus => {
+                "No. The preceding RAM/CPU report was generated by Dexter's Rust host from local macOS `top`; it was not a model estimate. Memory used Activity Monitor-style process footprints and CPU used a one-second sample. Current values may differ from the earlier sample, so I should remeasure rather than guess or reflexively retract it.".to_string()
+            }
+            DeterministicLocalEvidence::AmbientNotices => {
+                "No. The preceding Dexter Notices explanation came from Dexter's persisted local ambient-event state, not a model guess. The notice text can be audited through the local event record and action receipts.".to_string()
+            }
+        };
+
+        info!(
+            session = %self.session_id,
+            trace_id = %trace_id,
+            evidence = ?evidence,
+            "Deterministic local-evidence truthfulness audit completed"
+        );
+        self.context.push_assistant(report.clone());
+        self.session_mgr.push_turn("assistant", &report);
+        self.finish_deterministic_answer_turn_record(&trace_id, &report);
+        self.send_text(&report, true, &trace_id).await?;
+        self.send_state(EntityState::Idle, &trace_id).await
+    }
+
+    async fn dispatch_deterministic_process_identity_report(
+        &mut self,
+        content: String,
+        trace_id: String,
+        request: LocalProcessIdentityRequest,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.start_deterministic_answer_turn_record(
+            &content,
+            &trace_id,
+            "DeterministicLocalProcess",
+            "deterministic_local_process",
+        );
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let report = match sample_local_process_identity(request.pid).await {
+            Ok(process) => format_local_process_identity_report(request, process.as_ref()),
+            Err(error) => {
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    pid = request.pid,
+                    error = %error,
+                    "Failed to inspect local PID"
+                );
+                format!(
+                    "I couldn't inspect PID {} from the local macOS process table: {error}. I did not search the web because PIDs are machine-local and temporary.",
+                    request.pid
+                )
+            }
+        };
+
+        self.context.push_assistant(report.clone());
+        self.session_mgr.push_turn("assistant", &report);
+        self.finish_deterministic_answer_turn_record(&trace_id, &report);
+        self.send_text(&report, true, &trace_id).await?;
+        self.send_state(EntityState::Idle, &trace_id).await
+    }
+
+    async fn dispatch_deterministic_process_report_reference(
+        &mut self,
+        content: String,
+        trace_id: String,
+        reference: LocalProcessReportReference,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.start_deterministic_answer_turn_record(
+            &content,
+            &trace_id,
+            "DeterministicLocalProcessReference",
+            "deterministic_local_process_reference",
+        );
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let report = match sample_local_process_identity(reference.pid).await {
+            Ok(Some(process)) => {
+                let current_name = process_display_name(&process.executable)
+                    .unwrap_or_else(|| process.executable.clone());
+                format!(
+                    "In the preceding {} report, #{} was `{}` (PID {}). It is still running as `{}`. Current local sample: {:.1}% CPU and {:.2} GiB memory. The numbered identity came from the saved host report; the current values came from local `ps` and `top`.",
+                    reference.report_kind,
+                    reference.ordinal,
+                    reference.process,
+                    reference.pid,
+                    current_name,
+                    process.cpu_pct,
+                    process.memory_gib,
+                )
+            }
+            Ok(None) => format!(
+                "In the preceding {} report, #{} was `{}` (PID {}). That PID is no longer running, so the process exited after the sample. The identity came from the saved host report; I did not ask the model or search the web.",
+                reference.report_kind, reference.ordinal, reference.process, reference.pid,
+            ),
+            Err(error) => format!(
+                "In the preceding {} report, #{} was `{}` (PID {}). A fresh local lookup failed: {error}. The numbered identity still comes from the saved host report; I did not ask the model or search the web.",
+                reference.report_kind, reference.ordinal, reference.process, reference.pid,
+            ),
+        };
+
+        self.context.push_assistant(report.clone());
+        self.session_mgr.push_turn("assistant", &report);
+        self.finish_deterministic_answer_turn_record(&trace_id, &report);
+        self.send_text(&report, true, &trace_id).await?;
+        self.send_state(EntityState::Idle, &trace_id).await
+    }
+
+    async fn dispatch_deterministic_system_status_report(
+        &mut self,
+        content: String,
+        trace_id: String,
+        request: LocalSystemStatusRequest,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.start_deterministic_answer_turn_record(
+            &content,
+            &trace_id,
+            "DeterministicLocalSystemStatus",
+            "deterministic_local_system_status",
+        );
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let sample_started = std::time::Instant::now();
+        let report = match sample_process_usage(request).await {
+            Ok(processes) => {
+                let sample_ms = sample_started.elapsed().as_millis();
+                info!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    wants_memory = request.wants_memory,
+                    wants_cpu = request.wants_cpu,
+                    process_count = processes.len(),
+                    sample_ms,
+                    "Deterministic local process sample completed"
+                );
+                let mut report = format_local_system_status_report(request, &processes);
+                report.push_str(&format!(
+                    " Host sampling completed in {sample_ms} ms; no language model generated these values."
+                ));
+                report
+            }
+            Err(error) => {
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %error,
+                    "Failed to sample local process usage"
+                );
+                "I couldn't read the current Activity Monitor-style process list cleanly from macOS `top`.".to_string()
+            }
+        };
+
+        self.context.push_assistant(report.clone());
+        self.session_mgr.push_turn("assistant", &report);
+        self.finish_deterministic_answer_turn_record(&trace_id, &report);
+        self.send_text(&report, true, &trace_id).await?;
+        self.send_state(EntityState::Idle, &trace_id).await
+    }
+
+    async fn dispatch_deterministic_ambient_notice_report(
+        &mut self,
+        content: String,
+        trace_id: String,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.start_deterministic_answer_turn_record(
+            &content,
+            &trace_id,
+            "DeterministicAmbientNotice",
+            "deterministic_ambient_notice",
+        );
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let report = match self.ambient_store.recent_events(200) {
+            Ok((path, events)) => format_ambient_notice_explanation(&path, &events, None),
+            Err(error) => {
+                let path = self.ambient_store.events_path();
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %error,
+                    event_log_path = %path.display(),
+                    "Failed to read ambient notice history for deterministic explanation"
+                );
+                format_ambient_notice_explanation(&path, &[], Some(&error.to_string()))
+            }
+        };
+
+        self.context.push_assistant(report.clone());
+        self.session_mgr.push_turn("assistant", &report);
+        self.finish_deterministic_answer_turn_record(&trace_id, &report);
+        self.send_text(&report, true, &trace_id).await?;
+        self.send_state(EntityState::Idle, &trace_id).await
+    }
+
     fn num_ctx_override_for_prompt(model: ModelId, prompt_profile: PromptProfile) -> Option<u32> {
         match (model, prompt_profile) {
             (ModelId::Primary | ModelId::Vision, PromptProfile::PrimaryFull) => {
@@ -6246,7 +7640,8 @@ impl CoreOrchestrator {
     ) -> ModelId {
         if matches!(routed_model, ModelId::Primary | ModelId::Vision)
             && prompt_profile == PromptProfile::PrimaryFull
-            && Self::looks_browser_action_request(user_text)
+            && (Self::looks_browser_action_request(user_text)
+                || Self::looks_ui_window_action_request(user_text))
         {
             ModelId::Fast
         } else {
@@ -6273,6 +7668,31 @@ impl CoreOrchestrator {
         ];
 
         BROWSER_ACTION_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+    }
+
+    fn looks_ui_window_action_request(user_text: &str) -> bool {
+        let lower = user_text.to_lowercase();
+        const UI_WINDOW_ACTION_MARKERS: &[&str] = &[
+            "ui action",
+            "ui actions",
+            "use dexter ui",
+            "ui_click",
+            "ui_type",
+            "ui_select",
+            "ui_toggle",
+            "ui_pick",
+            "ui_snapshot",
+            "window_focus",
+            "window_inspect",
+            "role ax",
+            "axbutton",
+            "axtext",
+            "accessibility",
+        ];
+
+        UI_WINDOW_ACTION_MARKERS
             .iter()
             .any(|marker| lower.contains(marker))
     }
@@ -6333,6 +7753,21 @@ impl CoreOrchestrator {
             messages.insert(
                 pos,
                 crate::inference::engine::Message::system(format!("The current time is {ts}.")),
+            );
+        }
+
+        if query_hint.map(is_truthfulness_challenge).unwrap_or(false) {
+            let insert_pos = messages
+                .iter()
+                .take_while(|message| message.role.as_str() == "system")
+                .count();
+            messages.insert(
+                insert_pos,
+                crate::inference::engine::Message::system(TRUTHFULNESS_AUDIT_INSTRUCTION),
+            );
+            info!(
+                session = %self.session_id,
+                "Truthfulness audit instruction injected into inference request"
             );
         }
 
@@ -6447,9 +7882,10 @@ impl CoreOrchestrator {
         // Skipped when the trailing user message is a tool-result injection
         // (is_tool_result_content) — those already carry their own context block.
         // Also skipped when no user message exists yet (e.g. pre-first-turn prefill).
-        // Clipboard injection is CONDITIONAL — only injected when:
-        // (a) the user's query explicitly references clipboard/copy, OR
-        // (b) the clipboard was updated within CLIPBOARD_RECENCY_SECS (fresh copy-then-ask)
+        // Clipboard injection is CONDITIONAL — only injected when the user's query
+        // explicitly or indexically references clipboard content. Freshness affects
+        // scoring and representation, but freshness alone is not intent: a recent copy
+        // must not hijack unrelated chat such as "let's do some testing."
         //
         // Without this gate, stale clipboard content (e.g. 926 chars of browser cookies
         // from hours ago) is prepended to every query, overwhelming small models into
@@ -6487,6 +7923,10 @@ impl CoreOrchestrator {
             let (current_session, prior_session): (Vec<_>, Vec<_>) = recall
                 .iter()
                 .partition(|e| e.session_id.as_deref() == Some(self.session_id.as_str()));
+            let current_session = current_session
+                .into_iter()
+                .filter(|entry| !recall_entry_duplicates_live_history(&entry.content, &messages))
+                .collect::<Vec<_>>();
 
             let insert_at = messages.iter().take_while(|m| m.role == "system").count();
 
@@ -8689,6 +10129,151 @@ fn is_command_query(content: &str) -> bool {
     query_patterns.iter().any(|p| lc.contains(p))
 }
 
+fn is_shell_execution_followup(content: &str) -> bool {
+    let lc = content
+        .trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .to_lowercase();
+    if lc.is_empty() {
+        return false;
+    }
+    const EXECUTION_FOLLOWUPS: &[&str] = &[
+        "run it",
+        "run that",
+        "run this",
+        "run it for me",
+        "run that for me",
+        "run this for me",
+        "check it",
+        "check that",
+        "check this",
+        "check for me",
+        "check it for me",
+        "check that for me",
+        "you check",
+        "you check it",
+        "you check that",
+        "you tell me",
+        "do it",
+        "do that",
+        "go ahead",
+        "go ahead and run it",
+        "go ahead and check",
+        "please run it",
+        "please check",
+        "execute it",
+        "execute that",
+    ];
+    EXECUTION_FOLLOWUPS.iter().any(|phrase| lc == *phrase)
+        || lc.starts_with("run it ")
+        || lc.starts_with("run that ")
+        || lc.starts_with("check it ")
+        || lc.starts_with("check that ")
+        || lc.starts_with("check for me ")
+        || lc.starts_with("go ahead and run ")
+        || lc.starts_with("go ahead and check ")
+}
+
+fn recent_assistant_shell_command(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|msg| msg.origin == MessageOrigin::Assistant || msg.role == "assistant")
+        .take(3)
+        .find_map(|msg| extract_shell_command_from_assistant_text(&msg.content))
+}
+
+fn extract_shell_command_from_assistant_text(text: &str) -> Option<String> {
+    extract_command_from_fenced_blocks(text)
+        .or_else(|| extract_command_from_inline_code(text))
+        .filter(|cmd| is_safe_recent_shell_command_candidate(cmd))
+}
+
+fn extract_command_from_fenced_blocks(text: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(start) = rest.find("```") {
+        let after_open = &rest[start + 3..];
+        let Some(end) = after_open.find("```") else {
+            return None;
+        };
+        let block = &after_open[..end];
+        let command = command_from_code_block(block);
+        if command.is_some() {
+            return command;
+        }
+        rest = &after_open[end + 3..];
+    }
+    None
+}
+
+fn command_from_code_block(block: &str) -> Option<String> {
+    let mut lines = block.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next()?;
+    let command = if is_code_fence_language(first) {
+        lines.next()?
+    } else {
+        first
+    };
+    if lines.next().is_some() {
+        return None;
+    }
+    Some(strip_shell_prompt(command).trim().to_string()).filter(|cmd| !cmd.is_empty())
+}
+
+fn extract_command_from_inline_code(text: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        let after_open = &rest[start + 1..];
+        if after_open.starts_with('`') {
+            rest = &after_open[1..];
+            continue;
+        }
+        let Some(end) = after_open.find('`') else {
+            return None;
+        };
+        let candidate = strip_shell_prompt(&after_open[..end]).trim().to_string();
+        if is_safe_recent_shell_command_candidate(&candidate) {
+            return Some(candidate);
+        }
+        rest = &after_open[end + 1..];
+    }
+    None
+}
+
+fn is_code_fence_language(line: &str) -> bool {
+    matches!(
+        line,
+        "sh" | "shell" | "bash" | "zsh" | "console" | "terminal"
+    )
+}
+
+fn strip_shell_prompt(line: &str) -> &str {
+    line.strip_prefix("$ ")
+        .or_else(|| line.strip_prefix("% "))
+        .unwrap_or(line)
+}
+
+fn is_safe_recent_shell_command_candidate(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.len() > 400 {
+        return false;
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') || trimmed.contains('\0') {
+        return false;
+    }
+    if trimmed.contains(ACTION_BLOCK_OPEN) || trimmed.contains(ACTION_BLOCK_CLOSE) {
+        return false;
+    }
+    let first = trimmed.split_whitespace().next().unwrap_or_default();
+    if first.is_empty() || first.starts_with('-') {
+        return false;
+    }
+    const NON_COMMAND_PREFIXES: &[&str] = &[
+        "here", "this", "that", "the", "a", "an", "it", "try", "command",
+    ];
+    !NON_COMMAND_PREFIXES.contains(&first.to_lowercase().as_str())
+}
+
 fn action_review_label(cat: &ActionCategory) -> &'static str {
     match cat {
         ActionCategory::Safe => "no approval required",
@@ -8716,6 +10301,29 @@ fn action_approval_warning_text(
 // payload. The full output still goes into bounded tool context separately.
 const ACTION_STATUS_OUTPUT_MAX_CHARS: usize = 600;
 
+fn claims_unverified_action_progress(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "let me check",
+        "i'll check",
+        "i will check",
+        "let me inspect",
+        "i'll inspect",
+        "i will inspect",
+        "let me look that up",
+        "i'll look that up",
+        "i will look that up",
+        "let me download",
+        "i'll download",
+        "i will download",
+        "downloading now",
+        "downloading from",
+        "give it a minute",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 fn action_result_status_text(
     outcome: &ActionOutcome,
     description: Option<&str>,
@@ -8726,6 +10334,23 @@ fn action_result_status_text(
             action_completion_status_text(description, feedback_text)
         }
         ActionOutcome::Rejected { error, .. } => action_failure_status_text(description, error),
+        ActionOutcome::PendingApproval { .. } => "Action is still awaiting approval.".to_string(),
+    }
+}
+
+fn action_result_followup_status_text(
+    outcome: &ActionOutcome,
+    description: Option<&str>,
+    feedback_text: &str,
+) -> String {
+    match outcome {
+        ActionOutcome::Completed { .. } => {
+            let subject = action_status_subject(description);
+            format!("Action completed: {subject}. Summarizing results...")
+        }
+        ActionOutcome::Rejected { .. } => {
+            action_result_status_text(outcome, description, feedback_text)
+        }
         ActionOutcome::PendingApproval { .. } => "Action is still awaiting approval.".to_string(),
     }
 }
@@ -8872,6 +10497,890 @@ fn compact_operator_text(text: &str, max_chars: usize) -> String {
     let truncated: String = trimmed.chars().take(max_chars).collect();
     let total = trimmed.chars().count();
     format!("{truncated}\n... (truncated, {total} chars total)")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalSystemStatusRequest {
+    wants_memory: bool,
+    wants_cpu: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalProcessIdentityRequest {
+    pid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalProcessReportReference {
+    ordinal: usize,
+    pid: u32,
+    process: String,
+    report_kind: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeterministicLocalEvidence {
+    Process { pid: u32 },
+    SystemStatus,
+    AmbientNotices,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ProcessUsage {
+    pid: u32,
+    cpu_pct: f64,
+    memory_gib: f64,
+    process: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LocalProcessIdentity {
+    pid: u32,
+    parent_pid: u32,
+    cpu_pct: f64,
+    memory_gib: f64,
+    executable: String,
+}
+
+fn local_system_status_request(content: &str) -> Option<LocalSystemStatusRequest> {
+    if is_command_query(content) || is_off_host_request(content) {
+        return None;
+    }
+
+    let lower = content.to_lowercase();
+    let wants_memory = looks_like_local_memory_status_request(&lower);
+    let wants_cpu = looks_like_local_cpu_status_request(&lower);
+
+    (wants_memory || wants_cpu).then_some(LocalSystemStatusRequest {
+        wants_memory,
+        wants_cpu,
+    })
+}
+
+fn local_process_identity_request(content: &str) -> Option<LocalProcessIdentityRequest> {
+    if is_command_query(content) || is_off_host_request(content) {
+        return None;
+    }
+
+    let lower = content.to_lowercase();
+    if ["kill", "terminate", "stop", "signal"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+    let asks_for_identity = lower.contains("what")
+        || lower.contains("which")
+        || lower.contains("identify")
+        || lower.contains("tell me about")
+        || lower.contains("look up")
+        || lower.contains("check");
+    if !asks_for_identity {
+        return None;
+    }
+
+    let tokens = lower
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        let pid_text = if *token == "pid" {
+            tokens.get(index + 1).copied()
+        } else {
+            token.strip_prefix("pid").filter(|value| !value.is_empty())
+        };
+        let Some(pid_text) = pid_text else {
+            continue;
+        };
+        let Ok(pid) = pid_text.parse::<u32>() else {
+            continue;
+        };
+        if pid > 0 {
+            return Some(LocalProcessIdentityRequest { pid });
+        }
+    }
+    None
+}
+
+fn local_process_identity_request_with_context(
+    content: &str,
+    messages: &[Message],
+) -> Option<LocalProcessIdentityRequest> {
+    if let Some(request) = local_process_identity_request(content) {
+        return Some(request);
+    }
+    if is_command_query(content) || is_off_host_request(content) {
+        return None;
+    }
+    let lower = content.to_lowercase();
+    let is_followup = lower.contains("what about")
+        || lower.contains("how about")
+        || lower.trim_start().starts_with("pid ");
+    if !is_followup || !recent_local_system_status_context(messages) {
+        return None;
+    }
+    let pids = lower
+        .split_whitespace()
+        .filter_map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| *pid > 0)
+        })
+        .collect::<Vec<_>>();
+    if pids.len() == 1 {
+        Some(LocalProcessIdentityRequest { pid: pids[0] })
+    } else {
+        None
+    }
+}
+
+fn local_process_report_reference(
+    content: &str,
+    messages: &[Message],
+) -> Option<LocalProcessReportReference> {
+    if is_command_query(content) || is_off_host_request(content) {
+        return None;
+    }
+    let lower = content.to_lowercase();
+    if !lower.contains("listed") && !lower.contains("number") && !lower.contains('#') {
+        return None;
+    }
+    let ordinal = lower
+        .split_whitespace()
+        .find_map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<usize>()
+                .ok()
+        })
+        .filter(|value| (1..=20).contains(value))?;
+
+    let report = messages.iter().rev().find(|message| {
+        (message.origin == MessageOrigin::Assistant || message.role == "assistant")
+            && (message.content.contains("Top CPU users right now:")
+                || message
+                    .content
+                    .contains("Top memory users right now (Activity Monitor-style footprint):"))
+    })?;
+    let report_kind = if report.content.contains("Top CPU users right now:") {
+        "CPU"
+    } else {
+        "memory"
+    };
+    let prefix = format!("{ordinal}. ");
+    let line = report
+        .content
+        .lines()
+        .find(|line| line.starts_with(&prefix))?;
+    let remainder = line.strip_prefix(&prefix)?;
+    let (process, pid_and_metric) = remainder.split_once(" (pid ")?;
+    let pid = pid_and_metric.split(')').next()?.parse::<u32>().ok()?;
+    Some(LocalProcessReportReference {
+        ordinal,
+        pid,
+        process: process.to_string(),
+        report_kind,
+    })
+}
+
+fn latest_deterministic_local_evidence(messages: &[Message]) -> Option<DeterministicLocalEvidence> {
+    let latest_assistant = messages.iter().rev().find(|message| {
+        message.origin == MessageOrigin::Assistant || message.role == "assistant"
+    })?;
+    let content = latest_assistant.content.trim();
+
+    if content.contains("Identity came from local `ps`; no web lookup was used") {
+        let pid = content
+            .strip_prefix("PID ")?
+            .split_whitespace()
+            .next()?
+            .parse::<u32>()
+            .ok()?;
+        return Some(DeterministicLocalEvidence::Process { pid });
+    }
+    if (content.contains("Measured just now from macOS")
+        || content.contains("Measured just now with macOS"))
+        && (content.contains("Top memory users right now")
+            || content.contains("Top process RSS right now:")
+            || content.contains("Top CPU users right now:"))
+    {
+        return Some(DeterministicLocalEvidence::SystemStatus);
+    }
+    if content.starts_with("Dexter Notices are local ambient trigger notifications") {
+        return Some(DeterministicLocalEvidence::AmbientNotices);
+    }
+    None
+}
+
+fn is_local_only_uncertainty_query(query: &str) -> bool {
+    if local_process_identity_request(query).is_some() {
+        return true;
+    }
+    let lower = query.to_lowercase();
+    [
+        "on my mac",
+        "on this mac",
+        "my computer",
+        "my system",
+        "local process",
+        "current process",
+        "process id",
+        "what is on my screen",
+        "what's on my screen",
+        "my clipboard",
+        "my current window",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn ambient_notice_explanation_request(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let mentions_notices = lower.contains("dexter notices")
+        || lower.contains("those notices")
+        || lower.contains("these notices")
+        || lower.contains("ambient notice")
+        || lower.contains("ambient event")
+        || lower.contains("trigger matched")
+        || lower.contains("action failure notice")
+        || lower.contains("action failures");
+    if !mentions_notices {
+        return false;
+    }
+
+    lower.contains("what")
+        || lower.contains("why")
+        || lower.contains("mean")
+        || lower.contains("explain")
+        || lower.contains("tell me")
+        || lower.contains("showing")
+}
+
+fn format_ambient_notice_explanation(
+    events_path: &Path,
+    events: &[AmbientEvent],
+    read_error: Option<&str>,
+) -> String {
+    if let Some(error) = read_error {
+        return format!(
+            "I couldn't read Dexter's ambient notice log at `{}`: {error}",
+            events_path.display()
+        );
+    }
+
+    let presented_events = ambient::compact_ambient_events_for_operator(events.to_vec());
+    let notice_events: Vec<&AmbientEvent> = presented_events
+        .iter()
+        .filter(|event| is_operator_visible_ambient_notice(event))
+        .collect();
+    if notice_events.is_empty() {
+        return format!(
+            "Dexter Notices are local ambient trigger notifications from `{}`. They are not model answers.\n\nThe repeated \"Dexter action failures\" notice means Dexter observed failed action receipts and surfaced them so you can inspect the actual failure. It does not mean the trigger itself failed.\n\nI don't see one in the recent event window now, probably because the HUD already acknowledged it. Open the HUD Why panel or run `make why` to see the latest action receipt if it happens again.",
+            events_path.display()
+        );
+    }
+
+    let action_failure_count = notice_events
+        .iter()
+        .filter(|event| event.kind == "action_failed")
+        .count();
+    let mut lines = vec![
+        "Those Dexter Notices are local ambient trigger notifications.".to_string(),
+        "They are generated from Dexter's local event log, not guessed by the model, and a notice does not mean the trigger itself failed.".to_string(),
+    ];
+
+    if action_failure_count > 0 {
+        let count_line = if action_failure_count == 1 {
+            "I found 1 recent action-failure notice.".to_string()
+        } else {
+            format!("I found {action_failure_count} recent action-failure notices.")
+        };
+        lines.push(count_line);
+    }
+
+    lines.push("Recent notices:".to_string());
+    for event in notice_events.iter().take(5) {
+        lines.push(format_ambient_notice_meaning(event));
+    }
+    if action_failure_count > 0 {
+        lines.push(
+            "For failed actions, open the HUD Why panel or run `make why` to see the action receipt that explains what failed.".to_string(),
+        );
+    }
+    lines.push(format!("Event log: `{}`", events_path.display()));
+    lines.join("\n")
+}
+
+fn is_operator_visible_ambient_notice(event: &AmbientEvent) -> bool {
+    matches!(
+        event.kind.as_str(),
+        "action_failed" | "ambient_notice" | "ambient_approval_needed" | "ambient_task_completed"
+    ) && (event.source == "trigger"
+        || event
+            .payload
+            .get("trigger_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || event
+            .payload
+            .get("grouped_event_ids")
+            .and_then(serde_json::Value::as_array)
+            .is_some())
+}
+
+fn format_ambient_notice_meaning(event: &AmbientEvent) -> String {
+    let title = ambient::display_ambient_event_title(event);
+    let summary = ambient::display_ambient_event_summary(event);
+    match event.kind.as_str() {
+        "action_failed" => format!(
+            "- `{}`: {}. Meaning: Dexter observed a failed action receipt and surfaced it for review. Latest evidence: {}",
+            event.kind, title, summary
+        ),
+        "ambient_approval_needed" => format!(
+            "- `{}`: {}. Meaning: a configured ambient condition fired, but Dexter is waiting for explicit operator approval before running its action. Evidence: {}",
+            event.kind, title, summary
+        ),
+        "ambient_task_completed" => format!(
+            "- `{}`: {}. Meaning: Dexter completed a deterministic follow-up task for an ambient condition. Evidence: {}",
+            event.kind, title, summary
+        ),
+        "ambient_notice" => format!(
+            "- `{}`: {}. Meaning: a configured ambient condition matched recent local evidence. Evidence: {}",
+            event.kind, title, summary
+        ),
+        _ => format!("- `{}`: {}. Evidence: {}", event.kind, title, summary),
+    }
+}
+
+fn local_system_status_request_with_context(
+    content: &str,
+    messages: &[Message],
+) -> Option<LocalSystemStatusRequest> {
+    if let Some(request) = local_system_status_request(content) {
+        return Some(request);
+    }
+    if is_command_query(content) || is_off_host_request(content) {
+        return None;
+    }
+
+    let lower = content.to_lowercase();
+    if !recent_local_system_status_context(messages) {
+        return None;
+    }
+
+    let wants_cpu = looks_like_cpu_status_followup(&lower);
+    let wants_memory = looks_like_memory_status_followup(&lower);
+    (wants_cpu || wants_memory).then_some(LocalSystemStatusRequest {
+        wants_memory,
+        wants_cpu,
+    })
+}
+
+fn recent_local_system_status_context(messages: &[Message]) -> bool {
+    messages.iter().rev().take(6).any(|message| {
+        let lower = message.content.to_lowercase();
+        lower.contains("top ram users right now")
+            || lower.contains("top memory users right now")
+            || lower.contains("top cpu users right now")
+            || lower.contains("ollama model residency right now")
+            || lower.contains("resident memory / rss")
+            || lower.contains("what's using so much ram")
+            || lower.contains("whats using so much ram")
+            || lower.contains("what's eating up my ram")
+            || lower.contains("what is eating up my ram")
+            || lower.contains("current sample:")
+            || lower.contains("identity came from local `ps`")
+    })
+}
+
+fn looks_like_cpu_status_followup(lower: &str) -> bool {
+    let trimmed = lower.trim();
+    trimmed == "cpu"
+        || trimmed == "cpu?"
+        || trimmed == "and cpu"
+        || trimmed == "and cpu?"
+        || lower.contains("what about cpu")
+        || lower.contains("how about cpu")
+        || lower.contains("what about processor")
+        || lower.contains("how about processor")
+}
+
+fn looks_like_memory_status_followup(lower: &str) -> bool {
+    let trimmed = lower.trim();
+    trimmed == "ram"
+        || trimmed == "ram?"
+        || trimmed == "memory"
+        || trimmed == "memory?"
+        || trimmed == "and ram"
+        || trimmed == "and ram?"
+        || trimmed == "and memory"
+        || trimmed == "and memory?"
+        || lower.contains("what about ram")
+        || lower.contains("how about ram")
+        || lower.contains("what about memory")
+        || lower.contains("how about memory")
+}
+
+async fn sample_process_usage(
+    request: LocalSystemStatusRequest,
+) -> Result<Vec<ProcessUsage>, String> {
+    let outputs = tokio::task::spawn_blocking(move || {
+        let memory = request.wants_memory.then(|| {
+            std::process::Command::new("/usr/bin/top")
+                .args([
+                    "-l",
+                    "1",
+                    "-o",
+                    "mem",
+                    "-n",
+                    "20",
+                    "-stats",
+                    "pid,command,cpu,mem",
+                ])
+                .output()
+        });
+        let cpu = request.wants_cpu.then(|| {
+            std::process::Command::new("/usr/bin/top")
+                .args([
+                    "-l",
+                    "2",
+                    "-s",
+                    "1",
+                    "-o",
+                    "cpu",
+                    "-n",
+                    "20",
+                    "-stats",
+                    "pid,command,cpu,mem",
+                ])
+                .output()
+        });
+        let names = std::process::Command::new("/bin/ps")
+            .args(["axo", "pid=,comm="])
+            .output();
+        (memory, cpu, names)
+    })
+    .await
+    .map_err(|error| format!("process sampler task failed: {error}"))?;
+
+    let (memory_output, cpu_output, names_output) = outputs;
+    let names_output = names_output.map_err(|error| format!("ps failed to start: {error}"))?;
+    if !names_output.status.success() {
+        return Err(format!("ps exited with status {}", names_output.status));
+    }
+    let names = parse_process_names_ps(
+        std::str::from_utf8(&names_output.stdout)
+            .map_err(|error| format!("ps output was not valid UTF-8: {error}"))?,
+    );
+
+    let mut processes = HashMap::<u32, ProcessUsage>::new();
+    if let Some(output) = memory_output {
+        let output = output.map_err(|error| format!("memory top failed to start: {error}"))?;
+        merge_top_process_output(&mut processes, &names, output, true)?;
+    }
+    if let Some(output) = cpu_output {
+        let output = output.map_err(|error| format!("CPU top failed to start: {error}"))?;
+        merge_top_process_output(&mut processes, &names, output, false)?;
+    }
+    if processes.is_empty() {
+        return Err("macOS top returned no parseable process rows".to_string());
+    }
+    Ok(processes
+        .into_values()
+        .filter(|process| !is_process_sampler_artifact(&process.process))
+        .collect())
+}
+
+fn is_process_sampler_artifact(process: &str) -> bool {
+    matches!(process.trim(), "top" | "ps")
+}
+
+async fn sample_local_process_identity(pid: u32) -> Result<Option<LocalProcessIdentity>, String> {
+    let pid_arg = pid.to_string();
+    let (ps_output, top_output) = tokio::task::spawn_blocking(move || {
+        let ps = std::process::Command::new("/bin/ps")
+            .args(["-p", pid_arg.as_str(), "-o", "pid=,ppid=,pcpu=,comm="])
+            .output();
+        let top = std::process::Command::new("/usr/bin/top")
+            .args([
+                "-l",
+                "1",
+                "-pid",
+                pid_arg.as_str(),
+                "-stats",
+                "pid,command,cpu,mem",
+            ])
+            .output();
+        (ps, top)
+    })
+    .await
+    .map_err(|error| format!("process identity sampler task failed: {error}"))?;
+    let ps_output = ps_output.map_err(|error| format!("ps failed to start: {error}"))?;
+    let top_output = top_output.map_err(|error| format!("top failed to start: {error}"))?;
+
+    if !ps_output.status.success() {
+        let stderr = String::from_utf8_lossy(&ps_output.stderr);
+        return Err(format!(
+            "ps exited with status {} while inspecting PID {pid}: {stderr}",
+            ps_output.status
+        ));
+    }
+
+    let stdout = String::from_utf8(ps_output.stdout)
+        .map_err(|error| format!("ps output was not valid UTF-8: {error}"))?;
+    let Some(mut identity) = stdout.lines().find_map(parse_local_process_identity_line) else {
+        return Ok(None);
+    };
+    if top_output.status.success() {
+        let top_stdout = String::from_utf8(top_output.stdout)
+            .map_err(|error| format!("top output was not valid UTF-8: {error}"))?;
+        if let Some(top_row) = parse_process_usage_top(&top_stdout)
+            .into_iter()
+            .find(|row| row.pid == pid)
+        {
+            identity.memory_gib = top_row.memory_gib;
+        }
+    }
+    Ok(Some(identity))
+}
+
+fn parse_local_process_identity_line(line: &str) -> Option<LocalProcessIdentity> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let parent_pid = parts.next()?.parse().ok()?;
+    let cpu_pct = parts.next()?.parse().ok()?;
+    let executable = parts.collect::<Vec<_>>().join(" ");
+    if executable.is_empty() {
+        return None;
+    }
+
+    Some(LocalProcessIdentity {
+        pid,
+        parent_pid,
+        cpu_pct,
+        memory_gib: 0.0,
+        executable,
+    })
+}
+
+fn format_local_process_identity_report(
+    request: LocalProcessIdentityRequest,
+    process: Option<&LocalProcessIdentity>,
+) -> String {
+    let Some(process) = process else {
+        return format!(
+            "PID {} is not currently present in the local macOS process table. It may have exited or the PID may have been reused since an earlier sample. I checked locally with `ps`; I did not search the web because PIDs are machine-local and temporary.",
+            request.pid
+        );
+    };
+
+    let display_name =
+        process_display_name(&process.executable).unwrap_or_else(|| process.executable.clone());
+    let identity_note = if process.executable.contains("Virtualization.framework")
+        && display_name == "com.apple.Virtualization.VirtualMachine"
+    {
+        " It is Apple’s Virtualization framework virtual-machine process."
+    } else {
+        ""
+    };
+
+    format!(
+        "PID {} is `{}` at `{}`.{} Parent PID: {}. Current sample: {:.1}% CPU and {:.2} GiB memory (macOS `top` footprint, matching Activity Monitor-style accounting). Identity came from local `ps`; no web lookup was used.",
+        process.pid,
+        display_name,
+        process.executable,
+        identity_note,
+        process.parent_pid,
+        process.cpu_pct,
+        process.memory_gib,
+    )
+}
+
+fn merge_top_process_output(
+    processes: &mut HashMap<u32, ProcessUsage>,
+    names: &HashMap<u32, String>,
+    output: std::process::Output,
+    memory_authoritative: bool,
+) -> Result<(), String> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "top exited with status {}: {stderr}",
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("top output was not valid UTF-8: {error}"))?;
+    for row in parse_process_usage_top(&stdout) {
+        let process = names
+            .get(&row.pid)
+            .cloned()
+            .unwrap_or_else(|| row.process.clone());
+        let entry = processes.entry(row.pid).or_insert_with(|| ProcessUsage {
+            pid: row.pid,
+            cpu_pct: 0.0,
+            memory_gib: 0.0,
+            process: process.clone(),
+        });
+        entry.process = process;
+        if memory_authoritative {
+            entry.memory_gib = row.memory_gib;
+        } else {
+            entry.cpu_pct = row.cpu_pct;
+        }
+    }
+    Ok(())
+}
+
+fn parse_process_usage_top(output: &str) -> Vec<ProcessUsage> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let Some(header_index) = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with("PID "))
+    else {
+        return Vec::new();
+    };
+    lines[header_index + 1..]
+        .iter()
+        .filter_map(|line| parse_process_usage_top_line(line))
+        .collect()
+}
+
+fn parse_process_usage_top_line(line: &str) -> Option<ProcessUsage> {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return None;
+    }
+    let pid = parts.first()?.parse().ok()?;
+    let memory_gib = parse_top_memory_gib(parts.last()?)?;
+    let cpu_pct = parts
+        .get(parts.len().checked_sub(2)?)?
+        .trim_end_matches('%')
+        .parse()
+        .ok()?;
+    let command = parts[1..parts.len() - 2].join(" ");
+    let process = process_display_name(&command)?;
+    Some(ProcessUsage {
+        pid,
+        cpu_pct,
+        memory_gib,
+        process,
+    })
+}
+
+fn parse_top_memory_gib(raw: &str) -> Option<f64> {
+    let normalized = raw.trim().trim_end_matches(['+', '-']);
+    let split_at = normalized
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(normalized.len());
+    let value: f64 = normalized[..split_at].parse().ok()?;
+    let unit = normalized[split_at..].to_ascii_uppercase();
+    match unit.as_str() {
+        "B" | "" => Some(value / 1_073_741_824.0),
+        "K" => Some(value / 1024.0 / 1024.0),
+        "M" => Some(value / 1024.0),
+        "G" => Some(value),
+        "T" => Some(value * 1024.0),
+        _ => None,
+    }
+}
+
+fn parse_process_names_ps(output: &str) -> HashMap<u32, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse().ok()?;
+            let command = parts.collect::<Vec<_>>().join(" ");
+            process_display_name(&command).map(|name| (pid, name))
+        })
+        .collect()
+}
+
+fn process_display_name(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .rsplit('/')
+            .next()
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string(),
+    )
+}
+
+fn format_local_system_status_report(
+    request: LocalSystemStatusRequest,
+    processes: &[ProcessUsage],
+) -> String {
+    let mut sections = Vec::new();
+
+    if request.wants_memory {
+        let mut by_memory = processes.to_vec();
+        by_memory.sort_by(|a, b| {
+            b.memory_gib
+                .partial_cmp(&a.memory_gib)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if !by_memory.is_empty() {
+            sections.push(format_top_process_section(
+                "Top memory users right now (Activity Monitor-style footprint)",
+                "RAM",
+                &by_memory,
+            ));
+        }
+    }
+
+    if request.wants_cpu {
+        let mut by_cpu = processes.to_vec();
+        by_cpu.sort_by(|a, b| {
+            b.cpu_pct
+                .partial_cmp(&a.cpu_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        sections.push(format_top_process_section(
+            "Top CPU users right now",
+            "CPU",
+            &by_cpu,
+        ));
+    }
+
+    let mut report = sections.join("\n\n");
+    if !report.is_empty() {
+        report.push_str("\n\n");
+        report.push_str(&local_system_status_measurement_note(request));
+    }
+    report
+}
+
+fn local_system_status_measurement_note(request: LocalSystemStatusRequest) -> &'static str {
+    match (request.wants_memory, request.wants_cpu) {
+        (true, true) => "Measured just now with macOS `top`: memory is the footprint-style value used for Activity Monitor-like ranking, and CPU is sampled over one second.",
+        (true, false) => "Measured just now with macOS `top -o mem`; these are Activity Monitor-style process memory footprints, not `ps` RSS estimates.",
+        (false, true) => "Measured just now with the second sample from macOS `top`; CPU is sampled over one second.",
+        (false, false) => "Measured just now with macOS `top`.",
+    }
+}
+
+fn format_top_process_section(title: &str, metric: &str, processes: &[ProcessUsage]) -> String {
+    let mut lines = vec![format!("{title}:")];
+    for (index, process) in processes.iter().take(5).enumerate() {
+        let line = match metric {
+            "RAM" => format!(
+                "{}. {} (pid {}) — {:.2} GiB memory",
+                index + 1,
+                process.process,
+                process.pid,
+                process.memory_gib,
+            ),
+            "CPU" => format!(
+                "{}. {} (pid {}) — {:.1}% CPU",
+                index + 1,
+                process.process,
+                process.pid,
+                process.cpu_pct,
+            ),
+            _ => format!("{}. {} (pid {})", index + 1, process.process, process.pid),
+        };
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn looks_like_local_memory_status_request(lower: &str) -> bool {
+    let mentions_memory = lower.contains("ram")
+        || lower.contains("memory")
+        || lower.contains("mem ")
+        || lower.contains("%mem")
+        || lower.contains("swap");
+    if !mentions_memory {
+        return false;
+    }
+
+    const ACTIONABLE_MEMORY_MARKERS: &[&str] = &[
+        "what's eating up",
+        "what is eating up",
+        "whats eating up",
+        "what's using",
+        "what is using",
+        "whats using",
+        "using the most",
+        "using all",
+        "top memory",
+        "most memory",
+        "memory hog",
+        "memory hogs",
+        "ram hog",
+        "ram hogs",
+        "top process",
+        "top processes",
+        "how many gb",
+        "how much ram",
+        "how much memory",
+        "how much unified memory",
+        "do i need more ram",
+        "need more ram",
+        "need more memory",
+        "enough ram",
+        "enough memory",
+        "available ram",
+        "available memory",
+        "free ram",
+        "free memory",
+        "installed ram",
+        "installed memory",
+        "total ram",
+        "total memory",
+        "ram do i have",
+        "memory do i have",
+        "check memory",
+        "check ram",
+        "inspect",
+        "inspect memory",
+        "inspect ram",
+        "show memory",
+        "show ram",
+        "right now",
+    ];
+
+    ACTIONABLE_MEMORY_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn looks_like_local_cpu_status_request(lower: &str) -> bool {
+    let mentions_cpu = lower.contains("cpu") || lower.contains("processor");
+    if !mentions_cpu {
+        return false;
+    }
+
+    const ACTIONABLE_CPU_MARKERS: &[&str] = &[
+        "what's eating up",
+        "what is eating up",
+        "whats eating up",
+        "what's using",
+        "what is using",
+        "whats using",
+        "using the most",
+        "using all",
+        "top cpu",
+        "most cpu",
+        "cpu hog",
+        "cpu hogs",
+        "check cpu",
+        "inspect",
+        "inspect cpu",
+        "show cpu",
+    ];
+
+    ACTIONABLE_CPU_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 /// Phase 37 / B8: detect whether the operator's request is scoped to a host
@@ -9634,6 +12143,46 @@ pub(crate) fn is_self_message_recipient_name(recipient: &str, aliases: &[String]
         .any(|alias| !alias.is_empty() && alias == normalized)
 }
 
+pub(crate) fn looks_like_message_handle_candidate(recipient: &str) -> bool {
+    let normalized = recipient
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'')
+        .trim();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if looks_like_email_handle(normalized) {
+        return true;
+    }
+
+    let digit_count = normalized.chars().filter(|c| c.is_ascii_digit()).count();
+    if digit_count < 7 {
+        return false;
+    }
+
+    normalized.chars().all(|c| {
+        c.is_ascii_digit()
+            || matches!(
+                c,
+                '+' | '-' | '(' | ')' | ' ' | '.' | '\u{00a0}' | '\u{202f}'
+            )
+    })
+}
+
+fn looks_like_email_handle(value: &str) -> bool {
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.trim().is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
 fn extract_applescript_quoted_after_marker(script: &str, marker: &str) -> Option<String> {
     let lc = script.to_lowercase();
     let marker_lc = marker.to_lowercase();
@@ -10178,6 +12727,45 @@ mod tests {
     }
 
     #[test]
+    fn ollama_ps_entry_matches_exact_and_tagged_model_names() {
+        let entry = OllamaPsEntry {
+            name: "gemma4:26b-mlx".to_string(),
+            size: 42,
+            size_vram: 42,
+            expires_at: "2026-06-29T00:00:00Z".to_string(),
+        };
+
+        assert!(ollama_ps_entry_matches_model(&entry, "gemma4"));
+        assert!(ollama_ps_entry_matches_model(&entry, "gemma4:26b-mlx"));
+        assert!(!ollama_ps_entry_matches_model(&entry, "gemma"));
+        assert!(!ollama_ps_entry_matches_model(&entry, "gemma4:27b"));
+    }
+
+    #[test]
+    fn primary_startup_ready_requires_nonzero_full_residency() {
+        let full = OllamaPsEntry {
+            name: "gemma4:26b-mlx".to_string(),
+            size: 16,
+            size_vram: 16,
+            expires_at: String::new(),
+        };
+        assert!(primary_startup_ready_from_ps_entry(&full));
+
+        let partial = OllamaPsEntry {
+            size_vram: 12,
+            ..full.clone()
+        };
+        assert!(!primary_startup_ready_from_ps_entry(&partial));
+
+        let zero_size = OllamaPsEntry {
+            size: 0,
+            size_vram: 0,
+            ..full
+        };
+        assert!(!primary_startup_ready_from_ps_entry(&zero_size));
+    }
+
+    #[test]
     fn foreground_generation_guard_tracks_count_and_recent_completion() {
         let shared = SharedDaemonState::new_degraded();
         assert_eq!(shared.foreground_generation_count.load(Ordering::SeqCst), 0);
@@ -10250,12 +12838,20 @@ mod tests {
     }
 
     #[test]
-    fn browser_action_planning_uses_fast_model_with_full_contract() {
+    fn browser_and_ui_action_planning_use_fast_model_with_full_contract() {
         assert_eq!(
             CoreOrchestrator::generation_model_for_prompt(
                 ModelId::Primary,
                 PromptProfile::PrimaryFull,
                 "Use Dexter browser actions to navigate to a local page and click exactly this selector.",
+            ),
+            ModelId::Fast
+        );
+        assert_eq!(
+            CoreOrchestrator::generation_model_for_prompt(
+                ModelId::Primary,
+                PromptProfile::PrimaryFull,
+                "Use Dexter UI actions against the running app named DexterUIModelRecoveryFixture and ui_click role AXButton label Missing Save.",
             ),
             ModelId::Fast
         );
@@ -10818,6 +13414,43 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_message_send_parser_extracts_recipient_and_body() {
+        let intent = CoreOrchestrator::detect_deterministic_message_send_request(
+            "please send a text to Jason Phillips saying I am running ten minutes late",
+        )
+        .expect("explicit message request should parse");
+
+        assert_eq!(intent.recipient, "Jason Phillips");
+        assert_eq!(intent.body, "I am running ten minutes late");
+    }
+
+    #[test]
+    fn deterministic_message_send_parser_accepts_short_text_form() {
+        let intent = CoreOrchestrator::detect_deterministic_message_send_request(
+            "text Mom: \"I'll be late\"",
+        )
+        .expect("explicit text request should parse");
+
+        assert_eq!(intent.recipient, "Mom");
+        assert_eq!(intent.body, "I'll be late");
+    }
+
+    #[test]
+    fn deterministic_message_send_parser_rejects_incomplete_or_unrelated_text() {
+        assert!(CoreOrchestrator::detect_deterministic_message_send_request(
+            "tell me what Messages can do",
+        )
+        .is_none());
+        assert!(
+            CoreOrchestrator::detect_deterministic_message_send_request("text Jason").is_none()
+        );
+        assert!(CoreOrchestrator::detect_deterministic_message_send_request(
+            "send a text to Jason saying",
+        )
+        .is_none());
+    }
+
+    #[test]
     fn extract_action_block_malformed_json_returns_original() {
         let response = format!(
             "Let me try.{}NOT_VALID_JSON{}",
@@ -10970,6 +13603,542 @@ mod tests {
         assert!(!is_command_query("Check the CPU usage"));
         assert!(!is_command_query("Open Finder"));
         assert!(!is_command_query("Download this file from the URL"));
+    }
+
+    // ── local system-status deterministic action tests ──────────────────────
+
+    #[test]
+    fn local_system_status_detects_ram_usage_request() {
+        let request = local_system_status_request("what's eating up my RAM right now?")
+            .expect("RAM status question should become a local diagnostic action");
+        assert!(request.wants_memory);
+        assert!(!request.wants_cpu);
+    }
+
+    #[test]
+    fn local_system_status_detects_cpu_usage_request() {
+        let request = local_system_status_request("what's using the most CPU?")
+            .expect("CPU status question should become a local diagnostic action");
+        assert!(!request.wants_memory);
+        assert!(request.wants_cpu);
+    }
+
+    #[test]
+    fn local_system_status_detects_combined_ram_cpu_request() {
+        let request = local_system_status_request("what's eating up my RAM and CPU right now?")
+            .expect("combined RAM and CPU status question should become a local diagnostic action");
+        assert!(request.wants_memory);
+        assert!(request.wants_cpu);
+    }
+
+    #[test]
+    fn local_system_status_detects_top_process_ram_gb_request() {
+        let request =
+            local_system_status_request("how many GB of RAM is the top process using right now?")
+                .expect(
+                    "current top-process RAM size question should become a local diagnostic action",
+                );
+        assert!(request.wants_memory);
+        assert!(!request.wants_cpu);
+    }
+
+    #[test]
+    fn local_system_status_detects_direct_process_inspection_request() {
+        let request = local_system_status_request(
+            "Can you inspect my current RAM, CPU, and running processes?",
+        )
+        .expect("local process inspection request");
+        assert!(request.wants_memory);
+        assert!(request.wants_cpu);
+    }
+
+    #[test]
+    fn local_system_status_does_not_execute_command_learning_questions() {
+        assert!(local_system_status_request(
+            "what command shows which processes use the most memory?"
+        )
+        .is_none());
+        assert!(local_system_status_request(
+            "how can i see what processes are using the most memory"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn local_system_status_does_not_execute_off_host_requests() {
+        assert!(local_system_status_request("check memory on my vm").is_none());
+        assert!(local_system_status_request("what's eating up RAM on my linux box?").is_none());
+    }
+
+    #[test]
+    fn local_process_identity_detects_explicit_pid_question() {
+        let request = local_process_identity_request("what exactly is pid 55681?")
+            .expect("explicit local PID identity question");
+        assert_eq!(request.pid, 55681);
+        assert_eq!(
+            local_process_identity_request("can you identify PID: 24044?")
+                .expect("punctuated PID identity question")
+                .pid,
+            24044
+        );
+    }
+
+    #[test]
+    fn local_process_identity_rejects_mutating_and_non_numeric_requests() {
+        assert!(local_process_identity_request("kill pid 55681").is_none());
+        assert!(local_process_identity_request("what is a pid?").is_none());
+        assert!(local_process_identity_request("what is pid 55681 on my linux box?").is_none());
+    }
+
+    #[test]
+    fn local_process_identity_resolves_numeric_followup_from_process_context() {
+        let messages = vec![Message::assistant(
+            "Top memory users right now (Activity Monitor-style footprint):\n1. ollama (pid 54876) — 18.00 GiB memory",
+        )];
+        let request = local_process_identity_request_with_context("what about 55629?", &messages)
+            .expect("numeric process follow-up");
+        assert_eq!(request.pid, 55629);
+        assert!(local_process_identity_request_with_context("what about 55629?", &[]).is_none());
+    }
+
+    #[test]
+    fn local_process_report_reference_resolves_numbered_cpu_entry() {
+        let messages = vec![Message::assistant(
+            "Top CPU users right now:\n1. WindowServer (pid 473) — 42.6% CPU\n\
+             5. mediaanalysisd (pid 14117) — 7.4% CPU\n\n\
+             Measured just now with the second sample from macOS `top`; CPU is sampled over one second.",
+        )];
+        let reference =
+            local_process_report_reference("you listed that as #5 on the cpu list", &messages)
+                .expect("numbered report reference");
+        assert_eq!(reference.ordinal, 5);
+        assert_eq!(reference.pid, 14117);
+        assert_eq!(reference.process, "mediaanalysisd");
+        assert_eq!(reference.report_kind, "CPU");
+    }
+
+    #[test]
+    fn local_process_report_reference_requires_a_real_recent_entry() {
+        let messages = vec![Message::assistant(
+            "Top CPU users right now:\n1. WindowServer (pid 473) — 42.6% CPU",
+        )];
+        assert!(local_process_report_reference("you listed that as #5", &messages).is_none());
+        assert!(local_process_report_reference("tell me about number 1", &[]).is_none());
+    }
+
+    #[test]
+    fn local_process_sampler_artifacts_are_excluded() {
+        assert!(is_process_sampler_artifact("top"));
+        assert!(is_process_sampler_artifact("ps"));
+        assert!(!is_process_sampler_artifact("WindowServer"));
+    }
+
+    #[test]
+    fn local_pid_uncertainty_is_never_web_retrieval_eligible() {
+        assert!(is_local_only_uncertainty_query(
+            "what is pid 55681 on macOS"
+        ));
+        assert!(is_local_only_uncertainty_query(
+            "what is using memory on my mac"
+        ));
+        assert!(!is_local_only_uncertainty_query("current version of Swift"));
+    }
+
+    #[test]
+    fn local_system_status_detects_cpu_followup_after_ram_report() {
+        let messages = vec![
+            Message::user("what's using so much RAM right now?"),
+            Message::assistant(
+                "Top memory users right now (Activity Monitor-style footprint):\n\
+                 1. ollama (pid 54876) — 18.00 GiB memory",
+            ),
+        ];
+
+        let request = local_system_status_request_with_context("what about CPU?", &messages)
+            .expect("resource follow-up should stay on deterministic status path");
+
+        assert!(!request.wants_memory);
+        assert!(request.wants_cpu);
+    }
+
+    #[test]
+    fn local_system_status_rejects_cpu_followup_without_resource_context() {
+        assert!(local_system_status_request_with_context(
+            "what about CPU?",
+            &[Message::user("should I upgrade my Mac?")]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn ambient_notice_explanation_detects_dexter_notice_questions() {
+        assert!(ambient_notice_explanation_request(
+            "What do those Dexter Notices mean?"
+        ));
+        assert!(ambient_notice_explanation_request(
+            "why is the HUD showing action failures?"
+        ));
+        assert!(!ambient_notice_explanation_request(
+            "tell me a joke about notices"
+        ));
+    }
+
+    #[test]
+    fn ambient_notice_explanation_describes_action_failure_trigger() {
+        let event = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            ambient::AmbientSeverity::Warn,
+            "Trigger matched: Dexter action failures",
+            "Ambient trigger 'Dexter action failures' matched event 'action_failed'.",
+            serde_json::json!({
+                "trigger_name": "Dexter action failures",
+                "matched_event_kind": "action_failed",
+                "matched_event_summary": "Shell: false failed."
+            }),
+        );
+
+        let report = format_ambient_notice_explanation(
+            std::path::Path::new("/tmp/ambient_events.jsonl"),
+            &[event],
+            None,
+        );
+
+        assert!(report.contains("does not mean the trigger itself failed"));
+        assert!(report.contains("Shell: false failed."));
+        assert!(report.contains("make why"));
+        assert!(report.contains("/tmp/ambient_events.jsonl"));
+    }
+
+    #[test]
+    fn ambient_notice_explanation_describes_generic_notice_classes() {
+        let health_notice = AmbientEvent::new(
+            "trigger",
+            "trigger_matched",
+            ambient::AmbientSeverity::Warn,
+            "Trigger matched: Health warnings",
+            "Ambient trigger 'Health warnings' matched event 'health_status_changed'.",
+            serde_json::json!({
+                "trigger_name": "Health warnings",
+                "matched_event_kind": "health_status_changed",
+                "matched_event_summary": "Dexter health is pending."
+            }),
+        );
+        let approval_notice = AmbientEvent::new(
+            "trigger",
+            "trigger_action_approval_requested",
+            ambient::AmbientSeverity::Warn,
+            "Trigger needs approval: Restart warnings",
+            "Ambient trigger 'Restart warnings' matched event 'component_restart_failed'.",
+            serde_json::json!({
+                "trigger_name": "Restart warnings",
+                "matched_event_kind": "component_restart_failed",
+                "matched_event_summary": "Browser worker restart failed."
+            }),
+        );
+        let task_notice = AmbientEvent::new(
+            "trigger",
+            "trigger_task_completed",
+            ambient::AmbientSeverity::Warn,
+            "Trigger task completed: Action diagnostics",
+            "Action failure diagnostic ready.",
+            serde_json::json!({
+                "trigger_name": "Action diagnostics",
+                "matched_event_kind": "action_failed",
+                "task_result": "Action failure diagnostic ready. Run `make why`."
+            }),
+        );
+
+        let report = format_ambient_notice_explanation(
+            std::path::Path::new("/tmp/ambient_events.jsonl"),
+            &[health_notice, approval_notice, task_notice],
+            None,
+        );
+
+        assert!(report.contains("Dexter Notices are local ambient trigger notifications"));
+        assert!(report.contains("not guessed by the model"));
+        assert!(report.contains("a notice does not mean the trigger itself failed"));
+        assert!(report.contains("`ambient_notice`: Ambient notice: Health warnings"));
+        assert!(report.contains("configured ambient condition matched recent local evidence"));
+        assert!(
+            report.contains("`ambient_approval_needed`: Ambient approval needed: Restart warnings")
+        );
+        assert!(report.contains("waiting for explicit operator approval"));
+        assert!(
+            report.contains("`ambient_task_completed`: Ambient task completed: Action diagnostics")
+        );
+        assert!(report.contains("completed a deterministic follow-up task"));
+        assert!(!report.contains("Trigger matched:"));
+        assert!(!report.contains("Ambient trigger '"));
+    }
+
+    #[test]
+    fn ambient_notice_explanation_fallback_explains_acknowledged_action_failures() {
+        let report = format_ambient_notice_explanation(
+            std::path::Path::new("/tmp/ambient_events.jsonl"),
+            &[],
+            None,
+        );
+
+        assert!(report.contains("Dexter Notices are local ambient trigger notifications"));
+        assert!(report.contains("Dexter action failures"));
+        assert!(report.contains("does not mean the trigger itself failed"));
+        assert!(report.contains("make why"));
+    }
+
+    #[test]
+    fn parse_process_usage_top_uses_the_final_sample_and_memory_units() {
+        let rows = parse_process_usage_top(
+            "Processes: 2 total\nPID COMMAND %CPU MEM\n123 old 0.0 2G\n\
+             Processes: 2 total\nPID COMMAND %CPU MEM\n123 llama-server 12.5 18G\n456 Codex 55.0 512M+\n",
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, 123);
+        assert_eq!(rows[0].process, "llama-server");
+        assert!((rows[0].memory_gib - 18.0).abs() < 0.001);
+        assert_eq!(rows[1].process, "Codex");
+        assert!((rows[1].cpu_pct - 55.0).abs() < 0.001);
+        assert!((rows[1].memory_gib - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_and_format_local_process_identity_preserves_local_provenance() {
+        let process = parse_local_process_identity_line(
+            "55681 1 97.9 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine",
+        )
+        .expect("parse process identity row");
+        let process = LocalProcessIdentity {
+            memory_gib: 4.18,
+            ..process
+        };
+        let report = format_local_process_identity_report(
+            LocalProcessIdentityRequest { pid: 55681 },
+            Some(&process),
+        );
+
+        assert!(report.contains("PID 55681 is `com.apple.Virtualization.VirtualMachine`"));
+        assert!(report.contains("Apple’s Virtualization framework"));
+        assert!(report.contains("97.9% CPU"));
+        assert!(report.contains("4.18 GiB memory"));
+        assert!(report.contains("Activity Monitor-style accounting"));
+        assert!(report.contains("no web lookup was used"));
+    }
+
+    #[tokio::test]
+    async fn local_pid_question_writes_deterministic_completed_turn_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let trace_id = new_trace();
+        let pid = std::process::id();
+
+        orch.handle_text_input(
+            format!("what exactly is pid {pid}?"),
+            trace_id.clone(),
+            false,
+        )
+        .await
+        .expect("deterministic local PID response");
+
+        let path = orch.turn_records.record_path_for_trace(&trace_id);
+        let record: crate::context::turn_record::ContextTurnRecord =
+            serde_json::from_slice(&std::fs::read(path).expect("read turn record"))
+                .expect("parse turn record");
+        assert_eq!(record.task_class, TaskClass::LocalSystemStatus);
+        assert_eq!(
+            record.route_category.as_deref(),
+            Some("DeterministicLocalProcess")
+        );
+        assert_eq!(record.model.as_deref(), Some("deterministic_local_process"));
+        assert_eq!(
+            record.outcome_label,
+            crate::context::ledger::TurnOutcomeLabel::Answered
+        );
+        assert_eq!(record.close_reason, TurnCloseReason::AnsweredNoAction);
+        let generation = record.generation.expect("deterministic generation record");
+        assert!(generation
+            .output_preview
+            .starts_with(&format!("PID {pid} is `")));
+        assert!(generation.response_len > generation.output_preview.len());
+    }
+
+    #[test]
+    fn local_system_status_report_sorts_ram_and_cpu_independently() {
+        let processes = vec![
+            ProcessUsage {
+                pid: 1,
+                cpu_pct: 2.0,
+                memory_gib: 8.0,
+                process: "MemoryHog".to_string(),
+            },
+            ProcessUsage {
+                pid: 2,
+                cpu_pct: 95.0,
+                memory_gib: 0.5,
+                process: "CpuHog".to_string(),
+            },
+        ];
+        let report = format_local_system_status_report(
+            LocalSystemStatusRequest {
+                wants_memory: true,
+                wants_cpu: true,
+            },
+            &processes,
+        );
+
+        let memory_pos = report.find("1. MemoryHog").expect("top RAM process");
+        let cpu_pos = report.find("1. CpuHog").expect("top CPU process");
+        assert!(report.contains("8.00 GiB memory"));
+        assert!(report.contains("95.0% CPU"));
+        assert!(report.contains("1. CpuHog (pid 2) — 95.0% CPU"));
+        assert!(report.contains("footprint-style value used for Activity Monitor-like ranking"));
+        assert!(
+            memory_pos < cpu_pos,
+            "memory section should be emitted before CPU section"
+        );
+    }
+
+    #[test]
+    fn local_system_status_report_does_not_claim_one_process_tops_both_metrics() {
+        let processes = vec![
+            ProcessUsage {
+                pid: 1,
+                cpu_pct: 2.0,
+                memory_gib: 8.0,
+                process: "MemoryHog".to_string(),
+            },
+            ProcessUsage {
+                pid: 2,
+                cpu_pct: 95.0,
+                memory_gib: 0.5,
+                process: "CpuHog".to_string(),
+            },
+        ];
+        let report = format_local_system_status_report(
+            LocalSystemStatusRequest {
+                wants_memory: true,
+                wants_cpu: true,
+            },
+            &processes,
+        );
+
+        assert!(!report.contains("MemoryHog is using the most RAM and CPU"));
+        assert!(report.contains("1. MemoryHog"));
+        assert!(report.contains("1. CpuHog"));
+    }
+
+    #[test]
+    fn local_system_status_report_is_a_compact_activity_monitor_style_list() {
+        let processes = vec![ProcessUsage {
+            pid: 54876,
+            cpu_pct: 0.0,
+            memory_gib: 18.0,
+            process: "ollama".to_string(),
+        }];
+
+        let report = format_local_system_status_report(
+            LocalSystemStatusRequest {
+                wants_memory: true,
+                wants_cpu: false,
+            },
+            &processes,
+        );
+
+        assert!(report.contains("Top memory users right now (Activity Monitor-style footprint)"));
+        assert!(report.contains("ollama (pid 54876) — 18.00 GiB memory"));
+        assert!(!report.contains("System memory right now"));
+        assert!(!report.contains("Ollama model residency"));
+    }
+
+    #[test]
+    fn local_system_status_does_not_execute_how_to_questions() {
+        assert!(local_system_status_request(
+            "how can i see what processes are using the most memory"
+        )
+        .is_none());
+    }
+
+    // ── shell execution follow-up bridge tests ───────────────────────────────
+
+    #[test]
+    fn shell_execution_followup_detects_direct_run_and_check_phrases() {
+        assert!(is_shell_execution_followup("run it for me"));
+        assert!(is_shell_execution_followup("check for me"));
+        assert!(is_shell_execution_followup("you tell me"));
+        assert!(is_shell_execution_followup("go ahead and run it."));
+        assert!(is_shell_execution_followup("please check!"));
+    }
+
+    #[test]
+    fn shell_execution_followup_rejects_command_learning_questions() {
+        assert!(!is_shell_execution_followup("what command do I run?"));
+        assert!(!is_shell_execution_followup("how do I check that?"));
+        assert!(!is_shell_execution_followup(
+            "can you explain that command?"
+        ));
+        assert!(!is_shell_execution_followup("check this code for bugs"));
+    }
+
+    #[test]
+    fn extracts_recent_assistant_shell_command_from_inline_code() {
+        let messages = vec![
+            Message::user("what checks port 80?"),
+            Message::assistant("Run `lsof -i :80` to check."),
+        ];
+        assert_eq!(
+            recent_assistant_shell_command(&messages).as_deref(),
+            Some("lsof -i :80")
+        );
+    }
+
+    #[test]
+    fn extracts_recent_assistant_shell_command_from_single_fenced_block() {
+        let messages = vec![
+            Message::user("what should I run?"),
+            Message::assistant("Here's the command:\n\n```bash\n$ ps aux | head -5\n```"),
+        ];
+        assert_eq!(
+            recent_assistant_shell_command(&messages).as_deref(),
+            Some("ps aux | head -5")
+        );
+    }
+
+    #[test]
+    fn recent_assistant_shell_command_ignores_multiline_fenced_blocks() {
+        let messages = vec![Message::assistant(
+            "Do not auto-run this:\n```bash\necho one\necho two\n```",
+        )];
+        assert!(recent_assistant_shell_command(&messages).is_none());
+    }
+
+    #[test]
+    fn recent_assistant_shell_command_ignores_old_assistant_turns() {
+        let messages = vec![
+            Message::assistant("Run `date`."),
+            Message::user("thanks"),
+            Message::assistant("yep"),
+            Message::user("another thing"),
+            Message::assistant("sure"),
+            Message::user("again"),
+            Message::assistant("okay"),
+        ];
+        assert!(recent_assistant_shell_command(&messages).is_none());
+    }
+
+    #[tokio::test]
+    async fn orchestrator_shell_command_followup_uses_context_command_only_when_triggered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        orch.context.push_assistant("Run `lsof -i :80` to check.");
+
+        assert_eq!(
+            orch.shell_command_followup_action("check for me")
+                .as_deref(),
+            Some("lsof -i :80")
+        );
+        assert!(orch
+            .shell_command_followup_action("how do I check for myself?")
+            .is_none());
     }
 
     // ── is_off_host_request unit tests (Phase 37 / B8) ───────────────────────
@@ -11797,6 +14966,19 @@ end tell"#;
     }
 
     #[test]
+    fn message_handle_candidate_detects_phone_and_email_not_names() {
+        assert!(looks_like_message_handle_candidate("+1 (555) 123-4567"));
+        assert!(looks_like_message_handle_candidate("555-123-4567"));
+        assert!(looks_like_message_handle_candidate("person@example.com"));
+        assert!(!looks_like_message_handle_candidate("Jason Phillips"));
+        assert!(!looks_like_message_handle_candidate("Mom"));
+        assert!(!looks_like_message_handle_candidate("Sarah 2"));
+        assert!(!looks_like_message_handle_candidate(
+            "person at example dot com"
+        ));
+    }
+
+    #[test]
     fn build_contacts_recipient_validation_script_escapes_inputs() {
         let script = build_contacts_recipient_validation_script("+1555\"bad\\id", "Mom \"Home\"");
         assert!(
@@ -12059,6 +15241,19 @@ end tell"#;
     }
 
     #[test]
+    fn unsupported_action_progress_claims_are_detected() {
+        assert!(claims_unverified_action_progress(
+            "Let me check Activity Monitor for you."
+        ));
+        assert!(claims_unverified_action_progress(
+            "Downloading from that site now, give it a minute."
+        ));
+        assert!(!claims_unverified_action_progress(
+            "The action receipt says the download completed."
+        ));
+    }
+
+    #[test]
     fn action_context_status_text_formats_tool_result_payload() {
         assert_eq!(
             action_context_status_text("Action result", "Action completed: Run: echo hi."),
@@ -12261,6 +15456,145 @@ end tell"#;
             &failed_spec
         ));
         assert!(!guard.replacement_action_succeeded);
+    }
+
+    #[test]
+    fn ui_recovery_guard_blocks_repeated_failed_target() {
+        let failed_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "Save".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+        let error = "UI failure [control_not_found]: Recovery: Capture a UI snapshot and target a visible control from it. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly. Detail: ui control press failed: no matching control for 'Save'. Target: action=ui_click app=Finder window='Preferences' role=AXButton label='Save' container=<none>. Evidence: match_count=0 nearest_safe_candidates: AXButton | name='OK'";
+        let guard = ui_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let repeated_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "Save".to_string(),
+            max_depth: Some(6),
+            rationale: None,
+            category_override: None,
+        };
+
+        let correction = ui_recovery_guard_correction(Some(&guard), &repeated_spec)
+            .expect("same UI target must be blocked");
+
+        assert!(correction.contains("UI recovery guard blocked a repeated target"));
+        assert!(correction.contains("control_not_found"));
+        assert!(correction.contains("ui_click"));
+        assert!(correction.contains("label `Save`"));
+        assert!(correction.contains("Next [snapshot_then_replan]"));
+        assert!(correction.contains("Allowed next actions: run ui_snapshot"));
+        assert!(correction.contains("Do not repeat the same UI/window ActionSpec"));
+    }
+
+    #[test]
+    fn ui_recovery_guard_allows_snapshot_replan_step() {
+        let failed_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "Save".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+        let error = "UI failure [control_not_found]: Recovery: Capture a UI snapshot and target a visible control from it. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly.";
+        let guard = ui_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let snapshot_spec = ActionSpec::UiSnapshot {
+            app_name: Some("Finder".to_string()),
+            max_depth: Some(3),
+            rationale: None,
+        };
+
+        assert!(ui_recovery_guard_correction(Some(&guard), &snapshot_spec).is_none());
+    }
+
+    #[test]
+    fn ui_recovery_guard_allows_more_specific_target() {
+        let failed_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "OK".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+        let error = "UI failure [ambiguous_control]: Recovery: Disambiguate the target label, role, window, or container. Next [ask_for_clarification]: Do not guess. Ask which app, window, or matching control the operator means.";
+        let guard = ui_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let different_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "OK - Save Changes".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+
+        assert!(ui_recovery_guard_correction(Some(&guard), &different_spec).is_none());
+    }
+
+    #[test]
+    fn ui_recovery_guard_correction_for_ambiguity_requires_clarification() {
+        let failed_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "OK".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+        let error = "UI failure [ambiguous_control]: Recovery: Disambiguate the target label, role, window, or container. Next [ask_for_clarification]: Do not guess. Ask which app, window, or matching control the operator means.";
+        let guard = ui_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let repeated_spec = ActionSpec::UiClick {
+            app_name: Some("Finder".to_string()),
+            role: Some("AXButton".to_string()),
+            label: "OK".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+
+        let correction = ui_recovery_guard_correction(Some(&guard), &repeated_spec)
+            .expect("same ambiguous UI target must be blocked");
+
+        assert!(correction.contains("Next [ask_for_clarification]"));
+        assert!(correction.contains("ask the operator which matching app"));
+        assert!(correction.contains("do not emit another UI action"));
+    }
+
+    #[test]
+    fn ui_type_recovery_guard_ignores_sensitive_text_value() {
+        let failed_spec = ActionSpec::UiType {
+            app_name: Some("Notes".to_string()),
+            role: Some("AXTextField".to_string()),
+            label: Some("Search".to_string()),
+            text: "first secret".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+        let error = "UI failure [not_typeable]: Recovery: Target a visible editable text field or text area. Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly.";
+        let guard = ui_recovery_guard_from_failure(&failed_spec, error).expect("guard must arm");
+        let repeated_spec = ActionSpec::UiType {
+            app_name: Some("Notes".to_string()),
+            role: Some("AXTextField".to_string()),
+            label: Some("Search".to_string()),
+            text: "second secret".to_string(),
+            max_depth: Some(4),
+            rationale: None,
+            category_override: None,
+        };
+
+        let correction = ui_recovery_guard_correction(Some(&guard), &repeated_spec)
+            .expect("same UI type target must be blocked regardless of text");
+
+        assert!(correction.contains("not_typeable"));
+        assert!(correction.contains("Next [snapshot_then_replan]"));
+        assert!(!correction.contains("first secret"));
+        assert!(!correction.contains("second secret"));
     }
 
     // ── Phase 9: Retrieval pipeline integration tests ─────────────────────────
@@ -12758,6 +16092,123 @@ end tell"#;
     }
 
     #[tokio::test]
+    async fn fresh_clipboard_does_not_hijack_unrelated_chat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        orch.context.push_user("let's do some testing.".to_string());
+        let clipboard_event = SystemEvent {
+            r#type: crate::ipc::proto::SystemEventType::ClipboardChanged.into(),
+            payload: r#"{"text":"ZIP_WORKFLOW_CLIPBOARD_SENTINEL"}"#.to_string(),
+        };
+        orch.handle_system_event(clipboard_event, new_trace())
+            .await
+            .expect("clipboard event");
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user" && !is_tool_result_content(&message.content))
+            .expect("user message");
+        assert_eq!(user_msg.content, "let's do some testing.");
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("ZIP_WORKFLOW_CLIPBOARD_SENTINEL")));
+    }
+
+    #[test]
+    fn truthfulness_challenges_are_detected_without_matching_generic_disagreement() {
+        assert!(is_truthfulness_challenge("you lied to me"));
+        assert!(is_truthfulness_challenge(
+            "Did you lie about checking that?"
+        ));
+        assert!(is_truthfulness_challenge("you didn't actually run it"));
+        assert!(is_truthfulness_challenge(
+            "That's not what Activity Monitor says. You just made that up."
+        ));
+        assert!(is_truthfulness_challenge("that isn't accurate"));
+        assert!(!is_truthfulness_challenge("I disagree with that design"));
+        assert!(!is_truthfulness_challenge("tell me a story about a liar"));
+    }
+
+    #[test]
+    fn latest_deterministic_local_evidence_requires_the_latest_assistant_report() {
+        let pid_report = Message::assistant(
+            "PID 55681 is `com.apple.Virtualization.VirtualMachine`. Identity came from local `ps`; no web lookup was used.",
+        );
+        assert_eq!(
+            latest_deterministic_local_evidence(&[pid_report]),
+            Some(DeterministicLocalEvidence::Process { pid: 55681 })
+        );
+
+        let messages = vec![
+            Message::assistant(
+                "Top CPU users right now:\n1. Example. Measured just now from macOS `ps`.",
+            ),
+            Message::assistant("An unrelated model answer."),
+        ];
+        assert_eq!(latest_deterministic_local_evidence(&messages), None);
+    }
+
+    #[tokio::test]
+    async fn truthfulness_challenge_after_pid_report_uses_deterministic_audit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let pid = std::process::id();
+        orch.context.push_assistant(format!(
+            "PID {pid} is `dexter-core`. Identity came from local `ps`; no web lookup was used."
+        ));
+        let trace_id = new_trace();
+
+        orch.handle_text_input(
+            "You didn't actually inspect that PID. You made it up, didn't you?".to_string(),
+            trace_id.clone(),
+            false,
+        )
+        .await
+        .expect("deterministic evidence audit");
+
+        let path = orch.turn_records.record_path_for_trace(&trace_id);
+        let record: crate::context::turn_record::ContextTurnRecord =
+            serde_json::from_slice(&std::fs::read(path).expect("read turn record"))
+                .expect("parse turn record");
+        assert_eq!(
+            record.route_category.as_deref(),
+            Some("DeterministicLocalEvidenceAudit")
+        );
+        assert_eq!(
+            record.model.as_deref(),
+            Some("deterministic_local_evidence_audit")
+        );
+        let generation = record.generation.expect("evidence audit generation");
+        assert!(generation
+            .output_preview
+            .starts_with("No. The prior PID answer"));
+        assert!(generation.output_preview.contains("Rust host"));
+    }
+
+    #[tokio::test]
+    async fn truthfulness_challenge_injects_evidence_audit_instruction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        orch.context.push_assistant(
+            "Measured just now from the local macOS process table with `ps`.".to_string(),
+        );
+        orch.context.push_user("you lied to me".to_string());
+
+        let messages = orch.prepare_messages_for_inference(&[]);
+        let audit = messages
+            .iter()
+            .find(|message| message.content.contains("TRUTHFULNESS AUDIT"))
+            .expect("truthfulness audit instruction");
+        assert_eq!(audit.role, "system");
+        assert!(audit
+            .content
+            .contains("Do not agree, deny, apologize, or retract"));
+        assert!(audit.content.contains("deterministic local evidence"));
+    }
+
+    #[tokio::test]
     async fn explicit_clipboard_reference_forces_raw_clipboard_representation() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut orch, _rx) = make_orchestrator(tmp.path());
@@ -12986,6 +16437,42 @@ end tell"#;
             !messages.iter().any(|m| m.role == "system"
                 && m.content.starts_with("Reference notes from prior sessions")),
             "pure-current-session recall must not emit prior-session framing"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_session_recall_does_not_duplicate_live_conversation_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let current_session = orch.session_id.clone();
+        orch.context.push_user("you lied to me".to_string());
+        orch.context
+            .push_assistant("I didn't lie. Let me look it up.".to_string());
+        orch.context
+            .push_user("you did lie about the lookup".to_string());
+
+        let recall = vec![crate::retrieval::store::MemoryEntry {
+            id: "duplicate-current-turn".to_string(),
+            content: "User: you lied to me\nAssistant: I didn't lie. Let me look it up."
+                .to_string(),
+            source: "memory".to_string(),
+            entry_type: "turn".to_string(),
+            session_id: Some(current_session),
+            created_at: "2026-07-10T03:52:08Z".to_string(),
+            similarity: 0.99,
+        }];
+
+        let messages = orch.prepare_messages_for_inference(&recall);
+        assert!(!messages.iter().any(|message| {
+            message.role == "system" && message.content.starts_with("Earlier in this conversation:")
+        }));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.content.trim() == "I didn't lie. Let me look it up.")
+                .count(),
+            1,
+            "recent assistant claim must appear only in live history"
         );
     }
 
@@ -13451,6 +16938,73 @@ end tell"#;
     }
 
     #[tokio::test]
+    async fn empty_user_generation_is_recorded_as_failure_not_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let trace_id = new_trace();
+        orch.context
+            .push_user("Did you just lie to me?".to_string());
+        orch.turn_records
+            .start_turn(TurnDispatchInput {
+                session_id: orch.session_id.clone(),
+                trace_id: trace_id.clone(),
+                turn_id: trace_id.clone(),
+                task_class: TaskClass::Chat,
+                route_category: Some("Chat".to_string()),
+                model: Some("qwen3:8b".to_string()),
+                user_text: "Did you just lie to me?".to_string(),
+                context_diagnostics: CompiledContextDiagnostics {
+                    compiler_version: "test".to_string(),
+                    scope: CompilerScope::AmbientOnly,
+                    token_cost_method: TokenCostMethod::CharHeuristicV1,
+                    budget_tokens: 0,
+                    reserved_output_tokens: 0,
+                    estimated_used_tokens: 0,
+                    mandatory_tokens: 0,
+                    optional_tokens: 0,
+                    included: Vec::new(),
+                    dropped: Vec::new(),
+                },
+            })
+            .expect("start turn record");
+
+        orch.handle_generation_complete(GenerationResult {
+            cancelled: false,
+            full_response: String::new(),
+            intercepted_q: None,
+            tts_was_active: false,
+            trace_id: trace_id.clone(),
+            content: "Did you just lie to me?".to_string(),
+            embed_model: "mxbai-embed-large".to_string(),
+            is_shell_proactive: false,
+            proactive_silent: false,
+            agentic_depth: 0,
+            telemetry: GenerationTelemetry {
+                model: "qwen3:8b".to_string(),
+                token_count: 17,
+                ..GenerationTelemetry::default()
+            },
+        })
+        .await
+        .expect("handle empty generation");
+
+        let record: crate::context::turn_record::ContextTurnRecord = serde_json::from_slice(
+            &std::fs::read(orch.turn_records.record_path_for_trace(&trace_id))
+                .expect("read turn record"),
+        )
+        .expect("parse turn record");
+        assert_eq!(record.close_reason, TurnCloseReason::GenerationFailed);
+        assert_eq!(
+            record.outcome_label,
+            crate::context::ledger::TurnOutcomeLabel::GenerationFailed
+        );
+        assert_eq!(
+            orch.context.messages().last().map(|message| message.content.as_str()),
+            Some("I didn't produce a usable answer for that turn. Nothing was completed or verified.")
+        );
+    }
+
+    #[tokio::test]
     async fn push_tool_result_adds_message_without_truncation() {
         // push_tool_result must insert a message into the conversation context
         // without triggering turn-count truncation. Verify by pushing a message
@@ -13747,7 +17301,8 @@ end tell"#;
                     Some(crate::ipc::proto::server_event::Event::TextResponse(t)) => {
                         if t.content
                             .contains("Action completed: Run: echo test output.")
-                            && t.content.contains("test output")
+                            && t.content.contains("Summarizing results...")
+                            && !t.content.contains("\n\ntest output")
                         {
                             saw_status = true;
                         }
@@ -14091,6 +17646,63 @@ end tell"#;
         assert!(
             injected,
             "Browser recovery correction must be visible to the continuation model"
+        );
+    }
+
+    /// UI recovery guard corrections use the same continuation machinery as
+    /// browser recovery corrections. A repeated failed UI/window target should
+    /// not simply stop at the guard wall; the structured correction must be
+    /// visible to the continuation model so it can snapshot, inspect, or ask
+    /// for clarification instead of repeating the same ActionSpec.
+    #[tokio::test]
+    async fn ui_recovery_correction_spawns_agentic_continuation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut orch, mut rx, _gen_rx) = make_orchestrator_with_gen_rx(tmp.path());
+        let trace_id = new_trace();
+        let correction = "UI recovery guard blocked a repeated target.\n\
+            Failure: control_not_found.\n\
+            Repeated target: ui_click app `Finder` role `AXButton` label `Save`.\n\
+            Next [snapshot_then_replan]: Inspect the current UI snapshot before choosing another control. Do not repeat the same label blindly.\n\
+            Allowed next actions: run ui_snapshot for the relevant app, then choose a visible specific control from that evidence, or ask for clarification\n\
+            Do not repeat the same UI/window ActionSpec unless fresh snapshot, window inspection, or operator clarification changes the target.";
+
+        orch.inject_action_status_context("Action FAILED", correction, &trace_id);
+        orch.spawn_agentic_continuation(&trace_id, 2, "click Save".to_string())
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        let mut saw_thinking = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let Ok(ServerEvent {
+                event: Some(crate::ipc::proto::server_event::Event::EntityState(s)),
+                ..
+            }) = evt
+            {
+                if s.state == crate::ipc::proto::EntityState::Thinking as i32 {
+                    saw_thinking = true;
+                }
+            }
+        }
+        assert!(
+            saw_thinking,
+            "UI recovery correction must re-enter THINKING for replanning"
+        );
+        assert!(
+            orch.generation_handle.is_some(),
+            "UI recovery correction must spawn a continuation generation"
+        );
+
+        let messages = orch.context.messages();
+        let injected = messages.iter().any(|m| {
+            m.role == "user"
+                && m.content.contains("Action FAILED")
+                && m.content.contains("Next [snapshot_then_replan]")
+                && m.content.contains("Allowed next actions")
+        });
+        assert!(
+            injected,
+            "UI recovery correction must be visible to the continuation model"
         );
     }
 

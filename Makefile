@@ -22,18 +22,19 @@ SHELL_SOCKET_PATH   := /tmp/dexter-shell.sock
 SOCKET_TIMEOUT_SECS := 90
 READY_TIMEOUT_SECS  := 300
 RUN_PID_FILE        := /tmp/dexter-make-run.pid
+CORE_PID_FILE       := /tmp/dexter-core.pid
 OLLAMA_MODELS      ?= /Users/jason/ollama-models
 export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running run-core run-core-debug run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running require-active-gui-session run-core run-core-debug start-core restart-core run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict daily-driver-v1-gate daily-driver-v1-checklist diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-detached-core live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-local-answers live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-context-turn-records live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-ui-recovery-model live-smoke-ui-recovery-model-stability live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact-dry-run live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-diagnostic-bundle live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-action-surfaces live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 
 ## help: print this help message
 help:
 	@echo "Usage: make <target>"
 	@echo ""
-	@grep -E '^## [a-z][a-z-]*:' $(MAKEFILE_LIST) \
+	@grep -E '^## [a-z][a-z0-9-]*:' $(MAKEFILE_LIST) \
 		| sed 's/^## /  /' \
 		| column -t -s ':'
 
@@ -43,6 +44,10 @@ all: proto
 ##        (run `make check-permissions` to verify macOS TCC permissions)
 setup:
 	@bash scripts/setup.sh
+
+## require-active-gui-session: fail fast if macOS is locked/shielded for GUI smokes
+require-active-gui-session:
+	@bash -lc 'source scripts/lib/gui-session.sh; require_active_gui_session'
 
 ## proto: compile dexter.proto → Swift and Rust artifacts
 ##
@@ -102,6 +107,16 @@ run-core:
 ## run-core-debug: start the Rust daemon in debug mode intentionally
 run-core-debug:
 	cargo run --manifest-path $(RUST_CORE_DIR)/Cargo.toml --bin dexter-core
+
+## start-core: build and start the Rust daemon detached, with logs in /tmp/dexter-core.log
+start-core:
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	@bash scripts/start-dexter-core.sh --wait-ready --pid-file "$(CORE_PID_FILE)"
+
+## restart-core: stop Dexter and start the Rust daemon detached
+restart-core:
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	@bash scripts/start-dexter-core.sh --restart --wait-ready --pid-file "$(CORE_PID_FILE)"
 
 ## cli: build the dexter-cli release binary (Phase 38 dev tool).
 ##
@@ -173,6 +188,11 @@ live-smoke-startup-readiness: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-startup-readiness-smoke.sh
 
+## live-smoke-detached-core: verify make start-core and make stop lifecycle
+live-smoke-detached-core: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-detached-core-smoke.sh
+
 ## live-smoke-process-control: verify external make stop terminates a normal make run tree
 ##
 ## Starts the normal `make run` process tree, waits until Swift launch starts,
@@ -234,7 +254,7 @@ live-smoke-acceptance-status:
 ##
 ## Installs Dexter.app into a temporary directory, validates bundle metadata,
 ## verifies launcher shell syntax, and confirms the Terminal-backed command
-## reasserts the model store before `make stop && make run`.
+## reasserts the model store before running the centralized lifecycle script.
 live-smoke-dock-launcher:
 	bash scripts/live-dock-launcher-smoke.sh
 
@@ -260,6 +280,15 @@ live-smoke-degraded-mode: ensure-core-not-running
 live-smoke-residency-proof:
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-residency-proof-smoke.sh
+
+## live-smoke-local-answers: verify current Mac state questions use deterministic local evidence
+##
+## Starts a fresh release core, asks ordinary RAM/CPU/Dexter Notices questions
+## through dexter-cli, and verifies the answer comes from macOS process/memory
+## telemetry or ambient-event state instead of model speculation.
+live-smoke-local-answers: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-local-answers-smoke.sh
 
 ## live-smoke-external-failures: run deterministic external-integration failure smoke
 ##
@@ -287,6 +316,15 @@ live-smoke-action-diagnostic: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-action-diagnostic-smoke.sh --start-core
 
+## live-smoke-context-turn-records: verify C3 turn records persist action outcome evidence
+##
+## Starts a fresh release core, drives deterministic UI and browser action
+## failures through the exact ActionSpec path, then verifies context_turns JSON
+## contains privacy-safe typed diagnostics for both outcomes.
+live-smoke-context-turn-records: ensure-core-not-running require-active-gui-session
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-context-turn-records-smoke.sh
+
 ## live-smoke-shortcut-action: verify macOS Shortcut actions route through approval and audit
 ##
 ## Drives an exact synthetic `shortcut` ActionSpec and auto-denies it. This
@@ -301,7 +339,7 @@ live-smoke-shortcut-action: ensure-core-not-running
 ## Drives an exact synthetic `window_focus` ActionSpec against Finder. This
 ## proves Dexter can bring a local app/window forward without model-written raw
 ## AppleScript and records a readable receipt for subsequent GUI targeting.
-live-smoke-window-focus: ensure-core-not-running
+live-smoke-window-focus: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-window-focus-smoke.sh
 
@@ -309,7 +347,7 @@ live-smoke-window-focus: ensure-core-not-running
 ##
 ## Drives an exact synthetic `window_inspect` ActionSpec for the frontmost app.
 ## This proves Dexter can gather read-only window evidence before GUI work.
-live-smoke-window-inspect: ensure-core-not-running
+live-smoke-window-inspect: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-window-inspect-smoke.sh
 
@@ -318,7 +356,7 @@ live-smoke-window-inspect: ensure-core-not-running
 ## Drives an exact synthetic `ui_snapshot` ActionSpec for the frontmost app.
 ## This proves Dexter can gather bounded read-only Accessibility control
 ## evidence before choosing a GUI interaction strategy.
-live-smoke-ui-snapshot: ensure-core-not-running
+live-smoke-ui-snapshot: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-snapshot-smoke.sh
 
@@ -327,7 +365,7 @@ live-smoke-ui-snapshot: ensure-core-not-running
 ## Drives an exact synthetic `ui_click` ActionSpec against a temporary dialog.
 ## This proves Dexter can press one unambiguous visible control without model-
 ## written raw AppleScript or coordinate clicks.
-live-smoke-ui-click: ensure-core-not-running
+live-smoke-ui-click: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-click-smoke.sh
 
@@ -336,7 +374,7 @@ live-smoke-ui-click: ensure-core-not-running
 ## Drives an exact synthetic `ui_type` ActionSpec against a temporary AppKit text
 ## field fixture. This proves Dexter can enter text into one unambiguous text field
 ## without model-written raw AppleScript keystrokes.
-live-smoke-ui-type: ensure-core-not-running
+live-smoke-ui-type: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-type-smoke.sh
 
@@ -345,7 +383,7 @@ live-smoke-ui-type: ensure-core-not-running
 ## Drives an exact synthetic `ui_select` ActionSpec against a temporary AppKit
 ## pop-up fixture. This proves Dexter can choose one unambiguous visible option
 ## without model-written raw AppleScript menu scripts.
-live-smoke-ui-select: ensure-core-not-running
+live-smoke-ui-select: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-select-smoke.sh
 
@@ -354,7 +392,7 @@ live-smoke-ui-select: ensure-core-not-running
 ## Drives an exact synthetic `ui_toggle` ActionSpec against a temporary AppKit
 ## checkbox fixture. This proves Dexter can set one unambiguous visible toggle
 ## to a requested final state without blindly pressing it.
-live-smoke-ui-toggle: ensure-core-not-running
+live-smoke-ui-toggle: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-toggle-smoke.sh
 
@@ -363,7 +401,7 @@ live-smoke-ui-toggle: ensure-core-not-running
 ## Drives an exact synthetic `ui_pick` ActionSpec against a temporary AppKit
 ## table fixture. This proves Dexter can select one unambiguous visible row/item
 ## without model-written raw AppleScript selection scripts.
-live-smoke-ui-pick: ensure-core-not-running
+live-smoke-ui-pick: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-pick-smoke.sh
 
@@ -372,7 +410,7 @@ live-smoke-ui-pick: ensure-core-not-running
 ## Drives exact synthetic `ui_click` failures against a temporary AppKit fixture.
 ## This proves missing and ambiguous controls produce typed, audit-friendly
 ## receipts plus deterministic `dexter-cli --why` recovery guidance.
-live-smoke-ui-failure-diagnostic: ensure-core-not-running
+live-smoke-ui-failure-diagnostic: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-failure-diagnostic-smoke.sh
 
@@ -382,9 +420,27 @@ live-smoke-ui-failure-diagnostic: ensure-core-not-running
 ## structured window/UI action subset plus typed UI failure diagnostics. This is
 ## the fast day-to-day UI lane; isolated UI targets remain the release-grade
 ## proof that each smoke can own a fresh daemon.
-live-smoke-ui-actions-shared: ensure-core-not-running
+live-smoke-ui-actions-shared: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-ui-actions-shared-smoke.sh
+
+## live-smoke-ui-recovery-model: verify model-driven UI failure replanning
+##
+## Focused opt-in smoke. This exercises live model behavior against a tiny
+## AppKit fixture: missing UI target -> typed failure receipt -> optional repeat
+## guard correction -> UI snapshot replan. Keep it out of broad acceptance until
+## it proves stable across normal sessions.
+live-smoke-ui-recovery-model: ensure-core-not-running require-active-gui-session
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-ui-recovery-model-smoke.sh
+
+## live-smoke-ui-recovery-model-stability: repeat the model-driven UI recovery smoke
+##
+## Opt-in promotion evidence. Defaults to 5 runs and writes a receipt under
+## docs/live-smoke-results/ui-recovery-model-stability/. Override with:
+## DEXTER_UI_RECOVERY_MODEL_STABILITY_RUNS=10 make live-smoke-ui-recovery-model-stability
+live-smoke-ui-recovery-model-stability:
+	bash scripts/live-ui-recovery-model-stability.sh
 
 ## live-smoke-cli: run automated CLI live regressions (starts Rust core, no Swift UI)
 ##
@@ -447,14 +503,23 @@ live-smoke-approval-lifecycle: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-approval-lifecycle-smoke.sh --start-core
 
+## live-smoke-message-contact-dry-run: opt-in no-send Contacts refusal smoke
+##
+## Starts a fresh core, asks for a message to a deliberately missing Contacts
+## name, and verifies Dexter refuses before approval or delivery. This touches
+## Contacts.app lookup but never sends a message.
+live-smoke-message-contact-dry-run: ensure-core-not-running
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-message-contact-dry-run-smoke.sh
+
 ## live-smoke-message-contact: opt-in Contacts-backed iMessage approval smoke
 ##
-## Requires DEXTER_SMOKE_CONTACT_NAME to name an existing non-self Contacts entry
-## with a reachable phone or iMessage email. The test auto-denies the approval
-## request, so it verifies Contacts resolution + approval gating without sending.
+## Requires DEXTER_SMOKE_CONTACT_NAME to name an existing Contacts entry with a
+## reachable phone or iMessage email. The test auto-denies the approval request,
+## so it verifies Contacts resolution + approval gating without sending.
 ##
 ## Example:
-##   DEXTER_SMOKE_CONTACT_NAME="Some Test Contact" make live-smoke-message-contact
+##   DEXTER_SMOKE_CONTACT_NAME="Jason Phillips" make live-smoke-message-contact
 live-smoke-message-contact: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-message-contact-smoke.sh --start-core
@@ -477,28 +542,28 @@ live-smoke-message-contact-approve: ensure-core-not-running
 ## /tmp/dexter-hud-core-smoke.log, launches the real Swift app with a
 ## test-only DEXTER_HUD_SMOKE hook, submits one typed turn through
 ## HUDWindow.onTextSubmit, and asserts the HUD/client lifecycle logs.
-live-smoke-hud: ensure-core-not-running
+live-smoke-hud: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-hud-smoke.sh --start-core
 
 ## live-smoke-hud-new-session: verify the Swift HUD can start a fresh daemon session
-live-smoke-hud-new-session: ensure-core-not-running
+live-smoke-hud-new-session: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	DEXTER_HUD_SMOKE_NEW_SESSION=1 DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
 
 ## live-smoke-hud-lifecycle: run actual Swift HUD restart/quit lifecycle regression
-live-smoke-hud-lifecycle: ensure-core-not-running
+live-smoke-hud-lifecycle: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	DEXTER_HUD_SMOKE_LIFECYCLE_ACTION=restart DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
 	DEXTER_HUD_SMOKE_LIFECYCLE_ACTION=quit DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
 
 ## live-smoke-hud-placement: verify placement commands and transparent click-through invariants
-live-smoke-hud-placement: ensure-core-not-running
+live-smoke-hud-placement: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
-	DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE="snap,start,synthetic-nodrag:32:18,synthetic-drag:32:18,stop" DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
+	DEXTER_HUD_SMOKE_PLACEMENT_SEQUENCE="snap,toggle,synthetic-nodrag:32:18,synthetic-drag:32:18,toggle" DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
 
 ## live-smoke-placement-command: verify external dexter-place.sh notifications reach Swift
-live-smoke-placement-command: ensure-core-not-running
+live-smoke-placement-command: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
 	bash scripts/live-placement-command-smoke.sh
 
@@ -509,21 +574,27 @@ live-smoke-placement-command: ensure-core-not-running
 ## test-only status hook, fetches HUD health plus recent actions, restarts the
 ## browser worker via RestartComponent, and asserts post-restart health returns
 ## to the HUD.
-live-smoke-hud-health: ensure-core-not-running
+live-smoke-hud-health: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-hud-health-smoke.sh --start-core
 
 ## live-smoke-hud-unavailable-health: verify HUD recovery copy when Rust core is down
-live-smoke-hud-unavailable-health: ensure-core-not-running
+live-smoke-hud-unavailable-health: ensure-core-not-running require-active-gui-session
 	cd $(SWIFT_DIR) && swift build
 	bash scripts/live-hud-unavailable-health-smoke.sh
+
+## live-smoke-hud-diagnostic-bundle: verify the Swift HUD can create a local diagnostic bundle
+live-smoke-hud-diagnostic-bundle: ensure-core-not-running require-active-gui-session
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-cli
+	cd $(SWIFT_DIR) && swift build
+	bash scripts/live-hud-diagnostic-bundle-smoke.sh
 
 ## live-smoke-hud-action-history: run Swift HUD recent-actions regression
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core, creates a
 ## real action audit entry through the CLI, then asks the Swift HUD to fetch
 ## Recent Actions through the ActionHistory RPC.
-live-smoke-hud-action-history: ensure-core-not-running
+live-smoke-hud-action-history: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-hud-action-history-smoke.sh --start-core
 
@@ -532,17 +603,27 @@ live-smoke-hud-action-history: ensure-core-not-running
 ## Builds release-mode dexter-core + dexter-cli, starts the core, creates a
 ## blocked raw message_send receipt through the CLI, then asks the Swift HUD to
 ## explain it using Health + ActionHistory + latest session evidence.
-live-smoke-hud-action-diagnostic: ensure-core-not-running
+live-smoke-hud-action-diagnostic: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-hud-action-diagnostic-smoke.sh --start-core
+
+## live-smoke-hud-action-surfaces: run Swift HUD recent-actions + latest-action regression in one launch
+##
+## Builds release-mode dexter-core + dexter-cli, starts the core, creates both
+## successful and blocked action audit entries, then asks the Swift HUD to render
+## Recent Actions and Why/diagnostic surfaces in one app lifetime.
+live-smoke-hud-action-surfaces: ensure-core-not-running require-active-gui-session
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-hud-action-surfaces-smoke.sh --start-core
 
 ## live-smoke-hud-ui-failure: run Swift HUD typed UI/window failure regression
 ##
 ## Builds release-mode dexter-core + dexter-cli, starts the core, seeds missing
 ## and ambiguous UI control failures through the CLI, then verifies the Swift
 ## HUD Recent Actions and Why surfaces show the typed failure kind and directive.
-live-smoke-hud-ui-failure: ensure-core-not-running
+live-smoke-hud-ui-failure: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	cd $(SWIFT_DIR) && swift build
 	bash scripts/live-hud-ui-failure-smoke.sh --start-core
 
 ## live-smoke-hud-approval: run Swift HUD approval-required action regression
@@ -552,8 +633,9 @@ live-smoke-hud-ui-failure: ensure-core-not-running
 ## DEXTER_HUD_SMOKE_ACTION_APPROVAL=deny, and asserts the HUD receives and
 ## denies a destructive ActionRequest visibly, remembers the denial in context,
 ## and does not execute it.
-live-smoke-hud-approval: ensure-core-not-running
+live-smoke-hud-approval: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
+	cd $(SWIFT_DIR) && swift build
 	bash scripts/live-hud-approval-smoke.sh --start-core
 
 ## live-smoke-action-cancel: run long-lived subprocess cancellation regression
@@ -596,6 +678,7 @@ live-smoke-all:
 	$(MAKE) live-smoke-external-failures
 	$(MAKE) live-smoke-operator-status
 	$(MAKE) live-smoke-action-diagnostic
+	$(MAKE) live-smoke-context-turn-records
 	$(MAKE) live-smoke-shortcut-action
 	$(MAKE) live-smoke-window-focus
 	$(MAKE) live-smoke-window-inspect
@@ -617,8 +700,7 @@ live-smoke-all:
 	$(MAKE) live-smoke-placement-command
 	$(MAKE) live-smoke-hud-health
 	$(MAKE) live-smoke-hud-unavailable-health
-	$(MAKE) live-smoke-hud-action-history
-	$(MAKE) live-smoke-hud-action-diagnostic
+	$(MAKE) live-smoke-hud-action-surfaces
 	$(MAKE) live-smoke-hud-ui-failure
 	$(MAKE) live-smoke-hud-approval
 	$(MAKE) live-smoke-action-cancel
@@ -639,15 +721,18 @@ live-smoke-summary:
 ## This is the fastest high-signal check for the operator-facing controls that
 ## should make Dexter feel like a normal app: installed launcher metadata,
 ## external stop/restart behavior, UI quit/restart, stale Swift cleanup, and
-## placement click-through plus external placement command delivery.
+## diagnostic bundle creation, placement click-through, and external placement
+## command delivery.
 live-smoke-operator-controls:
 	bash scripts/live-smoke-summary.sh \
 		live-smoke-dock-launcher \
+		live-smoke-detached-core \
 		live-smoke-process-control \
 		live-smoke-stop-report \
 		live-smoke-run-loop-lifecycle \
 		live-smoke-stale-swift-stop \
 		live-smoke-hud-lifecycle \
+		live-smoke-hud-diagnostic-bundle \
 		live-smoke-hud-placement \
 		live-smoke-placement-command
 
@@ -659,6 +744,7 @@ live-smoke-runtime-health:
 	bash scripts/live-smoke-summary.sh \
 		live-smoke-residency-proof \
 		live-smoke-startup-readiness \
+		live-smoke-local-answers \
 		live-smoke-operator-status \
 		live-smoke-hud-health \
 		live-smoke-hud-unavailable-health
@@ -674,6 +760,7 @@ live-smoke-action-safety:
 	bash scripts/live-smoke-summary.sh --fail-fast \
 		live-smoke-external-failures \
 		live-smoke-action-diagnostic \
+		live-smoke-context-turn-records \
 		live-smoke-shortcut-action \
 		live-smoke-window-focus \
 		live-smoke-window-inspect \
@@ -697,7 +784,7 @@ live-smoke-action-safety:
 ## lifecycle, browser recovery evidence, and action cancellation. Use
 ## live-smoke-action-safety for the isolated release-grade sweep that also proves
 ## each target can own a fresh daemon independently.
-live-smoke-action-safety-shared:
+live-smoke-action-safety-shared: require-active-gui-session
 	bash scripts/live-action-safety-shared-smoke.sh
 
 ## live-smoke-action-safety-full: run the full action safety + HUD/model sweep
@@ -709,6 +796,7 @@ live-smoke-action-safety-full:
 	bash scripts/live-smoke-summary.sh \
 		live-smoke-external-failures \
 		live-smoke-action-diagnostic \
+		live-smoke-context-turn-records \
 		live-smoke-shortcut-action \
 		live-smoke-window-focus \
 		live-smoke-window-inspect \
@@ -724,8 +812,7 @@ live-smoke-action-safety-full:
 		live-smoke-browser-recovery-model \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
-		live-smoke-hud-action-history \
-		live-smoke-hud-action-diagnostic \
+		live-smoke-hud-action-surfaces \
 		live-smoke-hud-ui-failure \
 		live-smoke-hud-approval \
 		live-smoke-action-cancel
@@ -746,11 +833,13 @@ live-smoke-acceptance:
 		live-smoke-placement-command \
 		live-smoke-residency-proof \
 		live-smoke-startup-readiness \
+		live-smoke-local-answers \
 		live-smoke-operator-status \
 		live-smoke-hud-health \
 		live-smoke-hud-unavailable-health \
 		live-smoke-external-failures \
 		live-smoke-action-diagnostic \
+		live-smoke-context-turn-records \
 		live-smoke-shortcut-action \
 		live-smoke-window-focus \
 		live-smoke-window-inspect \
@@ -765,8 +854,7 @@ live-smoke-acceptance:
 		live-smoke-browser-recovery \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
-		live-smoke-hud-action-history \
-		live-smoke-hud-action-diagnostic \
+		live-smoke-hud-action-surfaces \
 		live-smoke-hud-ui-failure \
 		live-smoke-hud-approval \
 		live-smoke-action-cancel
@@ -807,21 +895,11 @@ wait-for-core:
 wait-for-ready:
 	@echo "==> Waiting for Dexter health readiness (timeout: $(READY_TIMEOUT_SECS)s)..."
 	@cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-cli >/dev/null
-	@elapsed=0; \
-	while [ $$elapsed -lt $(READY_TIMEOUT_SECS) ]; do \
-		$(RUST_CORE_DIR)/target/release/dexter-cli --doctor >/tmp/dexter-wait-ready.out 2>&1 || true; \
-		if grep -Fq "OK   daemon health      status ready" /tmp/dexter-wait-ready.out && grep -Fq "Result: OK - no failed checks." /tmp/dexter-wait-ready.out; then \
-			echo "==> Dexter health ready after $${elapsed}s"; \
-			exit 0; \
-		fi; \
-		sleep 2; \
-		elapsed=$$((elapsed + 2)); \
-	done; \
-	echo "ERROR: Dexter health did not become ready within $(READY_TIMEOUT_SECS)s."; \
-	echo "       Last doctor report:"; \
-	cat /tmp/dexter-wait-ready.out 2>/dev/null || true; \
-	kill 0; \
-	exit 1
+	@bash scripts/wait-for-ready.sh \
+		--cli-bin "$(RUST_CORE_DIR)/target/release/dexter-cli" \
+		--timeout "$(READY_TIMEOUT_SECS)" \
+		--out /tmp/dexter-wait-ready.out \
+		--label "Dexter health"
 
 ## run: start both processes (requires Ollama to be running for inference). Swift waits for
 ##      the core socket, then shows pending/ready health from the daemon in-app.
@@ -862,6 +940,17 @@ acceptance-status:
 ## acceptance-status-strict: fail if focused acceptance evidence is missing
 acceptance-status-strict:
 	@DEXTER_ACCEPTANCE_STRICT=1 bash scripts/acceptance-status.sh
+
+## daily-driver-v1-gate: run the required automated Daily-driver v1 release batteries
+daily-driver-v1-gate:
+	$(MAKE) live-smoke-acceptance
+	$(MAKE) live-smoke-action-safety-full
+	$(MAKE) acceptance-status-strict
+	@bash scripts/daily-driver-v1-checklist.sh
+
+## daily-driver-v1-checklist: print the short manual Daily-driver v1 checklist
+daily-driver-v1-checklist:
+	@bash scripts/daily-driver-v1-checklist.sh
 
 ## diagnostic-bundle: build dexter-cli and write one local launch/model/process diagnostic markdown report
 diagnostic-bundle: cli

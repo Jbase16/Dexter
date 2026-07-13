@@ -615,7 +615,7 @@ pub async fn execute_ui_snapshot(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("");
-    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let depth = max_depth.unwrap_or(2).clamp(1, 6);
     let script = build_ui_snapshot_script(app_name, depth);
     execute_applescript(&script, timeout_secs).await
 }
@@ -830,7 +830,7 @@ pub async fn execute_ui_click(
             duration_ms: 0,
         };
     }
-    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let depth = max_depth.unwrap_or(2).clamp(1, 6);
     let script = build_ui_click_script(app_name, role, label, depth);
     execute_applescript(&script, timeout_secs).await
 }
@@ -1115,8 +1115,15 @@ tell application "System Events"
         set targetWindow to front window of targetProcess
         set frontWindowTitle to my cleanText(name of targetWindow)
     on error
-        set targetWindow to targetProcess
-        set frontWindowTitle to "(process root)"
+        try
+            set targetWindows to windows of targetProcess
+            if (count of targetWindows) is 0 then error "no windows"
+            set targetWindow to item 1 of targetWindows
+            set frontWindowTitle to my cleanText(name of targetWindow)
+        on error
+            set targetWindow to targetProcess
+            set frontWindowTitle to "(process root)"
+        end try
     end try
 end tell
 
@@ -1193,7 +1200,7 @@ pub async fn execute_ui_type(
             duration_ms: 0,
         };
     }
-    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let depth = max_depth.unwrap_or(2).clamp(1, 6);
     let script = build_ui_type_script(app_name, role, label, text, depth);
     execute_applescript(&script, timeout_secs).await
 }
@@ -1423,8 +1430,15 @@ tell application "System Events"
         set targetWindow to front window of targetProcess
         set frontWindowTitle to my cleanText(name of targetWindow)
     on error
-        set targetWindow to targetProcess
-        set frontWindowTitle to "(process root)"
+        try
+            set targetWindows to windows of targetProcess
+            if (count of targetWindows) is 0 then error "no windows"
+            set targetWindow to item 1 of targetWindows
+            set frontWindowTitle to my cleanText(name of targetWindow)
+        on error
+            set targetWindow to targetProcess
+            set frontWindowTitle to "(process root)"
+        end try
     end try
 end tell
 
@@ -1508,7 +1522,7 @@ pub async fn execute_ui_select(
             duration_ms: 0,
         };
     }
-    let depth = max_depth.unwrap_or(2).clamp(1, 4);
+    let depth = max_depth.unwrap_or(2).clamp(1, 6);
     let script = build_ui_select_script(app_name, role, label, option, depth);
     execute_applescript(&script, timeout_secs).await
 }
@@ -1787,8 +1801,15 @@ tell application "System Events"
         set targetWindow to front window of targetProcess
         set frontWindowTitle to my cleanText(name of targetWindow)
     on error
-        set targetWindow to targetProcess
-        set frontWindowTitle to "(process root)"
+        try
+            set targetWindows to windows of targetProcess
+            if (count of targetWindows) is 0 then error "no windows"
+            set targetWindow to item 1 of targetWindows
+            set frontWindowTitle to my cleanText(name of targetWindow)
+        on error
+            set targetWindow to targetProcess
+            set frontWindowTitle to "(process root)"
+        end try
     end try
 end tell
 
@@ -2129,8 +2150,15 @@ tell application "System Events"
         set targetWindow to front window of targetProcess
         set frontWindowTitle to my cleanText(name of targetWindow)
     on error
-        set targetWindow to targetProcess
-        set frontWindowTitle to "(process root)"
+        try
+            set targetWindows to windows of targetProcess
+            if (count of targetWindows) is 0 then error "no windows"
+            set targetWindow to item 1 of targetWindows
+            set frontWindowTitle to my cleanText(name of targetWindow)
+        on error
+            set targetWindow to targetProcess
+            set frontWindowTitle to "(process root)"
+        end try
     end try
 end tell
 
@@ -2215,7 +2243,7 @@ pub async fn execute_ui_pick(
             duration_ms: 0,
         };
     }
-    let depth = max_depth.unwrap_or(3).clamp(1, 5);
+    let depth = max_depth.unwrap_or(3).clamp(1, 6);
     let script = build_ui_pick_script(app_name, role, label, container_label, depth);
     execute_applescript(&script, timeout_secs).await
 }
@@ -2506,8 +2534,15 @@ tell application "System Events"
         set targetWindow to front window of targetProcess
         set frontWindowTitle to my cleanText(name of targetWindow)
     on error
-        set targetWindow to targetProcess
-        set frontWindowTitle to "(process root)"
+        try
+            set targetWindows to windows of targetProcess
+            if (count of targetWindows) is 0 then error "no windows"
+            set targetWindow to item 1 of targetWindows
+            set frontWindowTitle to my cleanText(name of targetWindow)
+        on error
+            set targetWindow to targetProcess
+            set frontWindowTitle to "(process root)"
+        end try
     end try
 end tell
 

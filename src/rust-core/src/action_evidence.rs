@@ -29,6 +29,9 @@ pub(crate) fn action_receipt_diagnosis(receipt: &impl ActionEvidence) -> String 
     if action_type == "message_send" && result.contains("must be resolved by the orchestrator") {
         return "A raw message_send action was blocked because recipient resolution must happen through Rust-side Contacts lookup.".to_string();
     }
+    if action_type == "message_send" && is_contacts_message_preflight_result(&result) {
+        return "The message was refused before sending because Rust-side Contacts resolution did not produce one verified reachable recipient.".to_string();
+    }
     if result.contains("timed out") {
         return "The external tool or worker timed out before Dexter could complete the action."
             .to_string();
@@ -66,6 +69,9 @@ pub(crate) fn action_receipt_next_step(receipt: &impl ActionEvidence) -> &'stati
     }
     if action_type == "message_send" && result.contains("must be resolved by the orchestrator") {
         return "Ask again using the recipient's exact Contacts name so Rust can resolve the handle before approval.";
+    }
+    if action_type == "message_send" && is_contacts_message_preflight_result(&result) {
+        return "Use the recipient's exact Contacts name, resolve ambiguity if Dexter asks, and check Contacts permission if lookup failed.";
     }
     if result.contains("timed out") {
         return "Check whether the external tool or worker is hung, then retry with a smaller or more specific action.";
@@ -105,6 +111,15 @@ fn ui_failure_next_step(kind: &str) -> &'static str {
         }
         _ => "Inspect the current UI state before retrying the UI action.",
     }
+}
+
+fn is_contacts_message_preflight_result(result: &str) -> bool {
+    result.contains("structured imessage send refused before execution")
+        || result.contains("structured self-send refused before execution")
+        || result.contains("contacts name not found")
+        || result.contains("contacts name was ambiguous")
+        || result.contains("contacts lookup failed")
+        || result.contains("operator_self_handle is not configured")
 }
 
 fn extract_ui_failure_kind(summary: &str) -> Option<&str> {
@@ -181,6 +196,20 @@ mod tests {
         assert!(action_receipt_diagnosis(&receipt).contains("Rust-side Contacts lookup"));
         assert!(action_receipt_next_step(&receipt).contains("exact Contacts name"));
         assert!(format_failed_action_evidence_block(&receipt).contains("Target: test target"));
+    }
+
+    #[test]
+    fn contacts_preflight_receipt_has_contacts_specific_copy() {
+        let receipt = TestEvidence {
+            outcome: "failed",
+            action_type: "message_send",
+            summary: "Failed: Structured iMessage send refused before execution: Contacts name not found for Dexter Missing Contact.",
+        };
+
+        assert!(action_receipt_diagnosis(&receipt).contains("refused before sending"));
+        assert!(action_receipt_diagnosis(&receipt).contains("Contacts resolution"));
+        assert!(action_receipt_next_step(&receipt).contains("exact Contacts name"));
+        assert!(action_receipt_next_step(&receipt).contains("Contacts permission"));
     }
 
     #[test]
