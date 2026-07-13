@@ -470,6 +470,9 @@ run_placement_assertions() {
     assert_log_contains "$name" "centerHit=true" || ok=1
     assert_log_contains "$name" "movableByBackground=false" || ok=1
     assert_log_contains "$name" "ignoresMouse=false" || ok=1
+    # Placement mode never requests HUD content. Ambient app-focus THINKING
+    # states must remain invisible and cannot reveal the panel.
+    assert_log_absent "$name" "[HUDSmoke] show" || ok=1
     assert_log_absent "$name" "Fatal error" || ok=1
 
     if [[ "$ok" -eq 0 ]]; then

@@ -142,7 +142,7 @@ private final class HUDIconButton: NSButton {
 /// ## Lifecycle
 ///
 ///   showOperatorInput(_:)   — operator spoke or typed; HUD appears with the input text
-///   beginResponseStreaming() — THINKING received; HUD stays visible, ready for tokens
+///   beginResponseStreaming() — THINKING received; prepares tokens without revealing a closed HUD
 ///   appendToken(_:)         — non-final TextResponse token; streamed into the text view
 ///   responseComplete()      — is_final received; dismiss timer armed (10 s default)
 ///   scheduleAutoDismiss()   — safety net on IDLE/LISTENING if responseComplete didn't fire
@@ -984,7 +984,13 @@ final class HUDWindow: NSPanel {
     }
 
     /// THINKING state received — response is about to stream in.
-    /// Cancels any pending dismiss and ensures the HUD is visible.
+    ///
+    /// A THINKING state is not proof of an operator-visible turn. Ambient app-focus
+    /// checks also use that state while deciding whether to remain silent, so showing
+    /// the panel here made every application switch appear to open Dexter's HUD.
+    /// Operator text and voice paths already call showOperatorInput(_:) before this;
+    /// explicit notices, receipts, and utility surfaces have their own show methods.
+    /// Preparing the response area without calling show() keeps background work quiet.
     func beginResponseStreaming() {
         HUDSmokeLog.log("beginResponseStreaming")
         cancelDismiss()
@@ -997,8 +1003,6 @@ final class HUDWindow: NSPanel {
         // Record the insertion point so finalizeWithMarkdown() knows where the
         // operator-turn prefix ends and the response region begins.
         textArea.markResponseStart()
-        // Clear if there was no prior operator input (e.g. proactive response).
-        show()
     }
 
     /// Append a streaming token from a non-final TextResponse.
