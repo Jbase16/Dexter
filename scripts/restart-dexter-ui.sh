@@ -43,7 +43,10 @@ esac
 sleep "$RESTART_DELAY_SECS"
 
 make configure-ollama-models || exit 1
-make restart-core || exit 1
+# The app must still launch when only macOS privacy grants are missing so its
+# Health surface can explain the exact recovery. Strict smoke/readiness targets
+# do not set this override and continue to fail on missing permissions.
+DEXTER_READY_ALLOW_PERMISSION_DEGRADED=1 make restart-core || exit 1
 
 if [[ -f "$CORE_LOG" ]]; then
     printf '\n==> Tailing Rust core log: %s\n\n' "$CORE_LOG"

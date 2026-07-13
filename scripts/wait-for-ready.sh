@@ -8,6 +8,7 @@ LABEL="Dexter health"
 CORE_PID=""
 CORE_LOG=""
 OLLAMA_FAIL_FAST_GRACE_SECS="${DEXTER_READY_OLLAMA_FAIL_FAST_GRACE_SECS:-12}"
+ALLOW_PERMISSION_DEGRADED="${DEXTER_READY_ALLOW_PERMISSION_DEGRADED:-0}"
 
 usage() {
     cat <<'USAGE'
@@ -78,6 +79,35 @@ fail() {
     exit 2
 }
 
+permission_degraded_only() {
+    [[ "$ALLOW_PERMISSION_DEGRADED" == "1" ]] || return 1
+    grep -Fq "FAIL daemon health      status degraded; attention components" "$OUT_FILE" || return 1
+    grep -Fq "OK   fast model" "$OUT_FILE" || return 1
+    grep -Fq "OK   primary model" "$OUT_FILE" || return 1
+    grep -Fq "OK   embed model" "$OUT_FILE" || return 1
+    grep -Fq "OK   STT worker" "$OUT_FILE" || return 1
+    grep -Fq "OK   TTS worker" "$OUT_FILE" || return 1
+    grep -Fq "OK   browser worker" "$OUT_FILE" || return 1
+
+    local unexpected_failures
+    unexpected_failures="$(
+        grep '^FAIL ' "$OUT_FILE" \
+            | grep -Ev '^FAIL (daemon health|Accessibility permission|Screen Recording permission)[[:space:]]' \
+            || true
+    )"
+    [[ -z "$unexpected_failures" ]] || return 1
+
+    local health_line
+    health_line="$(grep -F "FAIL daemon health" "$OUT_FILE" | head -1)"
+    [[ "$health_line" == *"accessibility_permission"* || "$health_line" == *"screen_recording_permission"* ]] || return 1
+    [[ "$health_line" != *"fast_model"* ]]
+    [[ "$health_line" != *"primary_model"* ]]
+    [[ "$health_line" != *"embed_model"* ]]
+    [[ "$health_line" != *"stt_worker"* ]]
+    [[ "$health_line" != *"tts_worker"* ]]
+    [[ "$health_line" != *"browser_worker"* ]]
+}
+
 is_positive_int() {
     [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -gt 0 ]]
 }
@@ -106,6 +136,10 @@ while [[ "$elapsed" -lt "$TIMEOUT_SECS" ]]; do
     if grep -Fq "OK   daemon health      status ready" "$OUT_FILE" \
         && grep -Fq "Result: OK - no failed checks." "$OUT_FILE"; then
         echo "[INFO] ${LABEL} doctor-ready after ${elapsed}s"
+        exit 0
+    fi
+    if permission_degraded_only; then
+        echo "[INFO] ${LABEL} operational after ${elapsed}s; macOS permissions still require attention"
         exit 0
     fi
 

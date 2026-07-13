@@ -1760,6 +1760,11 @@ extension DexterClient {
         }
 
         lines.append("")
+        lines.append("Permissions")
+        lines.append("- Accessibility: \(permissionLabel(health.accessibilityTrusted))")
+        lines.append("- Screen Recording: \(permissionLabel(health.screenRecordingTrusted))")
+
+        lines.append("")
         lines.append("Models")
         lines.append("- Fast: \(modelName(health.fastModel)) - \(modelWarmLabel(health.fastModelWarm, healthStatus: status))")
         lines.append("- Primary: \(modelName(health.primaryModel)) - \(modelWarmLabel(health.primaryModelWarm, healthStatus: status))")
@@ -1994,6 +1999,11 @@ extension DexterClient {
         lines.append("- Browser: \(browserWorkerLine(health))")
 
         lines.append("")
+        lines.append("Permissions")
+        lines.append("- Accessibility: \(permissionLabel(health.accessibilityTrusted))")
+        lines.append("- Screen Recording: \(permissionLabel(health.screenRecordingTrusted))")
+
+        lines.append("")
         lines.append("Disk")
         if health.disk.isEmpty {
             lines.append("- No disk snapshot returned by daemon.")
@@ -2036,6 +2046,13 @@ extension DexterClient {
             lines.append("Recovery: run `make operator-ready`, then restart Dexter from the app menu or with `make restart`.")
         }
 
+        if !health.accessibilityTrusted {
+            lines.append("Permission recovery: enable Dexter in System Settings > Privacy & Security > Accessibility, then restart Dexter.")
+        }
+        if !health.screenRecordingTrusted {
+            lines.append("Permission recovery: enable Dexter in System Settings > Privacy & Security > Screen & System Audio Recording, then restart Dexter.")
+        }
+
         if lines.isEmpty && !displayAttentionComponents(for: health).isEmpty {
             lines.append("Recovery: run `make diagnostic-bundle` for a local launch/model/process report.")
         }
@@ -2054,6 +2071,10 @@ extension DexterClient {
             return status
         }
         return "\(status) - \(detail)"
+    }
+
+    private static func permissionLabel(_ trusted: Bool) -> String {
+        trusted ? "granted" : "not granted"
     }
 
     private static func restartTargets(for health: Dexter_V1_HealthResponse) -> [DexterWorkerRestartTarget] {

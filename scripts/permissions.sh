@@ -18,6 +18,7 @@
 # Permissions checked:
 #   kTCCServiceAccessibility — required for AXObserver (context observation)
 #   kTCCServiceMicrophone    — required for AVCaptureSession (voice input)
+#   kTCCServiceScreenCapture — required for grounded Vision answers
 
 set -euo pipefail
 
@@ -33,6 +34,12 @@ USER_TCC_DB="${HOME}/Library/Application Support/com.apple.TCC/TCC.db"
 # SwiftPM executables are not bundled — TCC uses the executable path as the identifier.
 SWIFT_BUILD_DEBUG="$(find "$(pwd)/src/swift/.build" -name "Dexter" -type f 2>/dev/null | head -1 || true)"
 SWIFT_INSTALLED="/Applications/Dexter.app/Contents/MacOS/Dexter"
+DEXTER_CLI="$(pwd)/src/rust-core/target/release/dexter-cli"
+LIVE_DOCTOR_OUTPUT=""
+
+if [ -S /tmp/dexter.sock ] && [ -x "$DEXTER_CLI" ]; then
+    LIVE_DOCTOR_OUTPUT="$($DEXTER_CLI --doctor 2>&1 || true)"
+fi
 
 echo ""
 echo "==> Checking macOS TCC permissions for Dexter"
@@ -86,7 +93,33 @@ check_tcc_permission() {
     fi
 }
 
-check_tcc_permission \
+check_core_permission() {
+    local doctor_label="$1"
+    local tcc_service="$2"
+    local display_label="$3"
+    local pref_path="$4"
+
+    if [ -n "$LIVE_DOCTOR_OUTPUT" ]; then
+        if printf '%s\n' "$LIVE_DOCTOR_OUTPUT" | grep -qE "^OK[[:space:]]+${doctor_label}[[:space:]]"; then
+            printf "  %s  %s: granted to the running signed core\n" "$PASS" "$display_label"
+            return
+        fi
+        if printf '%s\n' "$LIVE_DOCTOR_OUTPUT" | grep -qE "^FAIL[[:space:]]+${doctor_label}[[:space:]]"; then
+            printf "  %s  %s: not granted to the running signed core\n" "$FAIL" "$display_label"
+            echo "       Open: System Settings → Privacy & Security → $display_label"
+            echo "       Toggle the existing dexter-core row OFF and ON, then restart Dexter"
+            echo "       Command: open '${pref_path}'"
+            overall_ok=false
+            return
+        fi
+    fi
+
+    printf "  %s  %s: live core preflight unavailable; checking TCC records only\n" "$WARN" "$display_label"
+    check_tcc_permission "$tcc_service" "$display_label" "$pref_path"
+}
+
+check_core_permission \
+    "Accessibility permission" \
     "kTCCServiceAccessibility" \
     "Accessibility" \
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -95,6 +128,12 @@ check_tcc_permission \
     "kTCCServiceMicrophone" \
     "Microphone" \
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+
+check_core_permission \
+    "Screen Recording permission" \
+    "kTCCServiceScreenCapture" \
+    "Screen Recording" \
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
 
 echo ""
 if [ "$overall_ok" = "true" ]; then

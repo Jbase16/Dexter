@@ -2550,6 +2550,16 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
         &health.browser_worker_detail,
         &health.browser_worker_recovery_hint,
     ));
+    checks.push(permission_health_check(
+        "Accessibility permission",
+        health.accessibility_trusted,
+        "Grant the signed Dexter core access in System Settings > Privacy & Security > Accessibility.",
+    ));
+    checks.push(permission_health_check(
+        "Screen Recording permission",
+        health.screen_recording_trusted,
+        "Grant the signed Dexter core access in System Settings > Privacy & Security > Screen & System Audio Recording.",
+    ));
     checks.extend(health.disk.into_iter().map(disk_health_check));
     checks.push(DoctorCheck::ok(
         "daemon config",
@@ -2561,6 +2571,14 @@ fn daemon_health_checks(health: HealthResponse) -> Vec<DoctorCheck> {
         ),
     ));
     checks
+}
+
+fn permission_health_check(name: &str, trusted: bool, recovery: &str) -> DoctorCheck {
+    if trusted {
+        DoctorCheck::ok(name, "granted to the running signed core")
+    } else {
+        DoctorCheck::fail(name, format!("not granted; recovery: {recovery}"))
+    }
 }
 
 fn disk_health_check(disk: DiskHealth) -> DoctorCheck {
@@ -3436,15 +3454,25 @@ fn suggested_recovery_commands(checks: &[DoctorCheck]) -> Vec<String> {
         }
 
         match check.name.as_str() {
-            "core socket file" | "daemon ping" | "daemon health" => {
-                if daemon_health_check_is_pending(check) {
-                    continue;
-                }
+            "core socket file" | "daemon ping" => {
                 push_recovery_command(
                     &mut commands,
                     "cd /Users/jason/Developer/Dex && make open-app",
                 );
                 push_recovery_command(&mut commands, "cd /Users/jason/Developer/Dex && make run");
+            }
+            "daemon health" => {}
+            "Accessibility permission" => {
+                push_recovery_command(
+                    &mut commands,
+                    "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'",
+                );
+            }
+            "Screen Recording permission" => {
+                push_recovery_command(
+                    &mut commands,
+                    "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'",
+                );
             }
             "ollama models dir" => {
                 push_recovery_command(
@@ -3500,12 +3528,6 @@ fn suggested_recovery_commands(checks: &[DoctorCheck]) -> Vec<String> {
 
 fn worker_check_is_pending(check: &DoctorCheck) -> bool {
     check.detail.trim().eq_ignore_ascii_case("pending")
-}
-
-fn daemon_health_check_is_pending(check: &DoctorCheck) -> bool {
-    check.name == "daemon health"
-        && check.status == DoctorStatus::Warn
-        && check.detail.contains("status pending")
 }
 
 fn model_check_is_pending(check: &DoctorCheck) -> bool {
@@ -5496,6 +5518,8 @@ mod tests {
             primary_residency_pinned: pinned,
             primary_residency_wired_bytes: if pinned { 18 * 1024 * 1024 * 1024 } else { 0 },
             residency_lock_poisoned: poisoned,
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
         };
         health.primary_model = "gemma4:26b".to_string();
         health
@@ -5605,6 +5629,8 @@ mod tests {
             primary_residency_pinned: true,
             primary_residency_wired_bytes: 18 * 1024 * 1024 * 1024,
             residency_lock_poisoned: false,
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Ok);
@@ -5617,6 +5643,34 @@ mod tests {
         assert!(checks
             .iter()
             .any(|check| check.name == "disk state" && check.status == DoctorStatus::Ok));
+    }
+
+    #[test]
+    fn daemon_health_checks_fail_when_core_permissions_are_missing() {
+        let mut health = ready_health_with_residency("pin_keepalive", false, false);
+        health.status = "degraded".to_string();
+        health.degraded_components = vec![
+            "accessibility_permission".to_string(),
+            "screen_recording_permission".to_string(),
+        ];
+        health.accessibility_trusted = false;
+        health.screen_recording_trusted = false;
+
+        let checks = daemon_health_checks(health);
+
+        assert!(checks.iter().any(|check| {
+            check.name == "Accessibility permission" && check.status == DoctorStatus::Fail
+        }));
+        assert!(checks.iter().any(|check| {
+            check.name == "Screen Recording permission" && check.status == DoctorStatus::Fail
+        }));
+        assert_eq!(
+            suggested_recovery_commands(&checks),
+            vec![
+                "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'".to_string(),
+                "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -5653,6 +5707,8 @@ mod tests {
             primary_residency_pinned: false,
             primary_residency_wired_bytes: 0,
             residency_lock_poisoned: false,
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Warn);
@@ -5711,6 +5767,8 @@ mod tests {
             primary_residency_pinned: false,
             primary_residency_wired_bytes: 0,
             residency_lock_poisoned: false,
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
         });
 
         assert_eq!(checks[0].status, DoctorStatus::Fail);

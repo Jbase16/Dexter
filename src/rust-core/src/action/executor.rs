@@ -767,10 +767,14 @@ tell application "System Events"
     set frontWindowTitle to "(none)"
     try
         set targetWindow to front window of targetProcess
-        set frontWindowTitle to my cleanText(name of targetWindow)
     on error
-        return "ui snapshot app: " & targetAppName & linefeed & "frontmost: " & (isFrontmost as text) & linefeed & "front window: (none)" & linefeed & "controls:" & linefeed & "(no front window)"
+        if requestedAppName is not "" and (count of windows of targetProcess) > 0 then
+            set targetWindow to window 1 of targetProcess
+        else
+            return "ui snapshot app: " & targetAppName & linefeed & "frontmost: " & (isFrontmost as text) & linefeed & "front window: (none)" & linefeed & "controls:" & linefeed & "(no front window)"
+        end if
     end try
+    set frontWindowTitle to my cleanText(name of targetWindow)
 
     set focusedLine to "(none)"
     try
@@ -3169,6 +3173,18 @@ mod tests {
         assert!(!script.contains("AXRaise"));
         assert!(!script.contains("keystroke"));
         assert!(!script.contains("click "));
+    }
+
+    #[test]
+    fn named_ui_snapshot_falls_back_to_first_window_without_activating_app() {
+        let script = build_ui_snapshot_script("Safari", 2);
+
+        assert!(script.contains(
+            "if requestedAppName is not \"\" and (count of windows of targetProcess) > 0 then"
+        ));
+        assert!(script.contains("set targetWindow to window 1 of targetProcess"));
+        assert!(!script.contains("set frontmost of targetProcess to true"));
+        assert!(!script.contains("perform action \"AXRaise\""));
     }
 
     #[test]

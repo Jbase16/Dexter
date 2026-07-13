@@ -589,6 +589,16 @@ pub const VM_STAT_CMD: &str = "vm_stat";
 /// cap was decoupled from `unload_after` (which covers only Heavy).
 pub const LARGE_MODEL_NUM_CTX: u32 = 8_192;
 
+/// Maximum context window for FAST requests.
+///
+/// Leaving qwen3:8b uncapped under the machine-wide 262k Ollama default caused
+/// Ollama to launch it with a 40,960-token context and an 11 GB footprint. On
+/// the 36 GB daily-driver Mac, that left the 16 GB MLX PRIMARY runner resident
+/// but unable to service even a one-token request. FAST uses the compact prompt
+/// profile, so 8,192 preserves normal conversation capacity while restoring
+/// enough unified-memory headroom for PRIMARY to function.
+pub const FAST_NUM_CTX: u32 = 8_192;
+
 /// Maximum context window (tokens) for normal PRIMARY/VISION requests.
 ///
 /// Live measurement on 2026-06-22 showed `gemma4:26b-mlx` startup warmup was not

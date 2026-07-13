@@ -178,6 +178,8 @@ struct StartupHealthSnapshot {
     browser_worker: ComponentStartupStatus,
     browser_worker_detail: String,
     browser_worker_recovery_hint: String,
+    accessibility_trusted: bool,
+    screen_recording_trusted: bool,
     disk: Vec<DiskHealthSnapshot>,
 }
 
@@ -192,6 +194,7 @@ impl StartupHealthSnapshot {
             shared.startup_warmup_complete.load(Ordering::SeqCst),
         );
         let browser_diagnostic = shared.browser.last_failure();
+        let permissions = crate::system::permissions::PermissionSnapshot::current();
         let (browser_worker_detail, browser_worker_recovery_hint) = if browser_worker.is_ready() {
             (String::new(), String::new())
         } else if let Some(diagnostic) = browser_diagnostic {
@@ -219,6 +222,8 @@ impl StartupHealthSnapshot {
             browser_worker,
             browser_worker_detail,
             browser_worker_recovery_hint,
+            accessibility_trusted: permissions.accessibility_trusted,
+            screen_recording_trusted: permissions.screen_recording_trusted,
             disk: diagnostics::collect_operator_disk_health(&cfg.core.state_dir),
         }
     }
@@ -253,6 +258,12 @@ impl StartupHealthSnapshot {
         if !self.browser_worker.is_ready() {
             components.push("browser_worker".to_string());
         }
+        if !self.accessibility_trusted {
+            components.push("accessibility_permission".to_string());
+        }
+        if !self.screen_recording_trusted {
+            components.push("screen_recording_permission".to_string());
+        }
         components.extend(diagnostics::disk_degraded_components(&self.disk));
         components
     }
@@ -264,6 +275,8 @@ impl StartupHealthSnapshot {
             || self.stt_worker == ComponentStartupStatus::Degraded
             || self.tts_worker == ComponentStartupStatus::Degraded
             || self.browser_worker == ComponentStartupStatus::Degraded
+            || !self.accessibility_trusted
+            || !self.screen_recording_trusted
             || self.disk.iter().any(|disk| !disk.status.is_ready())
     }
 
@@ -334,6 +347,8 @@ impl StartupHealthSnapshot {
             primary_residency_pinned: residency.primary_pinned,
             primary_residency_wired_bytes: residency.primary_wired_bytes as u64,
             residency_lock_poisoned: residency.lock_poisoned,
+            accessibility_trusted: self.accessibility_trusted,
+            screen_recording_trusted: self.screen_recording_trusted,
         }
     }
 }
@@ -1856,6 +1871,8 @@ mod startup_health_tests {
             browser_worker: ComponentStartupStatus::Ready,
             browser_worker_detail: String::new(),
             browser_worker_recovery_hint: String::new(),
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
             disk: Vec::new(),
         };
 
@@ -1885,6 +1902,8 @@ mod startup_health_tests {
             browser_worker: ComponentStartupStatus::Ready,
             browser_worker_detail: String::new(),
             browser_worker_recovery_hint: String::new(),
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
             disk: Vec::new(),
         };
 
@@ -1908,6 +1927,8 @@ mod startup_health_tests {
             browser_worker: ComponentStartupStatus::Ready,
             browser_worker_detail: String::new(),
             browser_worker_recovery_hint: String::new(),
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
             disk: Vec::new(),
         };
 
@@ -1940,6 +1961,8 @@ mod startup_health_tests {
             browser_worker: ComponentStartupStatus::Ready,
             browser_worker_detail: String::new(),
             browser_worker_recovery_hint: String::new(),
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
             disk: vec![DiskHealthSnapshot {
                 name: "workspace".to_string(),
                 path: "/Users/jason/Developer/Dex".to_string(),
@@ -1974,6 +1997,8 @@ mod startup_health_tests {
             browser_worker_detail: "browser_launch_failed: Executable doesn't exist".to_string(),
             browser_worker_recovery_hint:
                 "Install Playwright Chromium, then restart the browser worker.".to_string(),
+            accessibility_trusted: true,
+            screen_recording_trusted: true,
             disk: Vec::new(),
         };
         let cfg = DexterConfig::default();

@@ -492,6 +492,18 @@ struct Dexter_V1_HealthResponse: @unchecked Sendable {
     set {_uniqueStorage()._residencyLockPoisoned = newValue}
   }
 
+  /// Core-process TCC preflights. These report whether the exact signed daemon
+  /// currently has the macOS permissions required for UI control and vision.
+  var accessibilityTrusted: Bool {
+    get {_storage._accessibilityTrusted}
+    set {_uniqueStorage()._accessibilityTrusted = newValue}
+  }
+
+  var screenRecordingTrusted: Bool {
+    get {_storage._screenRecordingTrusted}
+    set {_uniqueStorage()._screenRecordingTrusted = newValue}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1366,7 +1378,7 @@ extension Dexter_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".HealthResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0\u{3}operator_context_markdown\0\u{3}residency_mode\0\u{3}primary_residency_pinned\0\u{3}primary_residency_wired_bytes\0\u{3}residency_lock_poisoned\0\u{3}browser_worker_detail\0\u{3}browser_worker_recovery_hint\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}trace_id\0\u{3}core_version\0\u{1}status\0\u{3}degraded_components\0\u{1}socket\0\u{3}shell_socket\0\u{3}config_path\0\u{3}state_dir\0\u{3}personality_path\0\u{3}ollama_url\0\u{3}fast_model\0\u{3}primary_model\0\u{3}embed_model\0\u{3}fast_model_warm\0\u{3}primary_model_warm\0\u{3}embed_model_warm\0\u{3}stt_worker\0\u{3}tts_worker\0\u{3}browser_worker\0\u{1}disk\0\u{3}operator_context_markdown\0\u{3}residency_mode\0\u{3}primary_residency_pinned\0\u{3}primary_residency_wired_bytes\0\u{3}residency_lock_poisoned\0\u{3}browser_worker_detail\0\u{3}browser_worker_recovery_hint\0\u{3}accessibility_trusted\0\u{3}screen_recording_trusted\0")
 
   fileprivate class _StorageClass {
     var _traceID: String = String()
@@ -1396,6 +1408,8 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
     var _primaryResidencyPinned: Bool = false
     var _primaryResidencyWiredBytes: UInt64 = 0
     var _residencyLockPoisoned: Bool = false
+    var _accessibilityTrusted: Bool = false
+    var _screenRecordingTrusted: Bool = false
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1433,6 +1447,8 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       _primaryResidencyPinned = source._primaryResidencyPinned
       _primaryResidencyWiredBytes = source._primaryResidencyWiredBytes
       _residencyLockPoisoned = source._residencyLockPoisoned
+      _accessibilityTrusted = source._accessibilityTrusted
+      _screenRecordingTrusted = source._screenRecordingTrusted
     }
   }
 
@@ -1478,6 +1494,8 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         case 25: try { try decoder.decodeSingularBoolField(value: &_storage._residencyLockPoisoned) }()
         case 26: try { try decoder.decodeSingularStringField(value: &_storage._browserWorkerDetail) }()
         case 27: try { try decoder.decodeSingularStringField(value: &_storage._browserWorkerRecoveryHint) }()
+        case 28: try { try decoder.decodeSingularBoolField(value: &_storage._accessibilityTrusted) }()
+        case 29: try { try decoder.decodeSingularBoolField(value: &_storage._screenRecordingTrusted) }()
         default: break
         }
       }
@@ -1567,6 +1585,12 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       if !_storage._browserWorkerRecoveryHint.isEmpty {
         try visitor.visitSingularStringField(value: _storage._browserWorkerRecoveryHint, fieldNumber: 27)
       }
+      if _storage._accessibilityTrusted != false {
+        try visitor.visitSingularBoolField(value: _storage._accessibilityTrusted, fieldNumber: 28)
+      }
+      if _storage._screenRecordingTrusted != false {
+        try visitor.visitSingularBoolField(value: _storage._screenRecordingTrusted, fieldNumber: 29)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1603,6 +1627,8 @@ extension Dexter_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if _storage._primaryResidencyPinned != rhs_storage._primaryResidencyPinned {return false}
         if _storage._primaryResidencyWiredBytes != rhs_storage._primaryResidencyWiredBytes {return false}
         if _storage._residencyLockPoisoned != rhs_storage._residencyLockPoisoned {return false}
+        if _storage._accessibilityTrusted != rhs_storage._accessibilityTrusted {return false}
+        if _storage._screenRecordingTrusted != rhs_storage._screenRecordingTrusted {return false}
         return true
       }
       if !storagesAreEqual {return false}

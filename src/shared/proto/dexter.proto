@@ -99,6 +99,11 @@ message HealthResponse {
   bool primary_residency_pinned = 23;
   uint64 primary_residency_wired_bytes = 24;
   bool residency_lock_poisoned = 25;
+
+  // Core-process TCC preflights. These report whether the exact signed daemon
+  // currently has the macOS permissions required for UI control and vision.
+  bool accessibility_trusted = 28;
+  bool screen_recording_trusted = 29;
 }
 
 message DiskHealth {

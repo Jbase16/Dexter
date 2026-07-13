@@ -15,7 +15,7 @@
 /// display, `families` for capability detection (e.g., whether vision is supported).
 use crate::{
     config::ModelConfig,
-    constants::{LARGE_MODEL_NUM_CTX, PRIMARY_NUM_CTX},
+    constants::{FAST_NUM_CTX, LARGE_MODEL_NUM_CTX, PRIMARY_NUM_CTX},
 };
 
 // ── ModelId ───────────────────────────────────────────────────────────────────
@@ -156,9 +156,10 @@ impl ModelId {
     /// HEAVY/CODE currently share 8,192, but they are separate policy decisions.
     pub fn num_ctx_override(&self) -> Option<u32> {
         match self {
+            ModelId::Fast => Some(FAST_NUM_CTX),
             ModelId::Primary | ModelId::Vision => Some(PRIMARY_NUM_CTX),
             ModelId::Heavy | ModelId::Code => Some(LARGE_MODEL_NUM_CTX),
-            ModelId::Fast | ModelId::Embed => None,
+            ModelId::Embed => None,
         }
     }
 }
@@ -291,17 +292,17 @@ mod tests {
     }
 
     #[test]
-    fn needs_context_cap_excludes_fast_and_embed() {
-        // Fast latency is acceptable at its default context. Embed has no
-        // text-generation path so num_ctx is irrelevant.
-        assert!(!ModelId::Fast.needs_context_cap());
+    fn needs_context_cap_includes_fast_but_excludes_embed() {
+        // FAST is capped to preserve unified-memory headroom for PRIMARY.
+        // Embed has no text-generation path so num_ctx is irrelevant.
+        assert!(ModelId::Fast.needs_context_cap());
         assert!(!ModelId::Embed.needs_context_cap());
     }
 
     #[test]
     fn needs_context_cap_is_orthogonal_to_unload_after_use() {
         // These two properties are independent. Heavy: both true. Code/Primary:
-        // cap but no unload. Fast: neither. Pin the truth table so future
+        // cap but no unload. Fast: capped but not unloaded. Pin the truth table so future
         // refactors can't re-conflate.
         let cfg = default_cfg();
         assert_eq!(
@@ -330,13 +331,13 @@ mod tests {
                 ModelId::Fast.unload_after_use(&cfg),
                 ModelId::Fast.needs_context_cap()
             ),
-            (false, false)
+            (false, true)
         );
     }
 
     #[test]
     fn num_ctx_override_uses_tier_specific_caps() {
-        assert_eq!(ModelId::Fast.num_ctx_override(), None);
+        assert_eq!(ModelId::Fast.num_ctx_override(), Some(FAST_NUM_CTX));
         assert_eq!(ModelId::Embed.num_ctx_override(), None);
         assert_eq!(ModelId::Primary.num_ctx_override(), Some(PRIMARY_NUM_CTX));
         assert_eq!(ModelId::Vision.num_ctx_override(), Some(PRIMARY_NUM_CTX));

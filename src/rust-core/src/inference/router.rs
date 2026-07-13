@@ -387,6 +387,12 @@ impl ModelRouter {
                 "photo",
                 "look at this",
                 "what do you see",
+                "describe what you see",
+                "what can you see",
+                "what is currently visible",
+                "what's currently visible",
+                "my open safari window",
+                "frontmost safari window",
                 "what's on screen",
                 "on the screen",
                 "see my screen",
@@ -1226,6 +1232,23 @@ mod tests {
             "\"look at the screen\" must route to Vision"
         );
         assert_eq!(decision.model, ModelId::Vision);
+    }
+
+    #[test]
+    fn route_natural_safari_visual_requests_returns_vision() {
+        for prompt in [
+            "describe what you see in my safari session",
+            "check out what my open safari window says",
+            "what is currently visible in the frontmost Safari window?",
+        ] {
+            let decision = router().route(&[user_msg(prompt)]);
+            assert_eq!(
+                decision.category,
+                Category::Vision,
+                "natural local visual request must route to Vision: {prompt}"
+            );
+            assert_eq!(decision.model, ModelId::Vision);
+        }
     }
 
     #[test]

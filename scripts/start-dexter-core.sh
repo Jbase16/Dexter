@@ -124,6 +124,12 @@ if [[ ! -x "$CORE_BIN" ]]; then
     fail "Dexter core release binary is not executable at $CORE_BIN; build it with: cd src/rust-core && cargo build --release --bin dexter-core --bin dexter-cli"
 fi
 
+# Cargo's linker-generated ad-hoc signature changes on every build. A stable
+# development signature keeps Screen Recording and Accessibility TCC grants
+# attached to the core across rebuilds.
+bash "$ROOT_DIR/scripts/sign-dexter-core.sh" >/dev/null || \
+    fail "Dexter core signing failed; refusing to launch with an unstable TCC identity"
+
 if [[ "$RESTART" -eq 1 ]]; then
     bash "$ROOT_DIR/scripts/stop-dexter.sh" --quiet || true
 elif socket_accepts; then

@@ -53,7 +53,7 @@ use crate::{
     config::{DexterConfig, ModelConfig},
     constants::{
         ACTION_APPLESCRIPT_TIMEOUT_SECS, ACTION_BLOCK_CLOSE, ACTION_BLOCK_OPEN, AGENTIC_MAX_DEPTH,
-        CONVERSATION_MAX_TURNS, FAST_MODEL_KEEP_ALIVE, GENERATION_HARD_TIMEOUT_SECS,
+        CONVERSATION_MAX_TURNS, FAST_MODEL_KEEP_ALIVE, FAST_NUM_CTX, GENERATION_HARD_TIMEOUT_SECS,
         GENERATION_WALL_TIMEOUT_SECS, MEMORY_DB_FILENAME, PREFILL_DEBOUNCE_SECS,
         PRIMARY_FULL_NUM_CTX, PRIMARY_KEEPALIVE_PING_INTERVAL_SECS,
         PRIMARY_KEEPALIVE_RECENT_FOREGROUND_SKIP_SECS, PRIMARY_MODEL_KEEP_ALIVE, PRIMARY_NUM_CTX,
@@ -1180,28 +1180,15 @@ impl SharedDaemonState {
             "FAST warmup phase complete"
         );
 
-        // Step 5: PRIMARY model readiness. If Ollama already reports the PRIMARY
-        // runner fully resident, accept that as startup readiness and skip the
-        // blocking one-token strict probe. Live measurement on 2026-06-29 showed
-        // gemma4:26b-mlx can be fully resident before startup and still spend
-        // 106s servicing the strict probe (`load_ms=42`, `prompt_eval_ms=0`,
-        // `eval_ms=74608`, `unreported_ms=31615`). Repeating that ritual on
-        // every smoke launch proves little and delays readiness; non-resident or
-        // partial residency still falls back to the strict probe.
+        // Step 5: PRIMARY model readiness. Ollama residency is useful diagnostic
+        // evidence, but it is not readiness: a wedged runner can remain listed by
+        // `/api/ps` with its full VRAM allocation while returning no response
+        // headers. Always require a completed one-token probe before publishing
+        // PRIMARY as warm.
         log_startup_phase(startup_started_at, "primary_residency_probe_start");
-        let primary_ready_from_residency =
-            log_primary_ollama_residency(&engine, &cfg.models.primary, startup_started_at).await;
-        if primary_ready_from_residency {
-            self.primary_model_warm.store(true, Ordering::SeqCst);
-            info!(
-                startup_elapsed_ms = elapsed_ms(startup_started_at),
-                model = %cfg.models.primary,
-                "PRIMARY startup readiness accepted from resident Ollama runner — strict generation warmup skipped"
-            );
-        } else {
-            log_startup_phase(startup_started_at, "primary_warmup_start");
-            warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
-        }
+        log_primary_ollama_residency(&engine, &cfg.models.primary, startup_started_at).await;
+        log_startup_phase(startup_started_at, "primary_warmup_start");
+        warm_primary_model_inline(&engine, &cfg.models.primary, &self.primary_model_warm).await;
         info!(
             startup_elapsed_ms = elapsed_ms(startup_started_at),
             primary_model_warm = self.primary_model_warm.load(Ordering::SeqCst),
@@ -1383,7 +1370,7 @@ async fn log_primary_ollama_residency(
     engine: &InferenceEngine,
     primary_model: &str,
     startup_started_at: Instant,
-) -> bool {
+) {
     match engine.ps().await {
         Ok(models) => {
             let primary = models
@@ -1403,7 +1390,6 @@ async fn log_primary_ollama_residency(
                     resident_count = models.len(),
                     "PRIMARY Ollama residency before startup warmup"
                 );
-                fully_resident
             } else {
                 info!(
                     startup_elapsed_ms = elapsed_ms(startup_started_at),
@@ -1412,7 +1398,6 @@ async fn log_primary_ollama_residency(
                     resident_count = models.len(),
                     "PRIMARY Ollama residency before startup warmup"
                 );
-                false
             }
         }
         Err(e) => {
@@ -1422,7 +1407,6 @@ async fn log_primary_ollama_residency(
                 model = %primary_model,
                 "PRIMARY Ollama residency probe failed before startup warmup"
             );
-            false
         }
     }
 }
@@ -1484,7 +1468,7 @@ async fn warm_fast_model_inline(
         num_predict: Some(1),
         // 300s window covers worst-case cold-loads on USB-SSD.
         inactivity_timeout_override_secs: Some(300),
-        num_ctx_override: None,
+        num_ctx_override: Some(crate::constants::FAST_NUM_CTX),
     };
     match engine.generate_stream(req).await {
         Ok(rx) => match drain_warmup_stream(rx, started_at).await {
@@ -1534,8 +1518,10 @@ async fn warm_primary_model_inline(
         unload_after: false,
         keep_alive_override: Some(PRIMARY_MODEL_KEEP_ALIVE),
         num_predict: Some(1),
-        // 300s window covers worst-case cold-loads on USB-SSD.
-        inactivity_timeout_override_secs: Some(300),
+        // PRIMARY's active runtime mirror is local NVMe. A one-token 8k probe
+        // that remains silent for 60 seconds is unusable and must not hold
+        // startup pending for several more minutes or be reported as ready.
+        inactivity_timeout_override_secs: Some(60),
         num_ctx_override: Some(PRIMARY_WARMUP_NUM_CTX),
     };
     match engine.generate_stream(req).await {
@@ -2229,7 +2215,7 @@ impl CoreOrchestrator {
                 keep_alive_override: Some(FAST_MODEL_KEEP_ALIVE),
                 num_predict: Some(1), // Process prefix → KV cache, generate 1 token, stop
                 inactivity_timeout_override_secs: None,
-                num_ctx_override: None,
+                num_ctx_override: Some(FAST_NUM_CTX),
             };
 
             // Fire and forget — if it fails, the normal path runs.
@@ -4859,7 +4845,7 @@ impl CoreOrchestrator {
             &matched_domains,
             &content,
         );
-        let generation_model =
+        let mut generation_model =
             Self::generation_model_for_prompt(decision.model, prompt_profile, &content);
         let mut routing_reasoning = decision.reasoning.clone();
         if generation_model != decision.model {
@@ -4871,7 +4857,8 @@ impl CoreOrchestrator {
                 prompt_profile.label()
             );
         }
-        let num_ctx_override = Self::num_ctx_override_for_prompt(generation_model, prompt_profile);
+        let mut num_ctx_override =
+            Self::num_ctx_override_for_prompt(generation_model, prompt_profile);
         info!(
             session           = %self.session_id,
             trace_id          = %trace_id,
@@ -5280,6 +5267,30 @@ impl CoreOrchestrator {
                     from      = ?demoted_from,
                     to        = ?decision.model,
                     "Vision demotion: no image attached, re-routing to PRIMARY"
+                );
+                let evidence_notice = crate::inference::engine::Message::system(
+                    "LOCAL VISUAL EVIDENCE STATUS: Screen capture failed for this turn. Do not infer or describe unseen screen contents. If the request targets an app window, use a read-only window_inspect or ui_snapshot action to gather local evidence; otherwise state that visual evidence was unavailable."
+                        .to_string(),
+                );
+                let insertion_idx = messages
+                    .iter()
+                    .rposition(|message| message.role == "user")
+                    .unwrap_or(messages.len());
+                messages.insert(insertion_idx, evidence_notice);
+
+                // `generation_model` was selected before screen capture. Recompute
+                // it after demotion so a failed Vision capture cannot still dispatch
+                // the separately configured Vision model.
+                generation_model =
+                    Self::generation_model_for_prompt(decision.model, prompt_profile, &content);
+                num_ctx_override =
+                    Self::num_ctx_override_for_prompt(generation_model, prompt_profile);
+                info!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    model = generation_model.tier_name(),
+                    num_ctx_override = ?num_ctx_override,
+                    "Generation model updated after Vision demotion"
                 );
             }
         }
@@ -6600,8 +6611,8 @@ impl CoreOrchestrator {
             model_name,
             messages,
             trace_id.to_string(),
-            false, // unload_after: FAST model stays pinned
-            None,  // num_ctx_override: FAST fits in VRAM at native context
+            false,              // unload_after: FAST model stays pinned
+            Some(FAST_NUM_CTX), // Preserve headroom for the concurrently warm PRIMARY model.
             tts_tx_opt,
             tts_join_handle,
             tts_stream_id,
@@ -7635,66 +7646,13 @@ impl CoreOrchestrator {
 
     fn generation_model_for_prompt(
         routed_model: ModelId,
-        prompt_profile: PromptProfile,
-        user_text: &str,
+        _prompt_profile: PromptProfile,
+        _user_text: &str,
     ) -> ModelId {
-        if matches!(routed_model, ModelId::Primary | ModelId::Vision)
-            && prompt_profile == PromptProfile::PrimaryFull
-            && (Self::looks_browser_action_request(user_text)
-                || Self::looks_ui_window_action_request(user_text))
-        {
-            ModelId::Fast
-        } else {
-            routed_model
-        }
-    }
-
-    fn looks_browser_action_request(user_text: &str) -> bool {
-        let lower = user_text.to_lowercase();
-        const BROWSER_ACTION_MARKERS: &[&str] = &[
-            "browser action",
-            "browser actions",
-            "open in the browser",
-            "use the browser",
-            "navigate to",
-            "click selector",
-            "click exactly this selector",
-            "extract selector",
-            "extract exactly this selector",
-            "page title",
-            "current page",
-            "safari",
-            "chrome",
-        ];
-
-        BROWSER_ACTION_MARKERS
-            .iter()
-            .any(|marker| lower.contains(marker))
-    }
-
-    fn looks_ui_window_action_request(user_text: &str) -> bool {
-        let lower = user_text.to_lowercase();
-        const UI_WINDOW_ACTION_MARKERS: &[&str] = &[
-            "ui action",
-            "ui actions",
-            "use dexter ui",
-            "ui_click",
-            "ui_type",
-            "ui_select",
-            "ui_toggle",
-            "ui_pick",
-            "ui_snapshot",
-            "window_focus",
-            "window_inspect",
-            "role ax",
-            "axbutton",
-            "axtext",
-            "accessibility",
-        ];
-
-        UI_WINDOW_ACTION_MARKERS
-            .iter()
-            .any(|marker| lower.contains(marker))
+        // Prompt profiles select the contract; they must not silently replace
+        // the router's quality tier. Browser/UI planning needs the routed model's
+        // reasoning and action-format reliability just as much as other turns.
+        routed_model
     }
 
     pub(crate) fn prepare_messages_for_inference_with_profile(
@@ -8316,7 +8274,7 @@ impl CoreOrchestrator {
             keep_alive_override: None,
             num_predict: None,
             inactivity_timeout_override_secs: None,
-            num_ctx_override: None,
+            num_ctx_override: Some(FAST_NUM_CTX),
         };
 
         match self.engine.generate_stream(req).await {
@@ -9414,8 +9372,7 @@ async fn run_generation_background(
                         // Detection: `<dexter:action>` in full_response but `</dexter:action>`
                         // not yet seen. Neither delimiter contains `[` so the interceptor
                         // never holds them in its buffer — full_response.contains() is reliable.
-                        let inside_action_block = full_response.contains(ACTION_BLOCK_OPEN)
-                            && !full_response.contains(ACTION_BLOCK_CLOSE);
+                        let inside_action_block = has_unclosed_action_block(&full_response);
 
                         let interceptor_out = if inside_action_block {
                             InterceptorOutput::Passthrough(chunk.content.clone())
@@ -9720,7 +9677,7 @@ async fn run_shell_error_proactive_background(
         keep_alive_override: None,
         num_predict: None,
         inactivity_timeout_override_secs: None,
-        num_ctx_override: None,
+        num_ctx_override: Some(FAST_NUM_CTX),
     };
 
     let response_text: Option<String> = match engine.generate_stream(req).await {
@@ -9956,6 +9913,36 @@ async fn run_shell_error_proactive_background(
 
 // ── extract_action_block ──────────────────────────────────────────────────────
 
+const ACTION_BLOCK_OPEN_SQUARE: &str = "[dexter:action]";
+const ACTION_BLOCK_CLOSE_SQUARE: &str = "[/dexter:action]";
+
+fn action_block_delimiters(response: &str) -> Option<(usize, &'static str, &'static str)> {
+    let angle = response
+        .find(ACTION_BLOCK_OPEN)
+        .map(|position| (position, ACTION_BLOCK_OPEN, ACTION_BLOCK_CLOSE));
+    let square = response.find(ACTION_BLOCK_OPEN_SQUARE).map(|position| {
+        (
+            position,
+            ACTION_BLOCK_OPEN_SQUARE,
+            ACTION_BLOCK_CLOSE_SQUARE,
+        )
+    });
+    match (angle, square) {
+        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+        (Some(found), None) | (None, Some(found)) => Some(found),
+        (None, None) => None,
+    }
+}
+
+fn has_unclosed_action_block(response: &str) -> bool {
+    action_block_delimiters(response)
+        .map(|(open_pos, open, close)| {
+            let content_start = open_pos + open.len();
+            !response[content_start..].contains(close)
+        })
+        .unwrap_or(false)
+}
+
 /// Scan a model response for an embedded action block delimited by
 /// `ACTION_BLOCK_OPEN` / `ACTION_BLOCK_CLOSE`. Returns the response with the
 /// block stripped, and the parsed `ActionSpec` if a valid block was found.
@@ -9964,17 +9951,17 @@ async fn run_shell_error_proactive_background(
 /// original response unchanged with `None` for the spec — the text is still
 /// shown to the operator rather than silently dropped.
 fn extract_action_block(response: &str) -> (String, Option<ActionSpec>) {
-    // ACTION_BLOCK_OPEN / ACTION_BLOCK_CLOSE are imported at the top of this module.
-    let Some(open_pos) = response.find(ACTION_BLOCK_OPEN) else {
+    let Some((open_pos, open_delimiter, close_delimiter)) = action_block_delimiters(response)
+    else {
         return (response.to_string(), None);
     };
 
-    let content_start = open_pos + ACTION_BLOCK_OPEN.len();
+    let content_start = open_pos + open_delimiter.len();
 
     // Primary path: explicit close delimiter present.
-    if let Some(close_offset) = response[content_start..].find(ACTION_BLOCK_CLOSE) {
+    if let Some(close_offset) = response[content_start..].find(close_delimiter) {
         let raw_json_str = response[content_start..content_start + close_offset].trim();
-        let full_block_end = content_start + close_offset + ACTION_BLOCK_CLOSE.len();
+        let full_block_end = content_start + close_offset + close_delimiter.len();
         // qwen3 occasionally emits stray characters (e.g. `%` from zsh-prompt training
         // memory) between the closing `}` and the close tag: `}%</dexter:action>`.
         // Try raw first; if that fails, retry with everything after the last `}` stripped.
@@ -10030,7 +10017,8 @@ fn extract_action_block(response: &str) -> (String, Option<ActionSpec>) {
     warn!(
         post_open_text = %preview,
         post_open_hex  = %preview_hex,
-        "Found ACTION_BLOCK_OPEN without close delimiter — treating as plain text"
+        open_delimiter,
+        "Found action block open delimiter without close delimiter — treating as plain text"
     );
     (response.to_string(), None)
 }
@@ -10261,7 +10249,11 @@ fn is_safe_recent_shell_command_candidate(command: &str) -> bool {
     if trimmed.contains('\n') || trimmed.contains('\r') || trimmed.contains('\0') {
         return false;
     }
-    if trimmed.contains(ACTION_BLOCK_OPEN) || trimmed.contains(ACTION_BLOCK_CLOSE) {
+    if trimmed.contains(ACTION_BLOCK_OPEN)
+        || trimmed.contains(ACTION_BLOCK_CLOSE)
+        || trimmed.contains(ACTION_BLOCK_OPEN_SQUARE)
+        || trimmed.contains(ACTION_BLOCK_CLOSE_SQUARE)
+    {
         return false;
     }
     let first = trimmed.split_whitespace().next().unwrap_or_default();
@@ -10719,7 +10711,7 @@ fn is_local_only_uncertainty_query(query: &str) -> bool {
         return true;
     }
     let lower = query.to_lowercase();
-    [
+    let explicit_local_markers = [
         "on my mac",
         "on this mac",
         "my computer",
@@ -10731,9 +10723,17 @@ fn is_local_only_uncertainty_query(query: &str) -> bool {
         "what's on my screen",
         "my clipboard",
         "my current window",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+        "frontmost window",
+        "frontmost safari",
+        "safari window",
+        "chrome window",
+        "currently visible",
+        "current ui",
+        "open window",
+    ];
+    explicit_local_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 fn ambient_notice_explanation_request(content: &str) -> bool {
@@ -12838,14 +12838,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_and_ui_action_planning_use_fast_model_with_full_contract() {
+    fn browser_and_ui_action_planning_preserve_routed_model() {
         assert_eq!(
             CoreOrchestrator::generation_model_for_prompt(
                 ModelId::Primary,
                 PromptProfile::PrimaryFull,
                 "Use Dexter browser actions to navigate to a local page and click exactly this selector.",
             ),
-            ModelId::Fast
+            ModelId::Primary
         );
         assert_eq!(
             CoreOrchestrator::generation_model_for_prompt(
@@ -12853,7 +12853,7 @@ mod tests {
                 PromptProfile::PrimaryFull,
                 "Use Dexter UI actions against the running app named DexterUIModelRecoveryFixture and ui_click role AXButton label Missing Save.",
             ),
-            ModelId::Fast
+            ModelId::Primary
         );
         assert_eq!(
             CoreOrchestrator::generation_model_for_prompt(
@@ -13370,6 +13370,33 @@ mod tests {
     }
 
     #[test]
+    fn extract_action_block_accepts_square_bracket_compatibility_delimiter() {
+        let response = concat!(
+            "[dexter:action]",
+            r#"{ "type":"window_inspect","app_name":"Safari","rationale":"inspect the visible Safari window" }"#,
+        );
+        let (text, spec) = extract_action_block(response);
+
+        assert!(text.is_empty(), "compatibility block must be stripped");
+        match spec.expect("square-bracket action must parse") {
+            ActionSpec::WindowInspect { app_name, .. } => {
+                assert_eq!(app_name.as_deref(), Some("Safari"))
+            }
+            other => panic!("expected WindowInspect, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unclosed_square_action_block_suppresses_uncertainty_interception() {
+        assert!(has_unclosed_action_block(
+            r#"[dexter:action]{"type":"window_inspect","app_name":"Safari"}"#
+        ));
+        assert!(!has_unclosed_action_block(
+            r#"[dexter:action]{"type":"window_inspect","app_name":"Safari"}[/dexter:action]"#
+        ));
+    }
+
+    #[test]
     fn extract_action_block_parses_structured_message_send() {
         let response = format!(
             "Sending it.{}{}{}",
@@ -13740,6 +13767,9 @@ mod tests {
         ));
         assert!(is_local_only_uncertainty_query(
             "what is using memory on my mac"
+        ));
+        assert!(is_local_only_uncertainty_query(
+            "What is currently visible in the frontmost Safari window?"
         ));
         assert!(!is_local_only_uncertainty_query("current version of Swift"));
     }
@@ -18198,10 +18228,11 @@ end tell"#;
             keep_alive_override: Some(FAST_MODEL_KEEP_ALIVE),
             num_predict: Some(1),
             inactivity_timeout_override_secs: None,
-            num_ctx_override: None,
+            num_ctx_override: Some(FAST_NUM_CTX),
         };
         assert_eq!(req.keep_alive_override, Some("999m"));
         assert_eq!(req.num_predict, Some(1));
+        assert_eq!(req.num_ctx_override, Some(FAST_NUM_CTX));
         assert!(!req.unload_after);
     }
 
