@@ -131,9 +131,9 @@ bash "$ROOT_DIR/scripts/configure-ollama-models-env.sh"
 info "verifying Ollama model visibility"
 verify_ollama_models
 
-info "building release Rust core and CLI"
-(cd "$ROOT_DIR/src/rust-core" && cargo build --release --bin dexter-core --bin dexter-cli)
-pass "release Rust artifacts are built"
+info "building and signing release Rust core and CLI"
+make -C "$ROOT_DIR" release-core
+pass "release Rust artifacts are built with Dexter's stable macOS identity"
 
 info "building Swift app"
 (cd "$ROOT_DIR/src/swift" && swift build 2>&1 | tail -12)

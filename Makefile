@@ -28,7 +28,8 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running require-active-gui-session run-core run-core-debug start-core restart-core run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict daily-driver-v1-gate daily-driver-v1-checklist diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-detached-core live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-local-answers live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-context-turn-records live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-ui-recovery-model live-smoke-ui-recovery-model-stability live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact-dry-run live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-diagnostic-bundle live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-action-surfaces live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto ensure-core-not-running require-active-gui-session release-core run-core run-core-debug start-core restart-core run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict daily-driver-v1-gate daily-driver-v1-checklist diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-detached-core live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-local-answers live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-context-turn-records live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-ui-recovery-model live-smoke-ui-recovery-model-stability live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact-dry-run live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-diagnostic-bundle live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-action-surfaces live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: live-smoke-vision-grounding
 
 ## help: print this help message
 help:
@@ -100,22 +101,25 @@ ensure-core-not-running:
 		exit 1; \
 	fi
 
-## run-core: start the Rust daemon in release mode (same artifact family used by CLI/live smoke)
-run-core:
-	cargo run --manifest-path $(RUST_CORE_DIR)/Cargo.toml --release --bin dexter-core
+## release-core: build the release daemon and apply its stable macOS TCC identity
+release-core:
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	@bash scripts/sign-dexter-core.sh
+
+## run-core: start the stably signed release daemon used by Dock and smoke paths
+run-core: release-core
+	@exec $(RUST_CORE_DIR)/target/release/dexter-core
 
 ## run-core-debug: start the Rust daemon in debug mode intentionally
 run-core-debug:
 	cargo run --manifest-path $(RUST_CORE_DIR)/Cargo.toml --bin dexter-core
 
 ## start-core: build and start the Rust daemon detached, with logs in /tmp/dexter-core.log
-start-core:
-	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+start-core: release-core
 	@bash scripts/start-dexter-core.sh --wait-ready --pid-file "$(CORE_PID_FILE)"
 
 ## restart-core: stop Dexter and start the Rust daemon detached
-restart-core:
-	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+restart-core: release-core
 	@bash scripts/start-dexter-core.sh --restart --wait-ready --pid-file "$(CORE_PID_FILE)"
 
 ## cli: build the dexter-cli release binary (Phase 38 dev tool).
@@ -289,6 +293,14 @@ live-smoke-residency-proof:
 live-smoke-local-answers: ensure-core-not-running
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
 	bash scripts/live-local-answers-smoke.sh
+
+## live-smoke-vision-grounding: prove current-screen answers use a fresh screenshot
+##
+## Focused live-model evidence check. It persists and verifies the serving core
+## identity plus a privacy-safe hash of the attached screenshot.
+live-smoke-vision-grounding: ensure-core-not-running require-active-gui-session
+	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core --bin dexter-cli
+	bash scripts/live-vision-grounding-smoke.sh
 
 ## live-smoke-external-failures: run deterministic external-integration failure smoke
 ##

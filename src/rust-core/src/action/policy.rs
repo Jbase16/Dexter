@@ -13,11 +13,239 @@
 /// DESTRUCTIVE-classified spec is silently ignored — policy wins downward.
 /// This prevents the model from accidentally (or adversarially) lowering the
 /// gate on a destructive command.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::ipc::proto::ActionCategory;
+use crate::{
+    context::{ContentTrust, DataSensitivity},
+    ipc::proto::ActionCategory,
+};
 
 use super::engine::{ActionSpec, BrowserActionKind};
+
+// ── Structured policy ────────────────────────────────────────────────────────
+
+/// Serialized decision/reason contract version for audit telemetry.
+pub(crate) const STRUCTURED_POLICY_VERSION: u16 = 1;
+
+/// Local effect of an action, independent of where that effect is observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalEffect {
+    Observe,
+    Mutate,
+    Destructive,
+    Unknown,
+}
+
+impl LocalEffect {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Mutate => "mutate",
+            Self::Destructive => "destructive",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Furthest boundary an action can reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reach {
+    Local,
+    Loopback,
+    ExternalRead,
+    ExternalWrite,
+    Unknown,
+}
+
+impl Reach {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Loopback => "loopback",
+            Self::ExternalRead => "external_read",
+            Self::ExternalWrite => "external_write",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    const fn is_external(self) -> bool {
+        matches!(self, Self::ExternalRead | Self::ExternalWrite)
+    }
+}
+
+/// Whether Dexter can reliably restore the pre-action state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reversibility {
+    Reversible,
+    Irreversible,
+    Unknown,
+}
+
+impl Reversibility {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reversible => "reversible",
+            Self::Irreversible => "irreversible",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Rust-owned authorization source. The model-facing ActionSpec has no field
+/// that can construct one of these values.
+#[allow(dead_code)] // Later slices supply retrieval and internal origins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionOrigin {
+    ModelProposed,
+    DeterministicOperatorIntent,
+    CoreRetrieval,
+    OperatorApproved { fingerprint: String },
+    SystemInternal,
+}
+
+impl ActionOrigin {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ModelProposed => "model_proposed",
+            Self::DeterministicOperatorIntent => "deterministic_operator_intent",
+            Self::CoreRetrieval => "core_retrieval",
+            Self::OperatorApproved { .. } => "operator_approved",
+            Self::SystemInternal => "system_internal",
+        }
+    }
+}
+
+/// Browser origin that has already been parsed and classified by Rust.
+///
+/// BrowserCoordinator owns construction from live browser state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidatedOrigin {
+    pub(crate) reach: Reach,
+    pub(crate) destination: String,
+}
+
+/// Rust-owned context for a structured policy evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyContext {
+    pub(crate) origin: ActionOrigin,
+    pub(crate) visible_context_sensitivity: DataSensitivity,
+    pub(crate) visible_context_trust: ContentTrust,
+    pub(crate) current_browser_origin: Option<ValidatedOrigin>,
+    pub(crate) operator_turn_id: String,
+    pub(crate) restricted_paths: Vec<PathBuf>,
+}
+
+impl PolicyContext {
+    /// Conservative enforcing context for an action emitted by the model.
+    ///
+    /// Slice C will replace the unknown prompt labels with measured values.
+    /// Until then, external and unknown reach fail closed.
+    pub(crate) fn model_proposed(
+        operator_turn_id: &str,
+        current_browser_origin: Option<ValidatedOrigin>,
+    ) -> Self {
+        Self {
+            origin: ActionOrigin::ModelProposed,
+            visible_context_sensitivity: DataSensitivity::Unknown,
+            visible_context_trust: ContentTrust::Unknown,
+            current_browser_origin,
+            operator_turn_id: operator_turn_id.to_string(),
+            restricted_paths: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_origin(&self, origin: ActionOrigin) -> Self {
+        let mut context = self.clone();
+        context.origin = origin;
+        context
+    }
+
+    pub(crate) fn with_prompt_security(
+        &self,
+        sensitivity: DataSensitivity,
+        trust: ContentTrust,
+    ) -> Self {
+        let mut context = self.clone();
+        context.visible_context_sensitivity = sensitivity;
+        context.visible_context_trust = trust;
+        context
+    }
+
+    pub(crate) fn with_restricted_paths(&self, restricted_paths: &[PathBuf]) -> Self {
+        let mut context = self.clone();
+        context.restricted_paths = restricted_paths.to_vec();
+        context
+    }
+}
+
+/// Stable reason codes emitted by the structured policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PolicyReason {
+    RestrictedSourceRead,
+    ExternalDestination,
+    ExternalMutation,
+    ModelGeneratedEgress,
+    PrivateContextVisible,
+    UnknownReach,
+    UnknownEffect,
+    UntrustedExternalContext,
+    ConsequentialLocalEffect,
+    OperatorLiteralDestination,
+    DeterministicOperatorIntent,
+    OneShotOperatorApproval,
+    PolicyEvaluationFailed,
+}
+
+impl PolicyReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::RestrictedSourceRead => "restricted_source_read",
+            Self::ExternalDestination => "external_destination",
+            Self::ExternalMutation => "external_mutation",
+            Self::ModelGeneratedEgress => "model_generated_egress",
+            Self::PrivateContextVisible => "private_context_visible",
+            Self::UnknownReach => "unknown_reach",
+            Self::UnknownEffect => "unknown_effect",
+            Self::UntrustedExternalContext => "untrusted_external_context",
+            Self::ConsequentialLocalEffect => "consequential_local_effect",
+            Self::OperatorLiteralDestination => "operator_literal_destination",
+            Self::DeterministicOperatorIntent => "deterministic_operator_intent",
+            Self::OneShotOperatorApproval => "one_shot_operator_approval",
+            Self::PolicyEvaluationFailed => "policy_evaluation_failed",
+        }
+    }
+}
+
+/// Structured policy result. `approval_required` is the enforcing gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyDecision {
+    pub(crate) category: ActionCategory,
+    pub(crate) approval_required: bool,
+    pub(crate) effect: LocalEffect,
+    pub(crate) reach: Reach,
+    pub(crate) sensitivity: DataSensitivity,
+    pub(crate) reversibility: Reversibility,
+    pub(crate) reasons: Vec<PolicyReason>,
+    pub(crate) action_fingerprint: String,
+}
+
+impl PolicyDecision {
+    pub(crate) fn reason_codes(&self) -> String {
+        self.reasons
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PolicyAxes {
+    effect: LocalEffect,
+    reach: Reach,
+    sensitivity: DataSensitivity,
+    reversibility: Reversibility,
+}
 
 // ── Classification tables ──────────────────────────────────────────────────
 
@@ -74,6 +302,52 @@ const SHELL_INTERPRETER_CMDS: &[&str] = &[
 const SHELL_SAFE_CMDS: &[&str] = &[
     "echo", "pwd", "date", "whoami", "hostname", "uname", "uptime", "df", "ls", "cat", "head",
     "tail", "wc",
+];
+
+/// Commands whose purpose crosses a machine boundary.
+const SHELL_EXTERNAL_CMDS: &[&str] = &[
+    "curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "ncat", "netcat", "telnet",
+];
+
+/// Normalized path fragments that identify credential-bearing sources.
+///
+/// This is intentionally conservative. Operator-configured restricted paths
+/// extend this seed; unknown paths remain operator-private and unknown policy
+/// information fails closed.
+const RESTRICTED_PATH_MARKERS: &[&str] = &[
+    "/.ssh/",
+    "/.aws/credentials",
+    "/.aws/config",
+    "/.azure/",
+    "/.config/gcloud/credentials",
+    "/.config/gcloud/application_default_credentials.json",
+    "/.config/gh/hosts.yml",
+    "/.docker/config.json",
+    "/.kube/config",
+    "/.gnupg/",
+    "/.password-store/",
+    "/.config/1password/",
+    "/library/keychains/",
+    "/library/application support/google/chrome/",
+    "/library/application support/bravebrowser/",
+    "/library/application support/firefox/",
+    "/library/application support/1password/",
+    "/secrets/",
+];
+
+/// Applications whose structured UI controls can produce externally visible
+/// effects. Exact live-origin integration is deferred to Slice B.
+const EXTERNAL_UI_APPS: &[&str] = &[
+    "safari",
+    "google chrome",
+    "chrome",
+    "firefox",
+    "brave browser",
+    "mail",
+    "messages",
+    "slack",
+    "microsoft teams",
+    "discord",
 ];
 
 /// Browser selector/text fragments that imply a consequential click.
@@ -318,6 +592,834 @@ impl PolicyEngine {
                 // automation ecosystem until Dexter has an allowlist.
                 Self::apply_override(ActionCategory::Destructive, category_override.as_deref())
             }
+        }
+    }
+
+    /// Evaluate the multidimensional policy.
+    pub(crate) fn evaluate(spec: &ActionSpec, context: &PolicyContext) -> PolicyDecision {
+        let legacy_category = Self::classify(spec);
+        let axes = Self::shadow_axes(spec, context, legacy_category);
+        let sensitivity = if axes.reach.is_external() {
+            axes.sensitivity.max(context.visible_context_sensitivity)
+        } else {
+            axes.sensitivity
+        };
+        let (action_fingerprint, fingerprint_failed) =
+            Self::shadow_action_fingerprint(spec, context, axes.reach);
+
+        let mut reasons = Vec::new();
+        let mut approval_required = legacy_category == ActionCategory::Destructive;
+
+        if fingerprint_failed {
+            Self::push_reason(&mut reasons, PolicyReason::PolicyEvaluationFailed);
+            approval_required = true;
+        }
+        if legacy_category == ActionCategory::Destructive {
+            Self::push_reason(&mut reasons, PolicyReason::ConsequentialLocalEffect);
+        }
+        if Self::shadow_reads_restricted_source(spec, sensitivity) {
+            Self::push_reason(&mut reasons, PolicyReason::RestrictedSourceRead);
+            approval_required = true;
+        }
+
+        let approved_fingerprint_matches = match &context.origin {
+            ActionOrigin::OperatorApproved { fingerprint } => fingerprint == &action_fingerprint,
+            _ => false,
+        };
+        if matches!(context.origin, ActionOrigin::OperatorApproved { .. }) {
+            if approved_fingerprint_matches {
+                Self::push_reason(&mut reasons, PolicyReason::OneShotOperatorApproval);
+            } else {
+                Self::push_reason(&mut reasons, PolicyReason::PolicyEvaluationFailed);
+                approval_required = true;
+            }
+        }
+
+        let deterministic_operator_intent =
+            matches!(context.origin, ActionOrigin::DeterministicOperatorIntent);
+        if deterministic_operator_intent {
+            Self::push_reason(&mut reasons, PolicyReason::DeterministicOperatorIntent);
+            if axes.reach.is_external() {
+                Self::push_reason(&mut reasons, PolicyReason::OperatorLiteralDestination);
+            }
+        }
+
+        if axes.reach.is_external() {
+            Self::push_reason(&mut reasons, PolicyReason::ExternalDestination);
+            if axes.reach == Reach::ExternalWrite {
+                Self::push_reason(&mut reasons, PolicyReason::ExternalMutation);
+            }
+
+            if sensitivity.is_private_or_unknown() {
+                Self::push_reason(&mut reasons, PolicyReason::PrivateContextVisible);
+            }
+
+            let trusted_external_origin = deterministic_operator_intent
+                || approved_fingerprint_matches
+                || (matches!(context.origin, ActionOrigin::CoreRetrieval)
+                    && axes.reach == Reach::ExternalRead
+                    && axes.effect == LocalEffect::Observe);
+            if matches!(context.origin, ActionOrigin::ModelProposed) {
+                Self::push_reason(&mut reasons, PolicyReason::ModelGeneratedEgress);
+            }
+            if !trusted_external_origin {
+                approval_required = true;
+            }
+        }
+
+        if axes.reach == Reach::Unknown && matches!(context.origin, ActionOrigin::ModelProposed) {
+            Self::push_reason(&mut reasons, PolicyReason::UnknownReach);
+            approval_required = true;
+        }
+        if axes.effect == LocalEffect::Unknown
+            && matches!(context.origin, ActionOrigin::ModelProposed)
+        {
+            Self::push_reason(&mut reasons, PolicyReason::UnknownEffect);
+            approval_required = true;
+        }
+        if axes.sensitivity == DataSensitivity::Unknown
+            && matches!(context.origin, ActionOrigin::ModelProposed)
+        {
+            Self::push_reason(&mut reasons, PolicyReason::PolicyEvaluationFailed);
+            approval_required = true;
+        }
+        if context.visible_context_trust.is_untrusted_for_action()
+            && matches!(context.origin, ActionOrigin::ModelProposed)
+            && axes.effect != LocalEffect::Observe
+        {
+            Self::push_reason(&mut reasons, PolicyReason::UntrustedExternalContext);
+            approval_required = true;
+        }
+
+        // A matching one-shot approval authorizes the exact normalized action,
+        // including actions whose legacy category required approval. A failed
+        // fingerprint evaluation can never be authorized this way.
+        if approved_fingerprint_matches && !fingerprint_failed {
+            approval_required = false;
+        }
+
+        let category = if approval_required {
+            ActionCategory::Destructive
+        } else if legacy_category == ActionCategory::Safe
+            && sensitivity == DataSensitivity::Public
+            && reasons.is_empty()
+        {
+            ActionCategory::Safe
+        } else {
+            ActionCategory::Cautious
+        };
+
+        PolicyDecision {
+            category,
+            approval_required,
+            effect: axes.effect,
+            reach: axes.reach,
+            sensitivity,
+            reversibility: axes.reversibility,
+            reasons,
+            action_fingerprint,
+        }
+    }
+
+    #[cfg(test)]
+    fn evaluate_shadow(spec: &ActionSpec, context: &PolicyContext) -> PolicyDecision {
+        Self::evaluate(spec, context)
+    }
+
+    /// Parse a worker-observed browser URL into a Rust-owned policy origin.
+    pub(crate) fn validated_browser_origin(url: &str) -> ValidatedOrigin {
+        ValidatedOrigin {
+            reach: Self::shadow_url_reach(url),
+            destination: Self::redacted_url_destination(url),
+        }
+    }
+
+    /// Normalized, audit-safe destination label for approval copy and receipts.
+    ///
+    /// Query strings, fragments, userinfo, and action payloads are omitted.
+    pub(crate) fn external_destination(spec: &ActionSpec) -> Option<String> {
+        match spec {
+            ActionSpec::Shell { args, .. } => {
+                let command = args
+                    .first()
+                    .and_then(|arg| Path::new(arg).file_name())
+                    .and_then(|name| name.to_str())?;
+                if matches!(command, "curl" | "wget") {
+                    args.iter()
+                        .skip(1)
+                        .find(|arg| arg.contains("://"))
+                        .map(|url| Self::redacted_url_destination(url))
+                } else if SHELL_EXTERNAL_CMDS.contains(&command) {
+                    args.iter()
+                        .skip(1)
+                        .find(|arg| !arg.starts_with('-'))
+                        .map(|target| Self::redacted_remote_target(target))
+                } else {
+                    None
+                }
+            }
+            ActionSpec::Browser {
+                action: BrowserActionKind::Navigate { url },
+                ..
+            } => Some(Self::redacted_url_destination(url)),
+            ActionSpec::MessageSend { recipient, .. } => Some(recipient.trim().to_string()),
+            ActionSpec::UiClick { app_name, .. }
+            | ActionSpec::UiType { app_name, .. }
+            | ActionSpec::UiSelect { app_name, .. }
+            | ActionSpec::UiToggle { app_name, .. }
+            | ActionSpec::UiPick { app_name, .. } => app_name.clone(),
+            _ => None,
+        }
+        .filter(|destination| !destination.is_empty())
+    }
+
+    /// Shell argv representation safe for durable audit storage.
+    ///
+    /// External, interpreter, wrapper, and unknown commands can carry secrets
+    /// in arbitrary positions, so only the executable and redacted destination
+    /// are retained for those forms.
+    pub(crate) fn audit_safe_shell_args(args: &[String]) -> Vec<String> {
+        let Some(command_arg) = args.first() else {
+            return Vec::new();
+        };
+        let command = Path::new(command_arg)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(command_arg);
+        let can_store_args = matches!(
+            command,
+            "pwd"
+                | "date"
+                | "whoami"
+                | "hostname"
+                | "uname"
+                | "uptime"
+                | "df"
+                | "ls"
+                | "cat"
+                | "head"
+                | "tail"
+                | "wc"
+                | "find"
+                | "tee"
+        ) || SHELL_DESTRUCTIVE_CMDS.contains(&command);
+        if can_store_args {
+            return args.to_vec();
+        }
+
+        let mut redacted = vec![command.to_string()];
+        if let Some(destination) = if matches!(command, "curl" | "wget") {
+            args.iter()
+                .skip(1)
+                .find(|arg| arg.contains("://"))
+                .map(|url| Self::redacted_url_destination(url))
+        } else if SHELL_EXTERNAL_CMDS.contains(&command) {
+            args.iter()
+                .skip(1)
+                .find(|arg| !arg.starts_with('-'))
+                .map(|target| Self::redacted_remote_target(target))
+        } else {
+            None
+        } {
+            redacted.push(format!("destination={destination}"));
+        }
+        if args.len() > 1 {
+            redacted.push(format!("<{} arguments omitted>", args.len() - 1));
+        }
+        redacted
+    }
+
+    fn redacted_url_destination(url: &str) -> String {
+        let trimmed = url.trim();
+        let without_fragment = trimmed.split('#').next().unwrap_or_default();
+        let without_query = without_fragment.split('?').next().unwrap_or_default();
+        if without_query.to_ascii_lowercase().starts_with("file:") {
+            return without_query.to_string();
+        }
+        let Some((scheme, remainder)) = without_query.split_once("://") else {
+            return "<unvalidated destination>".to_string();
+        };
+        let authority = remainder.split('/').next().unwrap_or_default();
+        let authority_without_userinfo = authority.rsplit('@').next().unwrap_or_default();
+        if authority_without_userinfo.is_empty() {
+            "<unvalidated destination>".to_string()
+        } else {
+            format!(
+                "{}://{}",
+                scheme.to_ascii_lowercase(),
+                authority_without_userinfo
+            )
+        }
+    }
+
+    fn redacted_remote_target(target: &str) -> String {
+        let trimmed = target.trim();
+        let host = trimmed
+            .rsplit('@')
+            .next()
+            .unwrap_or(trimmed)
+            .split(':')
+            .next()
+            .unwrap_or_default();
+        if host.is_empty() {
+            "<unvalidated destination>".to_string()
+        } else {
+            host.to_string()
+        }
+    }
+
+    fn shadow_axes(
+        spec: &ActionSpec,
+        context: &PolicyContext,
+        legacy_category: ActionCategory,
+    ) -> PolicyAxes {
+        match spec {
+            ActionSpec::Shell { args, .. } => {
+                Self::shadow_shell_axes(args, legacy_category, context)
+            }
+            ActionSpec::FileRead { path } => PolicyAxes {
+                effect: LocalEffect::Observe,
+                reach: Reach::Local,
+                sensitivity: Self::path_sensitivity(path, &context.restricted_paths),
+                reversibility: Reversibility::Reversible,
+            },
+            ActionSpec::FileWrite { path, .. } => PolicyAxes {
+                effect: if legacy_category == ActionCategory::Destructive {
+                    LocalEffect::Destructive
+                } else {
+                    LocalEffect::Mutate
+                },
+                reach: if Self::shadow_path_may_sync_externally(path) {
+                    Reach::Unknown
+                } else {
+                    Reach::Local
+                },
+                sensitivity: Self::path_sensitivity(path, &context.restricted_paths),
+                reversibility: Reversibility::Unknown,
+            },
+            ActionSpec::AppleScript { .. } => PolicyAxes {
+                effect: LocalEffect::Unknown,
+                reach: Reach::Unknown,
+                sensitivity: DataSensitivity::Unknown,
+                reversibility: Reversibility::Unknown,
+            },
+            ActionSpec::MessageSend { .. } => PolicyAxes {
+                effect: LocalEffect::Mutate,
+                reach: Reach::ExternalWrite,
+                sensitivity: DataSensitivity::OperatorPrivate,
+                reversibility: Reversibility::Irreversible,
+            },
+            ActionSpec::WindowFocus { .. } => PolicyAxes {
+                effect: LocalEffect::Mutate,
+                reach: Reach::Local,
+                sensitivity: DataSensitivity::Public,
+                reversibility: Reversibility::Reversible,
+            },
+            ActionSpec::WindowInspect { .. } | ActionSpec::UiSnapshot { .. } => PolicyAxes {
+                effect: LocalEffect::Observe,
+                reach: Reach::Local,
+                sensitivity: DataSensitivity::OperatorPrivate,
+                reversibility: Reversibility::Reversible,
+            },
+            ActionSpec::UiClick { app_name, .. }
+            | ActionSpec::UiSelect { app_name, .. }
+            | ActionSpec::UiToggle { app_name, .. }
+            | ActionSpec::UiPick { app_name, .. } => {
+                Self::shadow_ui_mutation_axes(app_name.as_deref(), context, false)
+            }
+            ActionSpec::UiType { app_name, .. } => {
+                Self::shadow_ui_mutation_axes(app_name.as_deref(), context, true)
+            }
+            ActionSpec::Browser { action, .. } => Self::shadow_browser_axes(action, context),
+            ActionSpec::Shortcut { .. } => PolicyAxes {
+                effect: LocalEffect::Unknown,
+                reach: Reach::Unknown,
+                sensitivity: DataSensitivity::Unknown,
+                reversibility: Reversibility::Unknown,
+            },
+        }
+    }
+
+    fn shadow_shell_axes(
+        args: &[String],
+        legacy_category: ActionCategory,
+        context: &PolicyContext,
+    ) -> PolicyAxes {
+        let Some(command) = args.first() else {
+            return PolicyAxes {
+                effect: LocalEffect::Unknown,
+                reach: Reach::Unknown,
+                sensitivity: DataSensitivity::Unknown,
+                reversibility: Reversibility::Unknown,
+            };
+        };
+        let base_command = Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(command.as_str());
+
+        if SHELL_EXTERNAL_CMDS.contains(&base_command) {
+            let reach = Self::shadow_shell_network_reach(base_command, args, legacy_category);
+            return PolicyAxes {
+                effect: if legacy_category == ActionCategory::Destructive {
+                    LocalEffect::Mutate
+                } else {
+                    LocalEffect::Observe
+                },
+                reach,
+                sensitivity: DataSensitivity::OperatorPrivate,
+                reversibility: if reach == Reach::ExternalWrite {
+                    Reversibility::Irreversible
+                } else {
+                    Reversibility::Reversible
+                },
+            };
+        }
+
+        if SHELL_DESTRUCTIVE_CMDS.contains(&base_command) {
+            return PolicyAxes {
+                effect: LocalEffect::Destructive,
+                reach: Reach::Local,
+                sensitivity: DataSensitivity::OperatorPrivate,
+                reversibility: Reversibility::Irreversible,
+            };
+        }
+
+        if SHELL_SAFE_CMDS.contains(&base_command) {
+            let sensitivity = if matches!(base_command, "cat" | "head" | "tail") {
+                Self::shadow_shell_read_sensitivity(args, &context.restricted_paths)
+            } else {
+                DataSensitivity::Public
+            };
+            return PolicyAxes {
+                effect: LocalEffect::Observe,
+                reach: Reach::Local,
+                sensitivity,
+                reversibility: Reversibility::Reversible,
+            };
+        }
+
+        if base_command == "find" && legacy_category == ActionCategory::Safe {
+            return PolicyAxes {
+                effect: LocalEffect::Observe,
+                reach: Reach::Local,
+                sensitivity: DataSensitivity::OperatorPrivate,
+                reversibility: Reversibility::Reversible,
+            };
+        }
+        if base_command == "tee" && legacy_category != ActionCategory::Destructive {
+            return PolicyAxes {
+                effect: LocalEffect::Mutate,
+                reach: Reach::Local,
+                sensitivity: DataSensitivity::OperatorPrivate,
+                reversibility: Reversibility::Unknown,
+            };
+        }
+
+        PolicyAxes {
+            effect: if legacy_category == ActionCategory::Destructive {
+                LocalEffect::Destructive
+            } else {
+                LocalEffect::Unknown
+            },
+            reach: Reach::Unknown,
+            sensitivity: DataSensitivity::Unknown,
+            reversibility: if legacy_category == ActionCategory::Destructive {
+                Reversibility::Irreversible
+            } else {
+                Reversibility::Unknown
+            },
+        }
+    }
+
+    fn shadow_shell_network_reach(
+        base_command: &str,
+        args: &[String],
+        legacy_category: ActionCategory,
+    ) -> Reach {
+        if !matches!(base_command, "curl" | "wget") {
+            return Reach::ExternalWrite;
+        }
+
+        let mut saw_loopback = false;
+        for arg in args.iter().skip(1) {
+            if !arg.contains("://") {
+                continue;
+            }
+            match Self::shadow_url_reach(arg) {
+                Reach::Loopback | Reach::Local => saw_loopback = true,
+                Reach::ExternalRead | Reach::ExternalWrite => {
+                    return if legacy_category == ActionCategory::Destructive {
+                        Reach::ExternalWrite
+                    } else {
+                        Reach::ExternalRead
+                    };
+                }
+                Reach::Unknown => return Reach::Unknown,
+            }
+        }
+        if saw_loopback {
+            Reach::Loopback
+        } else if legacy_category == ActionCategory::Destructive {
+            Reach::ExternalWrite
+        } else {
+            Reach::ExternalRead
+        }
+    }
+
+    fn shadow_browser_axes(action: &BrowserActionKind, context: &PolicyContext) -> PolicyAxes {
+        match action {
+            BrowserActionKind::Navigate { url } => PolicyAxes {
+                effect: LocalEffect::Mutate,
+                reach: Self::shadow_url_reach(url),
+                sensitivity: if url.trim().to_ascii_lowercase().starts_with("file:") {
+                    Self::shadow_file_url_sensitivity(url, &context.restricted_paths)
+                } else {
+                    DataSensitivity::OperatorPrivate
+                },
+                reversibility: Reversibility::Reversible,
+            },
+            BrowserActionKind::Click { .. } | BrowserActionKind::Type { .. } => {
+                let reach = match context
+                    .current_browser_origin
+                    .as_ref()
+                    .map(|origin| origin.reach)
+                {
+                    Some(Reach::ExternalRead | Reach::ExternalWrite) => Reach::ExternalWrite,
+                    Some(Reach::Local | Reach::Loopback) => Reach::Local,
+                    Some(Reach::Unknown) | None => Reach::Unknown,
+                };
+                PolicyAxes {
+                    effect: LocalEffect::Mutate,
+                    reach,
+                    sensitivity: DataSensitivity::OperatorPrivate,
+                    reversibility: if reach == Reach::ExternalWrite {
+                        Reversibility::Irreversible
+                    } else {
+                        Reversibility::Unknown
+                    },
+                }
+            }
+            BrowserActionKind::Extract { .. } | BrowserActionKind::Screenshot => {
+                let reach = match context
+                    .current_browser_origin
+                    .as_ref()
+                    .map(|origin| origin.reach)
+                {
+                    Some(Reach::ExternalRead | Reach::ExternalWrite) => Reach::ExternalRead,
+                    Some(Reach::Local | Reach::Loopback) => Reach::Local,
+                    Some(Reach::Unknown) | None => Reach::Unknown,
+                };
+                PolicyAxes {
+                    effect: LocalEffect::Observe,
+                    reach,
+                    sensitivity: DataSensitivity::OperatorPrivate,
+                    reversibility: Reversibility::Reversible,
+                }
+            }
+        }
+    }
+
+    fn shadow_ui_mutation_axes(
+        app_name: Option<&str>,
+        context: &PolicyContext,
+        carries_text: bool,
+    ) -> PolicyAxes {
+        let app_is_external = app_name.is_some_and(|name| {
+            let normalized = name.trim().to_ascii_lowercase();
+            EXTERNAL_UI_APPS
+                .iter()
+                .any(|candidate| normalized == *candidate)
+        });
+        let reach = if app_is_external {
+            match context
+                .current_browser_origin
+                .as_ref()
+                .map(|origin| origin.reach)
+            {
+                Some(Reach::ExternalRead | Reach::ExternalWrite) => Reach::ExternalWrite,
+                Some(Reach::Local | Reach::Loopback) => Reach::Local,
+                Some(Reach::Unknown) | None => Reach::Unknown,
+            }
+        } else {
+            Reach::Local
+        };
+        PolicyAxes {
+            effect: LocalEffect::Mutate,
+            reach,
+            sensitivity: if carries_text {
+                DataSensitivity::OperatorPrivate
+            } else {
+                DataSensitivity::Public
+            },
+            reversibility: if reach == Reach::ExternalWrite {
+                Reversibility::Irreversible
+            } else {
+                Reversibility::Unknown
+            },
+        }
+    }
+
+    fn shadow_url_reach(url: &str) -> Reach {
+        let trimmed = url.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("file:") {
+            return Reach::Local;
+        }
+        if lower.starts_with("javascript:") || lower.starts_with("data:") {
+            return Reach::Local;
+        }
+
+        let Some((scheme, remainder)) = lower.split_once("://") else {
+            return Reach::Unknown;
+        };
+        if !matches!(scheme, "http" | "https") {
+            return Reach::Unknown;
+        }
+        let authority = remainder
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .rsplit('@')
+            .next()
+            .unwrap_or_default();
+        let host = if let Some(bracketed) = authority.strip_prefix('[') {
+            bracketed.split(']').next().unwrap_or_default()
+        } else {
+            authority.split(':').next().unwrap_or_default()
+        };
+        if host == "localhost"
+            || host.ends_with(".localhost")
+            || host == "::1"
+            || host
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|address| address.octets()[0] == 127)
+        {
+            Reach::Loopback
+        } else if host.is_empty() {
+            Reach::Unknown
+        } else {
+            Reach::ExternalRead
+        }
+    }
+
+    /// Classify a path after applying the exact normalization used by execution.
+    ///
+    /// Operator-configured restricted paths are normalized the same way and
+    /// match both the path itself and descendants.
+    pub(crate) fn path_sensitivity(
+        path: &Path,
+        operator_restricted_paths: &[PathBuf],
+    ) -> DataSensitivity {
+        let normalized = crate::action::executor::normalize_for_policy(path);
+        let lower = normalized.to_string_lossy().to_ascii_lowercase();
+        let file_name = normalized
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let extension = normalized
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let matches_operator_path = operator_restricted_paths.iter().any(|configured| {
+            let normalized_configured =
+                crate::action::executor::normalize_for_policy(configured.as_path());
+            normalized == normalized_configured || normalized.starts_with(&normalized_configured)
+        });
+
+        if matches_operator_path
+            || RESTRICTED_PATH_MARKERS
+                .iter()
+                .any(|marker| lower.contains(marker))
+            || file_name == ".env"
+            || file_name.starts_with(".env.")
+            || file_name.starts_with("id_rsa")
+            || file_name.starts_with("id_ed25519")
+            || matches!(
+                file_name.as_str(),
+                ".netrc"
+                    | ".npmrc"
+                    | ".pypirc"
+                    | "credentials"
+                    | "credentials.json"
+                    | "secrets.json"
+                    | "token"
+                    | "token.json"
+                    | "tokens.json"
+            )
+            || matches!(extension.as_str(), "key" | "pem" | "p12" | "pfx")
+        {
+            DataSensitivity::Restricted
+        } else {
+            DataSensitivity::OperatorPrivate
+        }
+    }
+
+    fn shadow_file_url_sensitivity(
+        url: &str,
+        operator_restricted_paths: &[PathBuf],
+    ) -> DataSensitivity {
+        let trimmed = url.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let raw = if lower.starts_with("file://") {
+            &trimmed["file://".len()..]
+        } else if lower.starts_with("file:") {
+            &trimmed["file:".len()..]
+        } else {
+            return DataSensitivity::Unknown;
+        };
+
+        let raw_path = if raw.starts_with('/') {
+            raw
+        } else {
+            let Some((authority, _path)) = raw.split_once('/') else {
+                return DataSensitivity::Unknown;
+            };
+            if !authority.eq_ignore_ascii_case("localhost") {
+                return DataSensitivity::Unknown;
+            }
+            &raw[authority.len()..]
+        };
+        let Some(decoded) = Self::percent_decode_file_path(raw_path) else {
+            return DataSensitivity::Unknown;
+        };
+        Self::path_sensitivity(Path::new(&decoded), operator_restricted_paths)
+    }
+
+    fn percent_decode_file_path(raw: &str) -> Option<String> {
+        let bytes = raw.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'%' {
+                decoded.push(bytes[index]);
+                index += 1;
+                continue;
+            }
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let high = Self::hex_nibble(bytes[index + 1])?;
+            let low = Self::hex_nibble(bytes[index + 2])?;
+            let byte = (high << 4) | low;
+            if byte == 0 {
+                return None;
+            }
+            decoded.push(byte);
+            index += 3;
+        }
+        String::from_utf8(decoded).ok()
+    }
+
+    const fn hex_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn shadow_shell_read_sensitivity(
+        args: &[String],
+        operator_restricted_paths: &[PathBuf],
+    ) -> DataSensitivity {
+        args.iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .map(|arg| Self::path_sensitivity(Path::new(arg), operator_restricted_paths))
+            .fold(DataSensitivity::Public, DataSensitivity::max)
+    }
+
+    fn shadow_reads_restricted_source(spec: &ActionSpec, sensitivity: DataSensitivity) -> bool {
+        if sensitivity != DataSensitivity::Restricted {
+            return false;
+        }
+        match spec {
+            ActionSpec::FileRead { .. } => true,
+            ActionSpec::Shell { args, .. } => args
+                .first()
+                .and_then(|command| Path::new(command).file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|command| matches!(command, "cat" | "head" | "tail")),
+            ActionSpec::Browser {
+                action: BrowserActionKind::Navigate { url },
+                ..
+            } => url.trim().to_ascii_lowercase().starts_with("file:"),
+            _ => false,
+        }
+    }
+
+    fn shadow_path_may_sync_externally(path: &Path) -> bool {
+        let normalized = crate::action::executor::normalize_for_policy(path);
+        let lower = normalized.to_string_lossy().to_ascii_lowercase();
+        lower.contains("/library/mobile documents/")
+            || lower.contains("/icloud drive/")
+            || lower.contains("/dropbox/")
+            || lower.contains("/onedrive")
+            || lower.contains("/google drive/")
+    }
+
+    fn shadow_action_fingerprint(
+        spec: &ActionSpec,
+        context: &PolicyContext,
+        reach: Reach,
+    ) -> (String, bool) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"dexter-policy-action-v1\0");
+        let serialized = match serde_json::to_vec(spec) {
+            Ok(serialized) => serialized,
+            Err(_) => {
+                hasher.update(b"serialization-failed");
+                hasher.update(context.operator_turn_id.as_bytes());
+                return (hasher.finalize().to_hex().to_string(), true);
+            }
+        };
+        hasher.update(&serialized);
+        hasher.update(b"\0");
+        hasher.update(reach.as_str().as_bytes());
+        if Self::action_uses_browser_origin(spec) {
+            hasher.update(b"\0browser-origin\0");
+            match context.current_browser_origin.as_ref() {
+                Some(origin) => hasher.update(origin.destination.as_bytes()),
+                None => hasher.update(b"<unknown>"),
+            };
+        }
+        hasher.update(b"\0");
+        hasher.update(context.operator_turn_id.as_bytes());
+        (hasher.finalize().to_hex().to_string(), false)
+    }
+
+    fn action_uses_browser_origin(spec: &ActionSpec) -> bool {
+        match spec {
+            ActionSpec::Browser {
+                action:
+                    BrowserActionKind::Click { .. }
+                    | BrowserActionKind::Type { .. }
+                    | BrowserActionKind::Extract { .. }
+                    | BrowserActionKind::Screenshot,
+                ..
+            } => true,
+            ActionSpec::UiClick { app_name, .. }
+            | ActionSpec::UiType { app_name, .. }
+            | ActionSpec::UiSelect { app_name, .. }
+            | ActionSpec::UiToggle { app_name, .. }
+            | ActionSpec::UiPick { app_name, .. } => app_name.as_deref().is_some_and(|name| {
+                let normalized = name.trim().to_ascii_lowercase();
+                EXTERNAL_UI_APPS
+                    .iter()
+                    .any(|candidate| normalized == *candidate)
+            }),
+            _ => false,
+        }
+    }
+
+    fn push_reason(reasons: &mut Vec<PolicyReason>, reason: PolicyReason) {
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
         }
     }
 
@@ -1984,5 +3086,505 @@ mod tests {
             PolicyEngine::classify(&file_write("/etc/hosts")),
             ActionCategory::Destructive
         );
+    }
+
+    // ── DEX-01 Slice A: structured policy shadow coverage ────────────────────
+
+    fn public_model_context() -> PolicyContext {
+        PolicyContext {
+            origin: ActionOrigin::ModelProposed,
+            visible_context_sensitivity: DataSensitivity::Public,
+            visible_context_trust: ContentTrust::Operator,
+            current_browser_origin: Some(ValidatedOrigin {
+                reach: Reach::ExternalRead,
+                destination: "https://example.com".to_string(),
+            }),
+            operator_turn_id: "turn-structured-policy".to_string(),
+            restricted_paths: Vec::new(),
+        }
+    }
+
+    fn local_ui_spec(kind: &str) -> ActionSpec {
+        match kind {
+            "click" => ActionSpec::UiClick {
+                app_name: Some("System Settings".to_string()),
+                role: Some("AXButton".to_string()),
+                label: "Continue".to_string(),
+                max_depth: Some(2),
+                rationale: None,
+                category_override: None,
+            },
+            "type" => ActionSpec::UiType {
+                app_name: Some("System Settings".to_string()),
+                role: Some("AXTextField".to_string()),
+                label: Some("Computer name".to_string()),
+                text: "Dexter Mac".to_string(),
+                max_depth: Some(2),
+                rationale: None,
+                category_override: None,
+            },
+            "select" => ActionSpec::UiSelect {
+                app_name: Some("System Settings".to_string()),
+                role: Some("AXPopUpButton".to_string()),
+                label: "Theme".to_string(),
+                option: "Dark".to_string(),
+                max_depth: Some(2),
+                rationale: None,
+                category_override: None,
+            },
+            "toggle" => ActionSpec::UiToggle {
+                app_name: Some("System Settings".to_string()),
+                role: Some("AXCheckBox".to_string()),
+                label: "Show previews".to_string(),
+                state: true,
+                max_depth: Some(2),
+                rationale: None,
+                category_override: None,
+            },
+            "pick" => ActionSpec::UiPick {
+                app_name: Some("Finder".to_string()),
+                role: Some("AXRow".to_string()),
+                label: "Downloads".to_string(),
+                container_label: Some("Sidebar".to_string()),
+                max_depth: Some(3),
+                rationale: None,
+                category_override: None,
+            },
+            other => panic!("unknown local UI test kind: {other}"),
+        }
+    }
+
+    #[test]
+    fn structured_shadow_covers_every_action_spec_variant() {
+        let context = public_model_context();
+        let cases = vec![
+            (
+                "shell",
+                shell(&["echo", "hello"]),
+                LocalEffect::Observe,
+                Reach::Local,
+                ActionCategory::Safe,
+            ),
+            (
+                "file_read",
+                ActionSpec::FileRead {
+                    path: std::path::PathBuf::from("/Users/jason/project/README.md"),
+                },
+                LocalEffect::Observe,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "file_write",
+                file_write("/tmp/dexter-structured-policy.txt"),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "apple_script",
+                applescript("tell application \"Finder\" to activate"),
+                LocalEffect::Unknown,
+                Reach::Unknown,
+                ActionCategory::Destructive,
+            ),
+            (
+                "message_send",
+                message_send(),
+                LocalEffect::Mutate,
+                Reach::ExternalWrite,
+                ActionCategory::Destructive,
+            ),
+            (
+                "window_focus",
+                window_focus("Finder", None),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "window_inspect",
+                window_inspect(Some("Finder")),
+                LocalEffect::Observe,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "ui_snapshot",
+                ui_snapshot(Some("Finder")),
+                LocalEffect::Observe,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "ui_click",
+                local_ui_spec("click"),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "ui_type",
+                local_ui_spec("type"),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "ui_select",
+                local_ui_spec("select"),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "ui_toggle",
+                local_ui_spec("toggle"),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "ui_pick",
+                local_ui_spec("pick"),
+                LocalEffect::Mutate,
+                Reach::Local,
+                ActionCategory::Cautious,
+            ),
+            (
+                "browser",
+                browser_navigate_to("https://example.com/docs"),
+                LocalEffect::Mutate,
+                Reach::ExternalRead,
+                ActionCategory::Destructive,
+            ),
+            (
+                "shortcut",
+                shortcut("Morning Briefing"),
+                LocalEffect::Unknown,
+                Reach::Unknown,
+                ActionCategory::Destructive,
+            ),
+        ];
+
+        for (name, spec, effect, reach, category) in cases {
+            let decision = PolicyEngine::evaluate_shadow(&spec, &context);
+            assert_eq!(decision.effect, effect, "{name}: effect");
+            assert_eq!(decision.reach, reach, "{name}: reach");
+            assert_eq!(decision.category, category, "{name}: category");
+            assert_eq!(
+                decision.approval_required,
+                category == ActionCategory::Destructive,
+                "{name}: approval/category compatibility"
+            );
+            assert!(
+                !decision.action_fingerprint.is_empty(),
+                "{name}: action fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_shadow_restricted_file_read_requires_approval() {
+        let decision = PolicyEngine::evaluate_shadow(
+            &ActionSpec::FileRead {
+                path: std::path::PathBuf::from("~/.ssh/id_ed25519"),
+            },
+            &public_model_context(),
+        );
+
+        assert_eq!(decision.sensitivity, DataSensitivity::Restricted);
+        assert_eq!(decision.category, ActionCategory::Destructive);
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::RestrictedSourceRead));
+    }
+
+    #[test]
+    fn structured_policy_decodes_restricted_file_urls_before_classification() {
+        let decision = PolicyEngine::evaluate(
+            &browser_navigate_to("file:///Users/jason/.ssh/id%5Fed25519"),
+            &public_model_context(),
+        );
+
+        assert_eq!(decision.sensitivity, DataSensitivity::Restricted);
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::RestrictedSourceRead));
+    }
+
+    #[test]
+    fn structured_policy_rejects_malformed_percent_encoded_file_urls() {
+        let decision = PolicyEngine::evaluate(
+            &browser_navigate_to("file:///Users/jason/Documents/report%ZZ.txt"),
+            &public_model_context(),
+        );
+
+        assert_eq!(decision.sensitivity, DataSensitivity::Unknown);
+        assert!(decision.approval_required);
+    }
+
+    #[test]
+    fn configured_restricted_path_matches_symlinked_descendants() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let restricted = temp.path().join("restricted");
+        std::fs::create_dir(&restricted).expect("create restricted dir");
+        let alias = temp.path().join("alias");
+        symlink(&restricted, &alias).expect("create symlink");
+        let requested = alias.join("nested").join("token.txt");
+
+        assert_eq!(
+            PolicyEngine::path_sensitivity(&requested, std::slice::from_ref(&restricted)),
+            DataSensitivity::Restricted
+        );
+
+        let context =
+            public_model_context().with_restricted_paths(std::slice::from_ref(&restricted));
+        let decision = PolicyEngine::evaluate(&ActionSpec::FileRead { path: requested }, &context);
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::RestrictedSourceRead));
+    }
+
+    #[test]
+    fn structured_shadow_restricted_read_alternate_lanes_require_approval() {
+        let context = public_model_context();
+        let shell_read =
+            PolicyEngine::evaluate_shadow(&shell(&["cat", "~/.ssh/id_ed25519"]), &context);
+        let browser_read = PolicyEngine::evaluate_shadow(
+            &browser_navigate_to("file:///Users/jason/.ssh/id_ed25519"),
+            &context,
+        );
+
+        for (name, decision) in [("shell", shell_read), ("browser", browser_read)] {
+            assert_eq!(
+                decision.sensitivity,
+                DataSensitivity::Restricted,
+                "{name}: sensitivity"
+            );
+            assert!(decision.approval_required, "{name}: approval");
+            assert!(
+                decision
+                    .reasons
+                    .contains(&PolicyReason::RestrictedSourceRead),
+                "{name}: restricted reason"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_policy_allows_ordinary_local_file_url_navigation() {
+        let decision = PolicyEngine::evaluate_shadow(
+            &browser_navigate_to("file:///private/tmp/dexter-fixture.html"),
+            &public_model_context(),
+        );
+        assert!(!decision.approval_required);
+        assert_eq!(decision.reach, Reach::Local);
+        assert_eq!(decision.sensitivity, DataSensitivity::OperatorPrivate);
+    }
+
+    #[test]
+    fn structured_shadow_curl_get_exposes_legacy_egress_gap() {
+        let spec = shell(&["curl", "https://example.com/?value=literal"]);
+        assert_eq!(PolicyEngine::classify(&spec), ActionCategory::Cautious);
+
+        let decision = PolicyEngine::evaluate_shadow(&spec, &public_model_context());
+        assert_eq!(decision.reach, Reach::ExternalRead);
+        assert_eq!(decision.category, ActionCategory::Destructive);
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::ModelGeneratedEgress));
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::ExternalDestination));
+    }
+
+    #[test]
+    fn structured_shadow_distinguishes_loopback_from_external_navigation() {
+        let context = public_model_context();
+        let loopback = PolicyEngine::evaluate_shadow(
+            &browser_navigate_to("http://127.0.0.1:8080/status"),
+            &context,
+        );
+        let external = PolicyEngine::evaluate_shadow(
+            &browser_navigate_to("https://example.com/status"),
+            &context,
+        );
+
+        assert_eq!(loopback.reach, Reach::Loopback);
+        assert_eq!(loopback.category, ActionCategory::Cautious);
+        assert!(!loopback.approval_required);
+        assert_eq!(external.reach, Reach::ExternalRead);
+        assert_eq!(external.category, ActionCategory::Destructive);
+        assert!(external.approval_required);
+    }
+
+    #[test]
+    fn structured_shadow_external_browser_mutations_use_live_origin_reach() {
+        let context = public_model_context();
+        let click = PolicyEngine::evaluate_shadow(&browser_click("#continue"), &context);
+        let type_text = PolicyEngine::evaluate_shadow(&browser_type("#query", "weather"), &context);
+        let extract = PolicyEngine::evaluate_shadow(&browser_extract(), &context);
+        let screenshot = PolicyEngine::evaluate_shadow(&browser_screenshot(), &context);
+
+        assert_eq!(click.reach, Reach::ExternalWrite);
+        assert!(click.approval_required);
+        assert_eq!(type_text.reach, Reach::ExternalWrite);
+        assert!(type_text.approval_required);
+        assert_eq!(extract.reach, Reach::ExternalRead);
+        assert!(extract.approval_required);
+        assert_eq!(screenshot.reach, Reach::ExternalRead);
+        assert!(screenshot.approval_required);
+    }
+
+    #[test]
+    fn structured_shadow_deterministic_operator_intent_authorizes_exact_destination() {
+        let spec = browser_navigate_to("https://example.com/operator-supplied");
+        let context = PolicyContext {
+            origin: ActionOrigin::DeterministicOperatorIntent,
+            visible_context_sensitivity: DataSensitivity::OperatorPrivate,
+            visible_context_trust: ContentTrust::Operator,
+            current_browser_origin: None,
+            operator_turn_id: "turn-exact-url".to_string(),
+            restricted_paths: Vec::new(),
+        };
+
+        let decision = PolicyEngine::evaluate_shadow(&spec, &context);
+        assert_eq!(decision.category, ActionCategory::Cautious);
+        assert!(!decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::DeterministicOperatorIntent));
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::OperatorLiteralDestination));
+    }
+
+    #[test]
+    fn structured_shadow_one_shot_approval_is_fingerprint_bound() {
+        let spec = browser_navigate_to("https://example.com/approved");
+        let initial = PolicyEngine::evaluate_shadow(&spec, &public_model_context());
+        let approved_context = PolicyContext {
+            origin: ActionOrigin::OperatorApproved {
+                fingerprint: initial.action_fingerprint.clone(),
+            },
+            visible_context_sensitivity: DataSensitivity::OperatorPrivate,
+            visible_context_trust: ContentTrust::Operator,
+            current_browser_origin: None,
+            operator_turn_id: "turn-structured-policy".to_string(),
+            restricted_paths: Vec::new(),
+        };
+        let approved = PolicyEngine::evaluate_shadow(&spec, &approved_context);
+        assert!(!approved.approval_required);
+        assert!(approved
+            .reasons
+            .contains(&PolicyReason::OneShotOperatorApproval));
+
+        let wrong_context = PolicyContext {
+            origin: ActionOrigin::OperatorApproved {
+                fingerprint: "wrong-fingerprint".to_string(),
+            },
+            ..approved_context
+        };
+        let rejected = PolicyEngine::evaluate_shadow(&spec, &wrong_context);
+        assert!(rejected.approval_required);
+        assert!(rejected
+            .reasons
+            .contains(&PolicyReason::PolicyEvaluationFailed));
+    }
+
+    #[test]
+    fn structured_shadow_one_shot_approval_authorizes_legacy_destructive_action() {
+        let spec = shell(&["rm", "-f", "/tmp/dexter-approved-test"]);
+        let initial = PolicyEngine::evaluate_shadow(&spec, &public_model_context());
+        assert!(initial.approval_required);
+
+        let approved_context = PolicyContext {
+            origin: ActionOrigin::OperatorApproved {
+                fingerprint: initial.action_fingerprint,
+            },
+            visible_context_sensitivity: DataSensitivity::Public,
+            visible_context_trust: ContentTrust::Operator,
+            current_browser_origin: None,
+            operator_turn_id: "turn-structured-policy".to_string(),
+            restricted_paths: Vec::new(),
+        };
+        let approved = PolicyEngine::evaluate_shadow(&spec, &approved_context);
+
+        assert!(!approved.approval_required);
+        assert_eq!(approved.category, ActionCategory::Cautious);
+        assert!(approved
+            .reasons
+            .contains(&PolicyReason::OneShotOperatorApproval));
+    }
+
+    #[test]
+    fn structured_shadow_fingerprint_changes_with_action_and_turn() {
+        let first_spec = browser_navigate_to("https://example.com/one");
+        let second_spec = browser_navigate_to("https://example.com/two");
+        let first_context = public_model_context();
+        let mut second_context = public_model_context();
+        second_context.operator_turn_id = "different-turn".to_string();
+
+        let first = PolicyEngine::evaluate_shadow(&first_spec, &first_context);
+        let changed_action = PolicyEngine::evaluate_shadow(&second_spec, &first_context);
+        let changed_turn = PolicyEngine::evaluate_shadow(&first_spec, &second_context);
+
+        assert_ne!(first.action_fingerprint, changed_action.action_fingerprint);
+        assert_ne!(first.action_fingerprint, changed_turn.action_fingerprint);
+    }
+
+    #[test]
+    fn structured_shadow_untrusted_external_context_cannot_authorize_mutation() {
+        let context = PolicyContext {
+            origin: ActionOrigin::ModelProposed,
+            visible_context_sensitivity: DataSensitivity::Public,
+            visible_context_trust: ContentTrust::ExternalUntrusted,
+            current_browser_origin: None,
+            operator_turn_id: "turn-untrusted-page".to_string(),
+            restricted_paths: Vec::new(),
+        };
+        let decision = PolicyEngine::evaluate_shadow(&local_ui_spec("toggle"), &context);
+
+        assert_eq!(decision.reach, Reach::Local);
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::UntrustedExternalContext));
+    }
+
+    #[test]
+    fn structured_shadow_reason_codes_are_stable_snake_case() {
+        let decision = PolicyEngine::evaluate_shadow(
+            &shell(&["curl", "https://example.com"]),
+            &public_model_context(),
+        );
+        let codes = decision.reason_codes();
+
+        assert!(codes.contains("external_destination"));
+        assert!(codes.contains("model_generated_egress"));
+        assert!(!codes.contains(' '));
+        assert!(!codes.contains('-'));
+    }
+
+    #[test]
+    fn structured_policy_staged_context_variants_have_stable_labels() {
+        assert_eq!(ContentTrust::Operator.as_str(), "operator");
+        assert_eq!(ContentTrust::LocalTrusted.as_str(), "local_trusted");
+        assert_eq!(ContentTrust::LocalObserved.as_str(), "local_observed");
+        assert_eq!(
+            ContentTrust::ExternalUntrusted.as_str(),
+            "external_untrusted"
+        );
+        assert_eq!(ContentTrust::ModelGenerated.as_str(), "model_generated");
+        assert_eq!(ContentTrust::Unknown.as_str(), "unknown");
+        assert_eq!(ActionOrigin::CoreRetrieval.as_str(), "core_retrieval");
+        assert_eq!(ActionOrigin::SystemInternal.as_str(), "system_internal");
     }
 }

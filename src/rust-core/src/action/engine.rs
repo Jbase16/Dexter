@@ -4,7 +4,7 @@
 ///
 /// ```text
 /// handle_text_input finds action block
-///   └─ ActionEngine::submit(spec, trace_id)
+///   └─ ActionEngine::submit_with_context(spec, trace_id, policy_context)
 ///        ├─ SAFE / CAUTIOUS  → execute_and_log → ActionOutcome::Completed
 ///        └─ DESTRUCTIVE      → store in pending_actions
 ///                            → ActionOutcome::PendingApproval
@@ -25,7 +25,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -39,9 +39,11 @@ use crate::{
 };
 
 use super::{
-    audit::{AuditEntry, AuditLog},
+    audit::{AuditEntry, AuditLog, PolicyAuditFields},
     executor,
-    policy::PolicyEngine,
+    policy::{
+        ActionOrigin, PolicyContext, PolicyDecision, PolicyEngine, STRUCTURED_POLICY_VERSION,
+    },
     ui_diagnostics,
 };
 
@@ -248,8 +250,9 @@ pub enum ActionOutcome {
 
 struct PendingAction {
     spec: ActionSpec,
-    #[allow(dead_code)] // trace_id reserved for Phase 9+ context injection
     trace_id: String,
+    policy_context: PolicyContext,
+    policy_decision: PolicyDecision,
     submitted_at: chrono::DateTime<Utc>,
     expires_at: chrono::DateTime<Utc>,
 }
@@ -263,6 +266,7 @@ pub struct ActionReceiptMetadata {
     pub description: String,
     pub action_type: &'static str,
     pub category: &'static str,
+    pub(crate) result_security: crate::context::PromptSecurity,
 }
 
 // ── ActionEngine ──────────────────────────────────────────────────────────────
@@ -274,6 +278,7 @@ pub struct ActionEngine {
     ambient: AmbientEventStore,
     pending_actions: HashMap<String, PendingAction>,
     browser: BrowserCoordinator, // Phase 14 — start_browser() called by server.rs
+    restricted_paths: Vec<PathBuf>,
 }
 
 /// Returns the appropriate shell timeout for a given args list.
@@ -338,13 +343,23 @@ impl ActionEngine {
     /// for an isolated coordinator.
     ///
     /// The audit file is not created until the first action is taken.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(state_dir: &std::path::Path, browser: BrowserCoordinator) -> Self {
+        Self::new_with_restricted_paths(state_dir, browser, Vec::new())
+    }
+
+    pub(crate) fn new_with_restricted_paths(
+        state_dir: &std::path::Path,
+        browser: BrowserCoordinator,
+        restricted_paths: Vec<PathBuf>,
+    ) -> Self {
         Self {
             state_dir: state_dir.to_path_buf(),
             audit: AuditLog::new_shared(state_dir),
             ambient: AmbientEventStore::new(state_dir),
             pending_actions: HashMap::new(),
             browser,
+            restricted_paths,
         }
     }
 
@@ -365,14 +380,127 @@ impl ActionEngine {
 
     /// Metadata needed to render a live action receipt after approval/denial.
     pub fn pending_receipt_metadata(&self, action_id: &str) -> Option<ActionReceiptMetadata> {
-        self.pending_actions.get(action_id).map(|pending| {
-            let category = PolicyEngine::classify(&pending.spec);
-            ActionReceiptMetadata {
-                description: Self::describe(&pending.spec),
+        self.pending_actions
+            .get(action_id)
+            .map(|pending| ActionReceiptMetadata {
+                description: Self::describe_for_approval(&pending.spec, &pending.policy_decision),
                 action_type: Self::type_str(&pending.spec),
-                category: Self::category_str(category),
+                category: Self::category_str(pending.policy_decision.category),
+                result_security: self.action_result_security(&pending.spec),
+            })
+    }
+
+    /// Build the Rust-owned context for an action emitted by the model.
+    pub(crate) fn model_policy_context(&self, operator_turn_id: &str) -> PolicyContext {
+        PolicyContext::model_proposed(operator_turn_id, self.current_browser_origin())
+            .with_restricted_paths(&self.restricted_paths)
+    }
+
+    pub(crate) fn model_policy_context_with_security(
+        &self,
+        operator_turn_id: &str,
+        security: crate::context::PromptSecurity,
+    ) -> PolicyContext {
+        self.model_policy_context(operator_turn_id)
+            .with_prompt_security(security.sensitivity, security.trust)
+    }
+
+    pub(crate) fn action_result_security(
+        &self,
+        spec: &ActionSpec,
+    ) -> crate::context::PromptSecurity {
+        use crate::context::{ContentTrust, DataSensitivity, PromptSecurity};
+
+        match spec {
+            ActionSpec::FileRead { path } => PromptSecurity::new(
+                PolicyEngine::path_sensitivity(path, &self.restricted_paths),
+                ContentTrust::LocalTrusted,
+            ),
+            ActionSpec::Browser {
+                action: BrowserActionKind::Extract { .. } | BrowserActionKind::Screenshot,
+                ..
+            } => {
+                let external = self.current_browser_origin().is_some_and(|origin| {
+                    matches!(
+                        origin.reach,
+                        super::policy::Reach::ExternalRead | super::policy::Reach::ExternalWrite
+                    )
+                });
+                if external {
+                    PromptSecurity::new(DataSensitivity::Public, ContentTrust::ExternalUntrusted)
+                } else {
+                    PromptSecurity::new(
+                        DataSensitivity::OperatorPrivate,
+                        ContentTrust::LocalTrusted,
+                    )
+                }
             }
-        })
+            ActionSpec::WindowInspect { .. } | ActionSpec::UiSnapshot { .. } => {
+                PromptSecurity::new(
+                    DataSensitivity::OperatorPrivate,
+                    ContentTrust::LocalObserved,
+                )
+            }
+            ActionSpec::Shell { .. }
+            | ActionSpec::FileWrite { .. }
+            | ActionSpec::AppleScript { .. }
+            | ActionSpec::MessageSend { .. }
+            | ActionSpec::WindowFocus { .. }
+            | ActionSpec::UiClick { .. }
+            | ActionSpec::UiType { .. }
+            | ActionSpec::UiSelect { .. }
+            | ActionSpec::UiToggle { .. }
+            | ActionSpec::UiPick { .. }
+            | ActionSpec::Browser { .. }
+            | ActionSpec::Shortcut { .. } => {
+                PromptSecurity::new(DataSensitivity::OperatorPrivate, ContentTrust::LocalTrusted)
+            }
+        }
+    }
+
+    fn current_browser_origin(&self) -> Option<super::policy::ValidatedOrigin> {
+        self.browser
+            .current_page_url()
+            .as_deref()
+            .map(PolicyEngine::validated_browser_origin)
+    }
+
+    /// Evaluate a model-emitted action before the orchestrator chooses between
+    /// background execution and the approval lifecycle.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn evaluate_model_action(
+        &self,
+        spec: &ActionSpec,
+        operator_turn_id: &str,
+    ) -> (PolicyContext, PolicyDecision) {
+        let context = self.model_policy_context(operator_turn_id);
+        let decision = PolicyEngine::evaluate(spec, &context);
+        (context, decision)
+    }
+
+    pub(crate) fn policy_audit_fields(
+        spec: &ActionSpec,
+        context: &PolicyContext,
+        decision: &PolicyDecision,
+    ) -> PolicyAuditFields {
+        PolicyAuditFields {
+            policy_version: Some(STRUCTURED_POLICY_VERSION),
+            policy_reasons: Some(
+                decision
+                    .reasons
+                    .iter()
+                    .map(|reason| reason.as_str().to_string())
+                    .collect(),
+            ),
+            effect: Some(decision.effect.as_str().to_string()),
+            reach: Some(decision.reach.as_str().to_string()),
+            sensitivity: Some(decision.sensitivity.as_str().to_string()),
+            context_trust: Some(context.visible_context_trust.as_str().to_string()),
+            reversibility: Some(decision.reversibility.as_str().to_string()),
+            action_origin: Some(context.origin.as_str().to_string()),
+            action_fingerprint: Some(decision.action_fingerprint.clone()),
+            external_destination: PolicyEngine::external_destination(spec),
+        }
     }
 
     // Phase 38c: `start_browser` removed — the browser worker is now spawned
@@ -408,12 +536,45 @@ impl ActionEngine {
     /// - DESTRUCTIVE → store in `pending_actions` → return `PendingApproval`
     ///   (caller must emit `ActionRequest` ServerEvent to Swift; execution follows
     ///   only when `resolve()` is called with `approved=true`)
+    #[cfg(test)]
     pub async fn submit(&mut self, spec: ActionSpec, trace_id: &str) -> ActionOutcome {
-        let action_id = Uuid::new_v4().to_string();
-        let category = PolicyEngine::classify(&spec);
+        let context = self.model_policy_context(trace_id);
+        self.submit_with_context(spec, trace_id, context).await
+    }
 
-        if category == ActionCategory::Destructive {
-            let description = Self::describe(&spec);
+    /// Submit with Rust-owned provenance supplied by the caller.
+    pub(crate) async fn submit_with_context(
+        &mut self,
+        spec: ActionSpec,
+        trace_id: &str,
+        policy_context: PolicyContext,
+    ) -> ActionOutcome {
+        let action_id = Uuid::new_v4().to_string();
+        let legacy_category = PolicyEngine::classify(&spec);
+        let policy_decision = PolicyEngine::evaluate(&spec, &policy_context);
+        let category = policy_decision.category;
+        if category != legacy_category {
+            debug!(
+                action_id = %action_id,
+                trace_id,
+                action_type = Self::type_str(&spec),
+                policy_version = STRUCTURED_POLICY_VERSION,
+                legacy_category = Self::category_str(legacy_category),
+                policy_category = Self::category_str(category),
+                policy_approval_required = policy_decision.approval_required,
+                policy_effect = policy_decision.effect.as_str(),
+                policy_reach = policy_decision.reach.as_str(),
+                policy_sensitivity = policy_decision.sensitivity.as_str(),
+                policy_reversibility = policy_decision.reversibility.as_str(),
+                policy_context_trust = policy_context.visible_context_trust.as_str(),
+                policy_action_origin = policy_context.origin.as_str(),
+                policy_reasons = %policy_decision.reason_codes(),
+                "Structured policy decision differs from legacy category"
+            );
+        }
+
+        if policy_decision.approval_required {
+            let description = Self::describe_for_approval(&spec, &policy_decision);
             let submitted_at = Utc::now();
             let timeout_secs = approval_timeout_secs();
             let expires_at = submitted_at + chrono::Duration::seconds(timeout_secs as i64);
@@ -438,6 +599,8 @@ impl ActionEngine {
                 PendingAction {
                     spec,
                     trace_id: trace_id.to_string(),
+                    policy_context,
+                    policy_decision,
                     submitted_at,
                     expires_at,
                 },
@@ -452,7 +615,8 @@ impl ActionEngine {
         }
 
         // SAFE or CAUTIOUS — execute immediately.
-        self.execute_and_log(&action_id, &spec, category, None)
+        let policy = Self::policy_audit_fields(&spec, &policy_context, &policy_decision);
+        self.execute_and_log(&action_id, &spec, category, None, policy)
             .await
     }
 
@@ -490,7 +654,7 @@ impl ActionEngine {
                 note = %operator_note,
                 "ActionApproval arrived after approval deadline — refusing execution"
             );
-            let category = PolicyEngine::classify(&pending.spec);
+            let category = pending.policy_decision.category;
             let entry = AuditEntry {
                 timestamp: now.to_rfc3339(),
                 action_id,
@@ -503,6 +667,11 @@ impl ActionEngine {
                 error: Some("approval expired before operator response".to_string()),
                 duration_ms: None,
                 operator_approved: Some(false),
+                policy: Self::policy_audit_fields(
+                    &pending.spec,
+                    &pending.policy_context,
+                    &pending.policy_decision,
+                ),
             };
             let guard = self.audit.lock().await;
             if let Err(e) = guard.append(&entry) {
@@ -521,7 +690,7 @@ impl ActionEngine {
                 note      = %operator_note,
                 "Action rejected by operator"
             );
-            let category = PolicyEngine::classify(&pending.spec);
+            let category = pending.policy_decision.category;
             let entry = AuditEntry {
                 timestamp: Utc::now().to_rfc3339(),
                 action_id,
@@ -534,6 +703,11 @@ impl ActionEngine {
                 error: None,
                 duration_ms: None,
                 operator_approved: Some(false),
+                policy: Self::policy_audit_fields(
+                    &pending.spec,
+                    &pending.policy_context,
+                    &pending.policy_decision,
+                ),
             };
             let guard = self.audit.lock().await;
             if let Err(e) = guard.append(&entry) {
@@ -546,10 +720,63 @@ impl ActionEngine {
             };
         }
 
-        info!(action_id = %action_id, "Operator approved DESTRUCTIVE action — executing");
-        let category = PolicyEngine::classify(&pending.spec);
-        self.execute_and_log(action_id, &pending.spec, category, Some(true))
-            .await
+        let mut approved_context =
+            pending
+                .policy_context
+                .with_origin(ActionOrigin::OperatorApproved {
+                    fingerprint: pending.policy_decision.action_fingerprint.clone(),
+                });
+        approved_context.current_browser_origin = self.current_browser_origin();
+        let approved_decision = PolicyEngine::evaluate(&pending.spec, &approved_context);
+        if approved_decision.approval_required
+            || approved_decision.action_fingerprint != pending.policy_decision.action_fingerprint
+        {
+            error!(
+                action_id = %action_id,
+                trace_id = %pending.trace_id,
+                "Approved action fingerprint failed revalidation — refusing execution"
+            );
+            let entry = AuditEntry {
+                timestamp: Utc::now().to_rfc3339(),
+                action_id,
+                r#type: Self::type_str(&pending.spec),
+                category: Self::category_str(pending.policy_decision.category),
+                spec_json: Self::spec_to_audit_json(&pending.spec),
+                outcome: "rejected",
+                exit_code: None,
+                output_preview: None,
+                error: Some("approved action failed policy fingerprint revalidation".to_string()),
+                duration_ms: None,
+                operator_approved: Some(true),
+                policy: Self::policy_audit_fields(
+                    &pending.spec,
+                    &approved_context,
+                    &approved_decision,
+                ),
+            };
+            let guard = self.audit.lock().await;
+            if let Err(e) = guard.append(&entry) {
+                error!(action_id = %action_id, error = %e, "Audit log append failed");
+            }
+            drop(guard);
+            self.record_action_audit_event(&entry, &pending.spec);
+            return ActionOutcome::Rejected {
+                action_id: action_id.to_string(),
+                error: "approved action failed policy fingerprint revalidation".to_string(),
+            };
+        }
+        info!(
+            action_id = %action_id,
+            "Operator approved DESTRUCTIVE action — executing exact stored spec"
+        );
+        self.execute_and_log(
+            action_id,
+            &pending.spec,
+            pending.policy_decision.category,
+            Some(true),
+            Self::policy_audit_fields(&pending.spec, &approved_context, &approved_decision),
+        )
+        .await
     }
 
     /// Write audit entries for any remaining pending actions and clear the map.
@@ -561,7 +788,7 @@ impl ActionEngine {
         let ambient = self.ambient.clone();
         let guard = self.audit.lock().await;
         for (action_id, pending) in self.pending_actions.drain() {
-            let category = PolicyEngine::classify(&pending.spec);
+            let category = pending.policy_decision.category;
             let entry = AuditEntry {
                 timestamp: Utc::now().to_rfc3339(),
                 action_id: &action_id,
@@ -574,6 +801,11 @@ impl ActionEngine {
                 error: Some("session ended before operator responded".to_string()),
                 duration_ms: None,
                 operator_approved: None, // null = session ended, not an explicit rejection
+                policy: Self::policy_audit_fields(
+                    &pending.spec,
+                    &pending.policy_context,
+                    &pending.policy_decision,
+                ),
             };
             if let Err(e) = guard.append(&entry) {
                 error!(
@@ -618,6 +850,7 @@ impl ActionEngine {
         spec: &ActionSpec,
         category: ActionCategory,
         operator_approved: Option<bool>,
+        policy: PolicyAuditFields,
     ) -> ActionOutcome {
         let result = match spec {
             ActionSpec::Shell {
@@ -808,6 +1041,7 @@ impl ActionEngine {
             },
             duration_ms: Some(result.duration_ms),
             operator_approved,
+            policy,
         };
 
         {
@@ -850,6 +1084,32 @@ impl ActionEngine {
     }
 
     /// Human-readable action description for `ActionRequest.description` in the UI.
+    pub(crate) fn describe_for_approval(spec: &ActionSpec, decision: &PolicyDecision) -> String {
+        let action = match spec {
+            ActionSpec::Shell { args, .. }
+                if decision.reach != super::policy::Reach::Local
+                    && decision.reach != super::policy::Reach::Loopback =>
+            {
+                let executable = args
+                    .first()
+                    .and_then(|arg| std::path::Path::new(arg).file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("<unknown>");
+                format!("Run command: {executable}")
+            }
+            _ => Self::describe(spec),
+        };
+        let destination = PolicyEngine::external_destination(spec)
+            .map(|value| format!("\nDestination: {value}"))
+            .unwrap_or_default();
+        format!(
+            "{action}{destination}\nData sensitivity: {}\nReview reason: {}",
+            decision.sensitivity.as_str(),
+            decision.reason_codes()
+        )
+    }
+
+    /// Human-readable action description for receipts and non-approval status.
     pub(crate) fn describe(spec: &ActionSpec) -> String {
         match spec {
             ActionSpec::Shell { args, .. } => {
@@ -1125,8 +1385,9 @@ impl ActionEngine {
                 rationale,
                 ..
             } => {
+                let audit_args = PolicyEngine::audit_safe_shell_args(args);
                 serde_json::json!({
-                    "args":        args,
+                    "args":        audit_args,
                     "working_dir": working_dir,
                     "rationale":   rationale,
                 })
@@ -1339,6 +1600,7 @@ impl ActionEngine {
             error: Some(error.to_string()),
             duration_ms: None,
             operator_approved: None,
+            policy: PolicyAuditFields::default(),
         };
         {
             let guard = self.audit.lock().await;
@@ -1447,6 +1709,7 @@ impl ExecutorHandle {
         spec: &ActionSpec,
         category: ActionCategory,
         operator_approved: Option<bool>,
+        policy: PolicyAuditFields,
     ) -> ActionOutcome {
         // For Shell actions: compute the display form of the normalized BSD command
         // BEFORE execution. If the model generated GNU-style ps flags, the executor
@@ -1648,6 +1911,7 @@ impl ExecutorHandle {
             },
             duration_ms: Some(result.duration_ms),
             operator_approved,
+            policy,
         };
 
         {
@@ -1928,6 +2192,19 @@ mod tests {
         assert_eq!(audit["rationale"], "structured send");
     }
 
+    #[test]
+    fn shell_audit_omits_arbitrary_argument_values() {
+        let spec = ActionSpec::Shell {
+            args: vec!["echo".to_string(), "test-secret-value".to_string()],
+            working_dir: None,
+            rationale: None,
+            category_override: None,
+        };
+        let audit = ActionEngine::spec_to_audit_json(&spec).to_string();
+        assert!(!audit.contains("test-secret-value"));
+        assert!(audit.contains("arguments omitted"));
+    }
+
     #[tokio::test]
     async fn message_send_preflight_failure_writes_redacted_audit_receipt() {
         let tmp = tempdir().unwrap();
@@ -2170,21 +2447,158 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_send_fails_closed_if_it_reaches_action_engine() {
+    async fn message_send_requires_approval_if_it_reaches_action_engine() {
         let tmp = tempdir().unwrap();
         let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
         let outcome = engine
             .submit(make_message_send(), "trace-message-send")
             .await;
         match outcome {
-            ActionOutcome::Rejected { error, .. } => {
-                assert!(
-                    error.contains("must be resolved by the orchestrator"),
-                    "unexpected error: {error}"
-                );
+            ActionOutcome::PendingApproval { category, .. } => {
+                assert_eq!(category, ActionCategory::Destructive);
             }
-            other => panic!("message_send must not execute generically: {other:?}"),
+            other => panic!("message_send must require approval: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn external_curl_get_requires_approval_and_redacts_query_from_copy() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let spec = ActionSpec::Shell {
+            args: vec![
+                "curl".to_string(),
+                "https://example.invalid/collect?k=test-secret".to_string(),
+            ],
+            working_dir: None,
+            rationale: None,
+            category_override: None,
+        };
+
+        let outcome = engine.submit(spec, "trace-curl-get").await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval {
+                action_id,
+                category,
+                description,
+                ..
+            } => {
+                assert_eq!(category, ActionCategory::Destructive);
+                assert!(description.contains("Destination: https://example.invalid"));
+                assert!(!description.contains("test-secret"));
+                assert!(description.contains("model_generated_egress"));
+                action_id
+            }
+            other => panic!("external curl GET must require approval: {other:?}"),
+        };
+        let denied = engine.resolve(&action_id, false, "denied by test").await;
+        assert!(matches!(denied, ActionOutcome::Rejected { .. }));
+        let audit = std::fs::read_to_string(tmp.path().join(crate::constants::AUDIT_LOG_FILENAME))
+            .expect("denial should write audit row");
+        assert!(!audit.contains("test-secret"));
+        assert!(audit.contains("https://example.invalid"));
+    }
+
+    #[tokio::test]
+    async fn unknown_shell_reach_requires_approval() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let spec = ActionSpec::Shell {
+            args: vec!["project-tool".to_string(), "--inspect".to_string()],
+            working_dir: None,
+            rationale: None,
+            category_override: None,
+        };
+
+        let outcome = engine.submit(spec, "trace-unknown-shell").await;
+        assert!(
+            matches!(
+                outcome,
+                ActionOutcome::PendingApproval {
+                    category: ActionCategory::Destructive,
+                    ..
+                }
+            ),
+            "unknown shell reach must fail closed: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_file_read_requires_approval_before_exposure() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let outcome = engine
+            .submit(
+                ActionSpec::FileRead {
+                    path: PathBuf::from("~/.ssh/id_rsa"),
+                },
+                "trace-restricted-read",
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                ActionOutcome::PendingApproval {
+                    category: ActionCategory::Destructive,
+                    ..
+                }
+            ),
+            "restricted file read must require approval: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_revalidates_exact_stored_fingerprint() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let outcome = engine
+            .submit(make_destructive_shell(), "trace-fingerprint-revalidation")
+            .await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval { action_id, .. } => action_id,
+            other => panic!("expected pending action, got: {other:?}"),
+        };
+
+        let pending = engine
+            .pending_actions
+            .get_mut(&action_id)
+            .expect("pending action must exist");
+        pending.spec = make_safe_shell();
+
+        let outcome = engine.resolve(&action_id, true, "approved by test").await;
+        match outcome {
+            ActionOutcome::Rejected { error, .. } => {
+                assert!(error.contains("fingerprint revalidation"));
+            }
+            other => panic!("changed stored action must not execute: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_origin_change_invalidates_pending_page_mutation() {
+        let tmp = tempdir().unwrap();
+        let browser = BrowserCoordinator::new_degraded();
+        browser.set_current_page_url_for_test("https://first.example/account");
+        let mut engine = ActionEngine::new(tmp.path(), browser.clone());
+        let spec = ActionSpec::Browser {
+            action: BrowserActionKind::Click {
+                selector: "#continue".to_string(),
+            },
+            rationale: None,
+            category_override: None,
+        };
+        let outcome = engine.submit(spec, "trace-browser-origin").await;
+        let action_id = match outcome {
+            ActionOutcome::PendingApproval { action_id, .. } => action_id,
+            other => panic!("external browser click must pend: {other:?}"),
+        };
+
+        browser.set_current_page_url_for_test("https://second.example/account");
+        let outcome = engine.resolve(&action_id, true, "approved by test").await;
+        assert!(
+            matches!(outcome, ActionOutcome::Rejected { .. }),
+            "approval must not transfer across browser origins: {outcome:?}"
+        );
     }
 
     #[tokio::test]
@@ -2247,7 +2661,10 @@ mod tests {
         let metadata = engine
             .pending_receipt_metadata(&action_id)
             .expect("pending action should have receipt metadata");
-        assert_eq!(metadata.description, "Run: echo pending-description");
+        assert!(metadata
+            .description
+            .starts_with("Run: echo pending-description"));
+        assert!(metadata.description.contains("consequential_local_effect"));
         assert_eq!(metadata.action_type, "shell");
         assert_eq!(metadata.category, "destructive");
         assert!(engine.pending_receipt_metadata("missing-action").is_none());
@@ -2304,10 +2721,29 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
         let spec = make_cautious_file_write(tmp.path());
+        let context = engine
+            .model_policy_context("trace-002")
+            .with_prompt_security(
+                crate::context::DataSensitivity::OperatorPrivate,
+                crate::context::ContentTrust::Operator,
+            );
 
-        let outcome = engine.submit(spec, "trace-002").await;
+        let outcome = engine.submit_with_context(spec, "trace-002", context).await;
         assert!(
             matches!(outcome, ActionOutcome::Completed { .. }),
+            "got: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_local_mutation_with_unknown_context_fails_closed() {
+        let tmp = tempdir().unwrap();
+        let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
+        let spec = make_cautious_file_write(tmp.path());
+
+        let outcome = engine.submit(spec, "trace-unknown-context").await;
+        assert!(
+            matches!(outcome, ActionOutcome::PendingApproval { .. }),
             "got: {outcome:?}"
         );
     }
@@ -2377,6 +2813,19 @@ mod tests {
             0,
             "must be removed from pending_actions"
         );
+        let audit = std::fs::read_to_string(tmp.path().join(crate::constants::AUDIT_LOG_FILENAME))
+            .expect("approved action should write audit evidence");
+        let row: serde_json::Value =
+            serde_json::from_str(audit.lines().last().expect("audit row")).unwrap();
+        assert_eq!(row["policy_version"], STRUCTURED_POLICY_VERSION);
+        assert_eq!(row["action_origin"], "operator_approved");
+        assert_eq!(row["effect"], "observe");
+        assert_eq!(row["reach"], "local");
+        assert_eq!(row["context_trust"], "unknown");
+        assert_eq!(row["operator_approved"], true);
+        assert!(row["action_fingerprint"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
     }
 
     #[tokio::test]

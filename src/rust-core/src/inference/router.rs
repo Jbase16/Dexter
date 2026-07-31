@@ -1020,6 +1020,17 @@ impl ConversationContext {
         self.messages.push(Message::assistant(content));
     }
 
+    pub(crate) fn push_assistant_with_security(
+        &mut self,
+        content: impl Into<String>,
+        sensitivity: crate::context::DataSensitivity,
+    ) {
+        self.messages.push(
+            Message::assistant(content)
+                .with_security(sensitivity, crate::context::ContentTrust::ModelGenerated),
+        );
+    }
+
     /// Replace the system message. If a system message already exists at index 0,
     /// it is replaced. Otherwise one is prepended.
     ///
@@ -1066,11 +1077,26 @@ impl ConversationContext {
     /// Does NOT call `trim_if_needed()` — these synthetic "user" messages represent
     /// tool-result injections, not operator turns, and must not be counted toward
     /// the `max_turns` budget or evicted by it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn push_tool_result(&mut self, content: &str) {
         // Phase 37.7: use `Message::tool_result` so the pushed message carries
         // `MessageOrigin::ToolResult`. `turn_count()` skips these, so they can
         // accumulate without evicting real operator history.
         self.messages.push(Message::tool_result(content));
+    }
+
+    pub(crate) fn push_tool_result_with_security(
+        &mut self,
+        content: &str,
+        sensitivity: crate::context::DataSensitivity,
+        trust: crate::context::ContentTrust,
+    ) {
+        self.messages
+            .push(Message::tool_result(content).with_security(sensitivity, trust));
+    }
+
+    pub(crate) fn push_retrieval(&mut self, content: impl Into<String>) {
+        self.messages.push(Message::retrieval(content));
     }
 
     /// Clear all messages except the system message (if any).

@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod ledger;
 pub mod prompt_manifest;
 pub mod representation;
+pub mod security;
 pub mod turn_record;
 
 pub(crate) use candidate::{
@@ -20,3 +21,4 @@ pub(crate) use candidate::{
 pub(crate) use compiler::{ContextCompiler, ContextCompilerConfig};
 pub(crate) use prompt_manifest::PromptAssemblyDiagnostics;
 pub(crate) use representation::{CandidateRepresentation, RepresentationKind};
+pub(crate) use security::{ContentTrust, DataSensitivity, PromptSecurity};

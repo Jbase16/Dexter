@@ -720,7 +720,9 @@ impl CoreService {
         // Phase 38c: construct daemon-lifetime shared state and spawn the
         // startup warmup task BEFORE any session can connect. New sessions
         // inherit clones of this state and skip warmup entirely.
-        let shared = crate::orchestrator::SharedDaemonState::new_degraded();
+        let mut shared = crate::orchestrator::SharedDaemonState::new_degraded();
+        shared.stt_ready = stt_ready.clone();
+        shared.stt_prewarm_complete = stt_prewarm_complete.clone();
         let shared_for_warmup = shared.clone();
         let cfg_for_warmup = cfg.clone();
         let stt_ready_for_summary = stt_ready.clone();

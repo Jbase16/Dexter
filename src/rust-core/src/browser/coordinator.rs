@@ -36,6 +36,7 @@ pub struct BrowserCoordinator {
     is_available: Arc<AtomicBool>,
     restart_count: Arc<AtomicU32>,
     last_failure: Arc<StdMutex<Option<BrowserDiagnostic>>>,
+    current_page_url: Arc<StdMutex<Option<String>>>,
 }
 
 impl BrowserCoordinator {
@@ -47,6 +48,7 @@ impl BrowserCoordinator {
             is_available: Arc::new(AtomicBool::new(false)),
             restart_count: Arc::new(AtomicU32::new(0)),
             last_failure: Arc::new(StdMutex::new(None)),
+            current_page_url: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -108,6 +110,39 @@ impl BrowserCoordinator {
                     "browser diagnostic state lock is poisoned",
                 ))
             })
+    }
+
+    /// Last page URL reported by the browser worker.
+    ///
+    /// The value is worker-observed state, not model text. Policy uses it only
+    /// after Rust parses and classifies the origin.
+    pub(crate) fn current_page_url(&self) -> Option<String> {
+        self.current_page_url
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or(None)
+    }
+
+    fn update_current_page_url_from_result(&self, payload: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        let Some(page_url) = value
+            .get("page_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        else {
+            return;
+        };
+        if let Ok(mut guard) = self.current_page_url.lock() {
+            *guard = Some(page_url.to_string());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_current_page_url_for_test(&self, url: &str) {
+        self.update_current_page_url_from_result(&serde_json::json!({"page_url": url}).to_string());
     }
 
     #[cfg(test)]
@@ -196,7 +231,12 @@ impl BrowserCoordinator {
         // Lock guard dropped here.
 
         match read_result {
-            Ok(inner) => inner,
+            Ok(inner) => {
+                if let Ok(payload) = &inner {
+                    self.update_current_page_url_from_result(payload);
+                }
+                inner
+            }
             Err(_elapsed) => {
                 // Phase 38 / Codex finding [15]: timed-out browser commands leave
                 // a stale request in the worker's queue. The next execute() call
@@ -333,6 +373,19 @@ mod tests {
         let a = Arc::clone(&c.is_available);
         a.store(true, Ordering::Relaxed);
         assert!(c.is_available());
+    }
+
+    #[test]
+    fn worker_reported_page_url_is_shared_as_policy_state() {
+        let coordinator = BrowserCoordinator::new_degraded();
+        let clone = coordinator.clone();
+        coordinator.update_current_page_url_from_result(
+            r#"{"success":true,"page_url":"https://example.com/account?token=secret"}"#,
+        );
+        assert_eq!(
+            clone.current_page_url().as_deref(),
+            Some("https://example.com/account?token=secret")
+        );
     }
 
     #[tokio::test]

@@ -24,6 +24,34 @@ use crate::constants::{AUDIT_LOG_FILENAME, AUDIT_OUTPUT_PREVIEW_CHARS};
 
 use super::ui_diagnostics::ui_failure_summary;
 
+/// Backward-compatible structured policy evidence attached to new audit rows.
+///
+/// Flattening keeps the JSONL schema easy to query while `skip_serializing_if`
+/// lets older/non-policy producers omit every field.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PolicyAuditFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_reasons: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reach: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_trust: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reversibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_destination: Option<String>,
+}
+
 // ── AuditLog ──────────────────────────────────────────────────────────────────
 
 pub struct AuditLog {
@@ -125,6 +153,9 @@ pub struct AuditEntry<'a> {
     pub duration_ms: Option<u64>,
     /// Whether the operator explicitly approved this action (DESTRUCTIVE only).
     pub operator_approved: Option<bool>,
+    /// Versioned structured policy evidence. Optional for old/provisional rows.
+    #[serde(flatten)]
+    pub policy: PolicyAuditFields,
 }
 
 impl AuditEntry<'_> {
@@ -475,6 +506,7 @@ mod tests {
             error: None,
             duration_ms: Some(12),
             operator_approved: None,
+            policy: PolicyAuditFields::default(),
         }
     }
 
@@ -554,6 +586,7 @@ mod tests {
             error: Some("approval expired before operator response".to_string()),
             duration_ms: None,
             operator_approved: Some(false),
+            policy: PolicyAuditFields::default(),
         };
         log.append(&expired).unwrap();
 
@@ -590,6 +623,7 @@ mod tests {
             ),
             duration_ms: Some(10),
             operator_approved: None,
+            policy: PolicyAuditFields::default(),
         };
         log.append(&entry).unwrap();
 
@@ -626,6 +660,7 @@ mod tests {
             ),
             duration_ms: Some(10),
             operator_approved: None,
+            policy: PolicyAuditFields::default(),
         };
         log.append(&entry).unwrap();
 

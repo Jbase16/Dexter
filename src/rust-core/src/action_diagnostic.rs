@@ -492,6 +492,7 @@ mod tests {
             error,
             duration_ms: Some(1),
             operator_approved,
+            policy: crate::action::audit::PolicyAuditFields::default(),
         };
         log.append(&entry).unwrap();
     }

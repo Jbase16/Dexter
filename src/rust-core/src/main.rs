@@ -81,8 +81,15 @@ async fn main() -> Result<()> {
     let startup_disk = diagnostics::collect_operator_disk_health(&cfg.core.state_dir);
     diagnostics::log_disk_health(&startup_disk);
 
+    let runtime = system::runtime::RuntimeAttestation::current();
     info!(
         version     = constants::CORE_VERSION,
+        process_id  = runtime.process_id,
+        executable  = %runtime.executable_path,
+        binary_size_bytes = ?runtime.executable_size_bytes,
+        binary_modified_unix_ms = ?runtime.executable_modified_unix_ms,
+        binary_blake3 = ?runtime.executable_blake3,
+        runtime_identity = %runtime.identity,
         socket      = %cfg.core.socket_path,
         config_dir  = %dirs::home_dir()
             .unwrap_or_default()

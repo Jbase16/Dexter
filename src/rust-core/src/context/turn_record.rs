@@ -13,6 +13,7 @@ use super::{
     TaskClass,
 };
 use crate::action::{ActionOutcome, ActionSpec};
+use crate::system::runtime::RuntimeAttestation;
 
 const SCHEMA_VERSION: &str = "context_turn_record_v1";
 const USER_PREVIEW_CHARS: usize = 180;
@@ -45,6 +46,10 @@ pub struct ContextTurnRecord {
     pub turn_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default = "RuntimeAttestation::current")]
+    pub runtime: RuntimeAttestation,
+    #[serde(default)]
+    pub evidence: Vec<EvidenceRecord>,
     pub task_class: TaskClass,
     pub route_category: Option<String>,
     pub model: Option<String>,
@@ -55,6 +60,30 @@ pub struct ContextTurnRecord {
     pub action: Option<ActionRecord>,
     pub outcome_label: TurnOutcomeLabel,
     pub close_reason: TurnCloseReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRecord {
+    pub source: String,
+    pub observed_at: DateTime<Utc>,
+    pub detail: String,
+    pub payload_hash: Option<String>,
+}
+
+impl EvidenceRecord {
+    pub fn new(source: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            observed_at: Utc::now(),
+            detail: detail.into(),
+            payload_hash: None,
+        }
+    }
+
+    pub fn with_payload_hash(mut self, payload: &str) -> Self {
+        self.payload_hash = Some(fingerprint(payload));
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +179,7 @@ pub struct TurnDispatchInput {
     pub model: Option<String>,
     pub user_text: String,
     pub context_diagnostics: CompiledContextDiagnostics,
+    pub evidence: Vec<EvidenceRecord>,
 }
 
 pub struct TurnRecordAggregator {
@@ -175,6 +205,8 @@ impl TurnRecordAggregator {
             turn_id: input.turn_id,
             created_at: now,
             updated_at: now,
+            runtime: RuntimeAttestation::current(),
+            evidence: input.evidence,
             task_class: input.task_class,
             route_category: input.route_category,
             model: input.model,
@@ -221,6 +253,21 @@ impl TurnRecordAggregator {
             record.outcome_label = TurnOutcomeLabel::UserCancelled;
             record.close_reason = TurnCloseReason::BargeIn;
         }
+        let cloned = record.clone();
+        self.write_record(&cloned)
+    }
+
+    pub fn attach_evidence(
+        &mut self,
+        trace_id: &str,
+        evidence: EvidenceRecord,
+    ) -> Result<(), TurnRecordError> {
+        let record = self
+            .records
+            .get_mut(trace_id)
+            .ok_or_else(|| TurnRecordError::MissingTrace(trace_id.to_string()))?;
+        record.updated_at = Utc::now();
+        record.evidence.push(evidence);
         let cloned = record.clone();
         self.write_record(&cloned)
     }
@@ -661,6 +708,7 @@ mod tests {
             model: Some("qwen3:8b".to_string()),
             user_text: "explain this".to_string(),
             context_diagnostics: diagnostics_with_secret(),
+            evidence: Vec::new(),
         }
     }
 
@@ -673,12 +721,54 @@ mod tests {
         let path = recorder.record_path_for_trace("trace-start");
         let record: ContextTurnRecord = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(record.trace_id, "trace-start");
+        assert_eq!(record.runtime.process_id, std::process::id());
+        assert_eq!(record.runtime.identity.len(), 16);
+        assert!(record.evidence.is_empty());
         assert_eq!(
             record.privacy_mode,
             TurnRecordPrivacyMode::RedactedPreviewV1
         );
         assert_eq!(record.close_reason, TurnCloseReason::Open);
         assert!(record.generation.is_none());
+    }
+
+    #[test]
+    fn start_turn_persists_hashed_evidence_without_raw_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = TurnRecordAggregator::new(tmp.path());
+        let mut input = dispatch_input("trace-evidence");
+        input.evidence = vec![
+            EvidenceRecord::new("screen_capture", "fresh screenshot attached")
+                .with_payload_hash("private-image-bytes"),
+        ];
+
+        recorder.start_turn(input).unwrap();
+
+        let bytes = fs::read(recorder.record_path_for_trace("trace-evidence")).unwrap();
+        let serialized = String::from_utf8(bytes.clone()).unwrap();
+        let record: ContextTurnRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record.evidence.len(), 1);
+        assert_eq!(record.evidence[0].source, "screen_capture");
+        assert_eq!(
+            record.evidence[0].payload_hash.as_deref(),
+            Some(fingerprint("private-image-bytes").as_str())
+        );
+        assert!(!serialized.contains("private-image-bytes"));
+    }
+
+    #[test]
+    fn older_turn_record_without_runtime_field_remains_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = TurnRecordAggregator::new(tmp.path());
+        recorder.start_turn(dispatch_input("trace-legacy")).unwrap();
+        let path = recorder.record_path_for_trace("trace-legacy");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("runtime");
+
+        let record: ContextTurnRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.runtime.process_id, std::process::id());
+        assert_eq!(record.runtime.identity.len(), 16);
     }
 
     #[test]
@@ -710,6 +800,32 @@ mod tests {
         assert_eq!(generation.prompt_eval_count, Some(42));
         assert_eq!(generation.prompt_eval_ms, Some(250));
         assert_eq!(generation.output_hash, fingerprint("hello world"));
+    }
+
+    #[test]
+    fn attach_evidence_updates_existing_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = TurnRecordAggregator::new(tmp.path());
+        recorder.start_turn(dispatch_input("trace-source")).unwrap();
+
+        recorder
+            .attach_evidence(
+                "trace-source",
+                EvidenceRecord::new("macos_top_process_sample", "rows=5")
+                    .with_payload_hash("canonical rows"),
+            )
+            .unwrap();
+
+        let record: ContextTurnRecord = serde_json::from_slice(
+            &fs::read(recorder.record_path_for_trace("trace-source")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.evidence.len(), 1);
+        assert_eq!(record.evidence[0].source, "macos_top_process_sample");
+        assert_eq!(
+            record.evidence[0].payload_hash,
+            Some(fingerprint("canonical rows"))
+        );
     }
 
     #[test]

@@ -634,7 +634,9 @@ impl PersonalityLayer {
                 // operator-specified identity and tone aren't overridden by later context.
                 let merged_content =
                     format!("{personality_prompt}\n\n{}", first.content.trim_start());
-                result.push(Message::system(merged_content));
+                result.push(
+                    Message::system(merged_content).with_security(first.sensitivity, first.trust),
+                );
                 result.extend_from_slice(&messages[1..]);
             }
             _ => {
@@ -732,6 +734,25 @@ mod tests {
             "personality prompt must precede operator-added system context"
         );
         assert_eq!(result[1].role, "user");
+    }
+
+    #[test]
+    fn apply_to_messages_preserves_existing_system_security_labels() {
+        let layer = defaults();
+        let messages = vec![
+            Message::system("restricted local context").with_security(
+                crate::context::DataSensitivity::Restricted,
+                crate::context::ContentTrust::LocalTrusted,
+            ),
+            Message::user("Continue"),
+        ];
+        let result = layer.apply_to_messages(&messages);
+
+        assert_eq!(
+            result[0].sensitivity,
+            crate::context::DataSensitivity::Restricted
+        );
+        assert_eq!(result[0].trust, crate::context::ContentTrust::LocalTrusted);
     }
 
     #[test]

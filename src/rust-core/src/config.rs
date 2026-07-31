@@ -459,6 +459,14 @@ pub struct BehaviorConfig {
     /// Matching is case-insensitive and whole-word. Empty by default.
     #[serde(default)]
     pub operator_self_aliases: Vec<String>,
+
+    /// Additional local paths whose contents must be treated as restricted.
+    ///
+    /// Paths are expanded, normalized, and symlink-resolved by the same Rust
+    /// helper used immediately before filesystem execution. A configured
+    /// directory covers all descendants.
+    #[serde(default)]
+    pub restricted_paths: Vec<std::path::PathBuf>,
 }
 
 fn default_behavior_proactive_enabled() -> bool {
@@ -480,6 +488,7 @@ impl Default for BehaviorConfig {
             proactive_excluded_bundles: vec![],
             operator_self_handle: None,
             operator_self_aliases: vec![],
+            restricted_paths: vec![],
         }
     }
 }
@@ -786,6 +795,26 @@ mod tests {
         assert!(
             cfg.proactive_excluded_bundles.is_empty(),
             "excluded_bundles must default to empty (Phase 17 parity — no apps blocked)"
+        );
+    }
+
+    #[test]
+    fn behavior_restricted_paths_parse_and_default_empty() {
+        assert!(BehaviorConfig::default().restricted_paths.is_empty());
+        let cfg: DexterConfig = toml::from_str(
+            r#"
+            [behavior]
+            restricted_paths = ["~/Documents/private", "/Volumes/Secrets"]
+            "#,
+        )
+        .expect("valid restricted path config");
+
+        assert_eq!(
+            cfg.behavior.restricted_paths,
+            vec![
+                std::path::PathBuf::from("~/Documents/private"),
+                std::path::PathBuf::from("/Volumes/Secrets"),
+            ]
         );
     }
 

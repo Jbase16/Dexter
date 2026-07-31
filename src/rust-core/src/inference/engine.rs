@@ -37,6 +37,7 @@ use crate::config::InferenceConfig;
 use crate::constants::{
     OLLAMA_CHAT_PATH, OLLAMA_EMBED_PATH, OLLAMA_PS_PATH, OLLAMA_PULL_PATH, OLLAMA_TAGS_PATH,
 };
+use crate::context::{ContentTrust, DataSensitivity, PromptSecurity};
 
 use super::error::InferenceError;
 use super::models::ModelInfo;
@@ -99,6 +100,15 @@ pub struct Message {
     #[serde(skip)]
     #[serde(default)]
     pub origin: MessageOrigin,
+
+    /// Rust-owned security labels for this model-visible content.
+    /// These fields never leave the process or appear in Ollama request JSON.
+    #[serde(skip)]
+    #[serde(default)]
+    pub sensitivity: DataSensitivity,
+    #[serde(skip)]
+    #[serde(default)]
+    pub trust: ContentTrust,
 }
 
 impl Message {
@@ -108,6 +118,8 @@ impl Message {
             content: content.into(),
             images: None,
             origin: MessageOrigin::System,
+            sensitivity: DataSensitivity::Public,
+            trust: ContentTrust::LocalTrusted,
         }
     }
 
@@ -117,6 +129,8 @@ impl Message {
             content: content.into(),
             images: None,
             origin: MessageOrigin::User,
+            sensitivity: DataSensitivity::OperatorPrivate,
+            trust: ContentTrust::Operator,
         }
     }
 
@@ -126,6 +140,8 @@ impl Message {
             content: content.into(),
             images: None,
             origin: MessageOrigin::Assistant,
+            sensitivity: DataSensitivity::OperatorPrivate,
+            trust: ContentTrust::ModelGenerated,
         }
     }
 
@@ -142,6 +158,8 @@ impl Message {
             content: content.into(),
             images: Some(vec![image_b64]),
             origin: MessageOrigin::User,
+            sensitivity: DataSensitivity::OperatorPrivate,
+            trust: ContentTrust::LocalObserved,
         }
     }
 
@@ -157,6 +175,8 @@ impl Message {
             content: content.into(),
             images: None,
             origin: MessageOrigin::ToolResult,
+            sensitivity: DataSensitivity::OperatorPrivate,
+            trust: ContentTrust::LocalTrusted,
         }
     }
 
@@ -169,7 +189,23 @@ impl Message {
             content: content.into(),
             images: None,
             origin: MessageOrigin::Retrieval,
+            sensitivity: DataSensitivity::Public,
+            trust: ContentTrust::ExternalUntrusted,
         }
+    }
+
+    pub(crate) fn with_security(
+        mut self,
+        sensitivity: DataSensitivity,
+        trust: ContentTrust,
+    ) -> Self {
+        self.sensitivity = sensitivity;
+        self.trust = trust;
+        self
+    }
+
+    pub(crate) const fn security(&self) -> PromptSecurity {
+        PromptSecurity::new(self.sensitivity, self.trust)
     }
 }
 
@@ -1278,6 +1314,8 @@ mod tests {
             content: "what do you see?".to_string(),
             images: Some(vec!["base64abc".to_string()]),
             origin: MessageOrigin::User,
+            sensitivity: DataSensitivity::Restricted,
+            trust: ContentTrust::ExternalUntrusted,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
@@ -1304,6 +1342,19 @@ mod tests {
             "JSON must NOT contain 'images' key when images is None: {}",
             json
         );
+    }
+
+    #[test]
+    fn message_security_labels_are_local_only() {
+        let msg = Message::tool_result("do-not-log-this-value")
+            .with_security(DataSensitivity::Restricted, ContentTrust::ExternalUntrusted);
+        let json = serde_json::to_string(&msg).unwrap();
+
+        assert!(!json.contains("sensitivity"));
+        assert!(!json.contains("restricted"));
+        assert!(!json.contains("trust"));
+        assert!(!json.contains("external_untrusted"));
+        assert!(json.contains("do-not-log-this-value"));
     }
 
     #[test]
