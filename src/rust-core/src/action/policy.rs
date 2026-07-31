@@ -1,4 +1,4 @@
-/// PolicyEngine — classifies an ActionSpec into the appropriate ActionCategory.
+/// PolicyEngine — evaluates an ActionSpec against structured policy axes.
 ///
 /// ## Category semantics (from IMPLEMENTATION_PLAN.md §2.2.10)
 ///
@@ -8,11 +8,10 @@
 ///
 /// ## Override rule
 ///
-/// A model-specified `category_override: "destructive"` is always respected
-/// (upward override). A model-specified `"safe"` or `"cautious"` on a
-/// DESTRUCTIVE-classified spec is silently ignored — policy wins downward.
-/// This prevents the model from accidentally (or adversarially) lowering the
-/// gate on a destructive command.
+/// A model-specified `category_override: "destructive"` always requires
+/// approval. A model-specified `"safe"` cannot lower the structured decision;
+/// `"cautious"` can only force auditing. This prevents the model from
+/// accidentally or adversarially weakening the Rust-owned gate.
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -295,9 +294,16 @@ struct PolicyAxes {
     reversibility: Reversibility,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StructuredAssessment {
+    axes: PolicyAxes,
+    consequence_requires_approval: bool,
+    force_audit: bool,
+}
+
 // ── Classification tables ──────────────────────────────────────────────────
 
-/// Shell commands that immediately classify as DESTRUCTIVE, regardless of arguments.
+/// Shell commands that always carry consequential local effects.
 ///
 /// Destructive means "requires operator approval before execution", not
 /// "forbidden". Keep this list to commands whose normal purpose mutates,
@@ -457,16 +463,16 @@ const BROWSER_SENSITIVE_INPUT_TERMS: &[&str] = &[
 /// Cautious — meaning a script containing `do shell script "rm -rf ~"` ran
 /// without operator approval. AppleScript is a side-effect language with full
 /// system access (Finder delete, System Events keystroke/click, do shell script
-/// out to bash). Content-aware classification catches the obvious destructive
-/// patterns; benign scripts (`tell application "Finder" to activate`) remain
-/// Cautious.
+/// out to bash). Content-aware analysis marks the obvious consequential
+/// patterns. Arbitrary model-proposed AppleScript still has unknown structured
+/// reach/effect and therefore fails closed even when no phrase matches.
 ///
 /// All matching is case-insensitive (AppleScript keywords are case-insensitive),
 /// and strings/comments are stripped before matching. That keeps approval tied
 /// to executable intent, not harmless log text like `log "keystroke happened"`.
 ///
 /// Messages sends are handled as a separate structural check in
-/// `classify_applescript()`: the app name appears inside an AppleScript string
+/// `applescript_has_consequence()`: the app name appears inside an AppleScript string
 /// literal, while the executable `send` verb should still be matched only in
 /// code after string/comment stripping.
 const APPLESCRIPT_DESTRUCTIVE_PHRASES: &[&str] = &[
@@ -478,7 +484,7 @@ const APPLESCRIPT_DESTRUCTIVE_PHRASES: &[&str] = &[
     "set the clipboard", // Clipboard manipulation — credential exfil vector
 ];
 
-/// Path prefixes where a FileWrite classifies as DESTRUCTIVE.
+/// Path prefixes where a FileWrite requires approval.
 ///
 /// These are system-owned directories where writing without intent would be
 /// genuinely dangerous. `/tmp` and user home directories are CAUTIOUS, not listed here.
@@ -575,7 +581,12 @@ impl PolicyEngine {
         }
     }
 
-    /// Classify an ActionSpec. Returns the final category after applying any override.
+    /// Historical category comparator retained only for compatibility tests.
+    ///
+    /// Production execution uses `evaluate()` exclusively. Slice E keeps this
+    /// test-only adapter so the promoted structured policy can prove intentional
+    /// compatibility differences without retaining a second execution decision.
+    #[cfg(test)]
     pub fn classify(spec: &ActionSpec) -> ActionCategory {
         match spec {
             ActionSpec::Shell {
@@ -583,7 +594,7 @@ impl PolicyEngine {
                 category_override,
                 ..
             } => {
-                let base = Self::classify_shell(args);
+                let base = Self::legacy_shell_category(args);
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::FileRead { .. } => {
@@ -595,14 +606,22 @@ impl PolicyEngine {
                 category_override,
                 ..
             } => {
-                let base = Self::classify_file_write(path);
+                let base = if Self::file_write_has_consequence(path) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::AppleScript { script, .. } => {
                 // Phase 38 / Codex finding [2]: classify by content. Scripts
                 // containing `do shell script`, `keystroke`, `click`, `delete`,
                 // etc. escalate to Destructive; benign scripts stay Cautious.
-                Self::classify_applescript(script)
+                if Self::applescript_has_consequence(script) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                }
             }
             ActionSpec::MessageSend { .. } => {
                 // Externally visible, but not destructive: the orchestrator must
@@ -636,7 +655,11 @@ impl PolicyEngine {
             } => {
                 // A structured Accessibility press changes UI state, so it is
                 // audited. Obvious consequence labels still require approval.
-                let base = Self::classify_ui_click(role.as_deref(), label);
+                let base = if Self::ui_click_has_consequence(role.as_deref(), label) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::UiType {
@@ -648,7 +671,11 @@ impl PolicyEngine {
                 // UI typing mutates local app state and can place secrets into
                 // fields. Ordinary text entry is audited; sensitive targets go
                 // through the approval path.
-                let base = Self::classify_ui_type(role.as_deref(), label.as_deref());
+                let base = if Self::ui_type_has_consequence(role.as_deref(), label.as_deref()) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::UiSelect {
@@ -661,7 +688,11 @@ impl PolicyEngine {
                 // Selecting from a visible UI control mutates local app state.
                 // Ordinary option choice is immediate with audit logging; obvious
                 // consequence labels/options require approval.
-                let base = Self::classify_ui_select(role.as_deref(), label, option);
+                let base = if Self::ui_select_has_consequence(role.as_deref(), label, option) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::UiToggle {
@@ -674,7 +705,11 @@ impl PolicyEngine {
                 // State-aware toggles mutate local app state. Routine checkbox
                 // and switch changes are immediate with audit logging; obvious
                 // consequence labels require approval.
-                let base = Self::classify_ui_toggle(role.as_deref(), label, *state);
+                let base = if Self::ui_toggle_has_consequence(role.as_deref(), label, *state) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::UiPick {
@@ -687,8 +722,15 @@ impl PolicyEngine {
                 // Picking a visible row/item mutates local UI selection. Routine
                 // navigation rows are immediate with audit logging; consequence
                 // labels still require approval.
-                let base =
-                    Self::classify_ui_pick(role.as_deref(), label, container_label.as_deref());
+                let base = if Self::ui_pick_has_consequence(
+                    role.as_deref(),
+                    label,
+                    container_label.as_deref(),
+                ) {
+                    ActionCategory::Destructive
+                } else {
+                    ActionCategory::Cautious
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::Browser {
@@ -696,7 +738,15 @@ impl PolicyEngine {
                 category_override,
                 ..
             } => {
-                let base = Self::classify_browser(action);
+                let base = match action {
+                    BrowserActionKind::Extract { .. } | BrowserActionKind::Screenshot => {
+                        ActionCategory::Safe
+                    }
+                    _ if Self::browser_action_has_consequence(action) => {
+                        ActionCategory::Destructive
+                    }
+                    _ => ActionCategory::Cautious,
+                };
                 Self::apply_override(base, category_override.as_deref())
             }
             ActionSpec::Shortcut {
@@ -713,27 +763,27 @@ impl PolicyEngine {
 
     /// Evaluate the multidimensional policy.
     pub(crate) fn evaluate(spec: &ActionSpec, context: &PolicyContext) -> PolicyDecision {
-        let legacy_category = Self::classify(spec);
-        let axes = Self::shadow_axes(spec, context, legacy_category);
+        let assessment = Self::structured_assessment(spec, context);
+        let axes = assessment.axes;
         let sensitivity = if axes.reach.is_external() {
             axes.sensitivity.max(context.visible_context_sensitivity)
         } else {
             axes.sensitivity
         };
         let (action_fingerprint, fingerprint_failed) =
-            Self::shadow_action_fingerprint(spec, context, axes.reach);
+            Self::action_fingerprint(spec, context, axes.reach);
 
         let mut reasons = Vec::new();
-        let mut approval_required = legacy_category == ActionCategory::Destructive;
+        let mut approval_required = assessment.consequence_requires_approval;
 
         if fingerprint_failed {
             Self::push_reason(&mut reasons, PolicyReason::PolicyEvaluationFailed);
             approval_required = true;
         }
-        if legacy_category == ActionCategory::Destructive {
+        if assessment.consequence_requires_approval {
             Self::push_reason(&mut reasons, PolicyReason::ConsequentialLocalEffect);
         }
-        if Self::shadow_reads_restricted_source(spec, sensitivity) {
+        if Self::reads_restricted_source(spec, sensitivity) {
             Self::push_reason(&mut reasons, PolicyReason::RestrictedSourceRead);
             approval_required = true;
         }
@@ -816,8 +866,10 @@ impl PolicyEngine {
 
         let category = if approval_required {
             ActionCategory::Destructive
-        } else if legacy_category == ActionCategory::Safe
+        } else if axes.effect == LocalEffect::Observe
+            && matches!(axes.reach, Reach::Local | Reach::Loopback)
             && sensitivity == DataSensitivity::Public
+            && !assessment.force_audit
             && reasons.is_empty()
         {
             ActionCategory::Safe
@@ -837,15 +889,10 @@ impl PolicyEngine {
         }
     }
 
-    #[cfg(test)]
-    fn evaluate_shadow(spec: &ActionSpec, context: &PolicyContext) -> PolicyDecision {
-        Self::evaluate(spec, context)
-    }
-
     /// Parse a worker-observed browser URL into a Rust-owned policy origin.
     pub(crate) fn validated_browser_origin(url: &str) -> ValidatedOrigin {
         ValidatedOrigin {
-            reach: Self::shadow_url_reach(url),
+            reach: Self::url_reach(url),
             destination: Self::redacted_url_destination(url),
         }
     }
@@ -984,14 +1031,101 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_axes(
+    fn structured_assessment(spec: &ActionSpec, context: &PolicyContext) -> StructuredAssessment {
+        let override_value = Self::action_category_override(spec);
+        let consequence_requires_approval =
+            Self::action_has_consequence(spec) || override_value == Some("destructive");
+        StructuredAssessment {
+            axes: Self::structured_axes(spec, context, consequence_requires_approval),
+            consequence_requires_approval,
+            force_audit: override_value == Some("cautious"),
+        }
+    }
+
+    fn action_category_override(spec: &ActionSpec) -> Option<&str> {
+        match spec {
+            ActionSpec::Shell {
+                category_override, ..
+            }
+            | ActionSpec::FileWrite {
+                category_override, ..
+            }
+            | ActionSpec::WindowFocus {
+                category_override, ..
+            }
+            | ActionSpec::UiClick {
+                category_override, ..
+            }
+            | ActionSpec::UiType {
+                category_override, ..
+            }
+            | ActionSpec::UiSelect {
+                category_override, ..
+            }
+            | ActionSpec::UiToggle {
+                category_override, ..
+            }
+            | ActionSpec::UiPick {
+                category_override, ..
+            }
+            | ActionSpec::Browser {
+                category_override, ..
+            }
+            | ActionSpec::Shortcut {
+                category_override, ..
+            } => category_override.as_deref(),
+            ActionSpec::FileRead { .. }
+            | ActionSpec::AppleScript { .. }
+            | ActionSpec::MessageSend { .. }
+            | ActionSpec::WindowInspect { .. }
+            | ActionSpec::UiSnapshot { .. } => None,
+        }
+    }
+
+    fn action_has_consequence(spec: &ActionSpec) -> bool {
+        match spec {
+            ActionSpec::Shell { args, .. } => Self::shell_has_consequence(args),
+            ActionSpec::FileWrite { path, .. } => Self::file_write_has_consequence(path),
+            ActionSpec::AppleScript { script, .. } => Self::applescript_has_consequence(script),
+            ActionSpec::FileRead { .. }
+            | ActionSpec::MessageSend { .. }
+            | ActionSpec::WindowFocus { .. }
+            | ActionSpec::WindowInspect { .. }
+            | ActionSpec::UiSnapshot { .. } => false,
+            ActionSpec::UiClick { role, label, .. } => {
+                Self::ui_click_has_consequence(role.as_deref(), label)
+            }
+            ActionSpec::UiType { role, label, .. } => {
+                Self::ui_type_has_consequence(role.as_deref(), label.as_deref())
+            }
+            ActionSpec::UiSelect {
+                role,
+                label,
+                option,
+                ..
+            } => Self::ui_select_has_consequence(role.as_deref(), label, option),
+            ActionSpec::UiToggle {
+                role, label, state, ..
+            } => Self::ui_toggle_has_consequence(role.as_deref(), label, *state),
+            ActionSpec::UiPick {
+                role,
+                label,
+                container_label,
+                ..
+            } => Self::ui_pick_has_consequence(role.as_deref(), label, container_label.as_deref()),
+            ActionSpec::Browser { action, .. } => Self::browser_action_has_consequence(action),
+            ActionSpec::Shortcut { .. } => true,
+        }
+    }
+
+    fn structured_axes(
         spec: &ActionSpec,
         context: &PolicyContext,
-        legacy_category: ActionCategory,
+        consequence_requires_approval: bool,
     ) -> PolicyAxes {
         match spec {
             ActionSpec::Shell { args, .. } => {
-                Self::shadow_shell_axes(args, legacy_category, context)
+                Self::structured_shell_axes(args, consequence_requires_approval, context)
             }
             ActionSpec::FileRead { path } => PolicyAxes {
                 effect: LocalEffect::Observe,
@@ -1000,12 +1134,12 @@ impl PolicyEngine {
                 reversibility: Reversibility::Reversible,
             },
             ActionSpec::FileWrite { path, .. } => PolicyAxes {
-                effect: if legacy_category == ActionCategory::Destructive {
+                effect: if consequence_requires_approval {
                     LocalEffect::Destructive
                 } else {
                     LocalEffect::Mutate
                 },
-                reach: if Self::shadow_path_may_sync_externally(path) {
+                reach: if Self::path_may_sync_externally(path) {
                     Reach::Unknown
                 } else {
                     Reach::Local
@@ -1041,12 +1175,12 @@ impl PolicyEngine {
             | ActionSpec::UiSelect { app_name, .. }
             | ActionSpec::UiToggle { app_name, .. }
             | ActionSpec::UiPick { app_name, .. } => {
-                Self::shadow_ui_mutation_axes(app_name.as_deref(), context, false)
+                Self::structured_ui_mutation_axes(app_name.as_deref(), context, false)
             }
             ActionSpec::UiType { app_name, .. } => {
-                Self::shadow_ui_mutation_axes(app_name.as_deref(), context, true)
+                Self::structured_ui_mutation_axes(app_name.as_deref(), context, true)
             }
-            ActionSpec::Browser { action, .. } => Self::shadow_browser_axes(action, context),
+            ActionSpec::Browser { action, .. } => Self::structured_browser_axes(action, context),
             ActionSpec::Shortcut { .. } => PolicyAxes {
                 effect: LocalEffect::Unknown,
                 reach: Reach::Unknown,
@@ -1056,9 +1190,9 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_shell_axes(
+    fn structured_shell_axes(
         args: &[String],
-        legacy_category: ActionCategory,
+        consequence_requires_approval: bool,
         context: &PolicyContext,
     ) -> PolicyAxes {
         let Some(command) = args.first() else {
@@ -1075,9 +1209,13 @@ impl PolicyEngine {
             .unwrap_or(command.as_str());
 
         if SHELL_EXTERNAL_CMDS.contains(&base_command) {
-            let reach = Self::shadow_shell_network_reach(base_command, args, legacy_category);
+            let reach = Self::structured_shell_network_reach(
+                base_command,
+                args,
+                consequence_requires_approval,
+            );
             return PolicyAxes {
-                effect: if legacy_category == ActionCategory::Destructive {
+                effect: if consequence_requires_approval {
                     LocalEffect::Mutate
                 } else {
                     LocalEffect::Observe
@@ -1103,7 +1241,7 @@ impl PolicyEngine {
 
         if SHELL_SAFE_CMDS.contains(&base_command) {
             let sensitivity = if matches!(base_command, "cat" | "head" | "tail") {
-                Self::shadow_shell_read_sensitivity(args, &context.restricted_paths)
+                Self::shell_read_sensitivity(args, &context.restricted_paths)
             } else {
                 DataSensitivity::Public
             };
@@ -1115,7 +1253,7 @@ impl PolicyEngine {
             };
         }
 
-        if base_command == "find" && legacy_category == ActionCategory::Safe {
+        if base_command == "find" && Self::find_is_read_only(args) {
             return PolicyAxes {
                 effect: LocalEffect::Observe,
                 reach: Reach::Local,
@@ -1123,7 +1261,7 @@ impl PolicyEngine {
                 reversibility: Reversibility::Reversible,
             };
         }
-        if base_command == "tee" && legacy_category != ActionCategory::Destructive {
+        if base_command == "tee" && !consequence_requires_approval {
             return PolicyAxes {
                 effect: LocalEffect::Mutate,
                 reach: Reach::Local,
@@ -1133,14 +1271,14 @@ impl PolicyEngine {
         }
 
         PolicyAxes {
-            effect: if legacy_category == ActionCategory::Destructive {
+            effect: if consequence_requires_approval {
                 LocalEffect::Destructive
             } else {
                 LocalEffect::Unknown
             },
             reach: Reach::Unknown,
             sensitivity: DataSensitivity::Unknown,
-            reversibility: if legacy_category == ActionCategory::Destructive {
+            reversibility: if consequence_requires_approval {
                 Reversibility::Irreversible
             } else {
                 Reversibility::Unknown
@@ -1148,10 +1286,10 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_shell_network_reach(
+    fn structured_shell_network_reach(
         base_command: &str,
         args: &[String],
-        legacy_category: ActionCategory,
+        consequence_requires_approval: bool,
     ) -> Reach {
         if !matches!(base_command, "curl" | "wget") {
             return Reach::ExternalWrite;
@@ -1162,10 +1300,10 @@ impl PolicyEngine {
             if !arg.contains("://") {
                 continue;
             }
-            match Self::shadow_url_reach(arg) {
+            match Self::url_reach(arg) {
                 Reach::Loopback | Reach::Local => saw_loopback = true,
                 Reach::ExternalRead | Reach::ExternalWrite => {
-                    return if legacy_category == ActionCategory::Destructive {
+                    return if consequence_requires_approval {
                         Reach::ExternalWrite
                     } else {
                         Reach::ExternalRead
@@ -1176,20 +1314,20 @@ impl PolicyEngine {
         }
         if saw_loopback {
             Reach::Loopback
-        } else if legacy_category == ActionCategory::Destructive {
+        } else if consequence_requires_approval {
             Reach::ExternalWrite
         } else {
             Reach::ExternalRead
         }
     }
 
-    fn shadow_browser_axes(action: &BrowserActionKind, context: &PolicyContext) -> PolicyAxes {
+    fn structured_browser_axes(action: &BrowserActionKind, context: &PolicyContext) -> PolicyAxes {
         match action {
             BrowserActionKind::Navigate { url } => PolicyAxes {
                 effect: LocalEffect::Mutate,
-                reach: Self::shadow_url_reach(url),
+                reach: Self::url_reach(url),
                 sensitivity: if url.trim().to_ascii_lowercase().starts_with("file:") {
-                    Self::shadow_file_url_sensitivity(url, &context.restricted_paths)
+                    Self::file_url_sensitivity(url, &context.restricted_paths)
                 } else {
                     DataSensitivity::OperatorPrivate
                 },
@@ -1236,7 +1374,7 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_ui_mutation_axes(
+    fn structured_ui_mutation_axes(
         app_name: Option<&str>,
         context: &PolicyContext,
         carries_text: bool,
@@ -1276,7 +1414,7 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_url_reach(url: &str) -> Reach {
+    fn url_reach(url: &str) -> Reach {
         let trimmed = url.trim();
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("file:") {
@@ -1374,10 +1512,7 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_file_url_sensitivity(
-        url: &str,
-        operator_restricted_paths: &[PathBuf],
-    ) -> DataSensitivity {
+    fn file_url_sensitivity(url: &str, operator_restricted_paths: &[PathBuf]) -> DataSensitivity {
         let trimmed = url.trim();
         let lower = trimmed.to_ascii_lowercase();
         let raw = if lower.starts_with("file://") {
@@ -1439,7 +1574,7 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_shell_read_sensitivity(
+    fn shell_read_sensitivity(
         args: &[String],
         operator_restricted_paths: &[PathBuf],
     ) -> DataSensitivity {
@@ -1450,7 +1585,7 @@ impl PolicyEngine {
             .fold(DataSensitivity::Public, DataSensitivity::max)
     }
 
-    fn shadow_reads_restricted_source(spec: &ActionSpec, sensitivity: DataSensitivity) -> bool {
+    fn reads_restricted_source(spec: &ActionSpec, sensitivity: DataSensitivity) -> bool {
         if sensitivity != DataSensitivity::Restricted {
             return false;
         }
@@ -1469,7 +1604,7 @@ impl PolicyEngine {
         }
     }
 
-    fn shadow_path_may_sync_externally(path: &Path) -> bool {
+    fn path_may_sync_externally(path: &Path) -> bool {
         let normalized = crate::action::executor::normalize_for_policy(path);
         let lower = normalized.to_string_lossy().to_ascii_lowercase();
         lower.contains("/library/mobile documents/")
@@ -1479,7 +1614,7 @@ impl PolicyEngine {
             || lower.contains("/google drive/")
     }
 
-    fn shadow_action_fingerprint(
+    fn action_fingerprint(
         spec: &ActionSpec,
         context: &PolicyContext,
         reach: Reach,
@@ -1539,46 +1674,26 @@ impl PolicyEngine {
         }
     }
 
-    fn classify_browser(action: &BrowserActionKind) -> ActionCategory {
+    fn browser_action_has_consequence(action: &BrowserActionKind) -> bool {
         match action {
-            // Read-only operations — no observable side effects on the page or disk
-            // (screenshot saves to /tmp/ but is intentionally non-destructive).
-            BrowserActionKind::Extract { .. } => ActionCategory::Safe,
-            BrowserActionKind::Screenshot => ActionCategory::Safe,
-            // State-changing but usually reversible. Obvious consequence selectors
-            // and script/data navigations require approval; routine browser control
-            // remains immediate with audit logging.
-            BrowserActionKind::Navigate { url } => Self::classify_browser_navigate(url),
-            BrowserActionKind::Click { selector } => {
-                if Self::browser_text_has_consequence(selector) {
-                    ActionCategory::Destructive
-                } else {
-                    ActionCategory::Cautious
-                }
-            }
+            BrowserActionKind::Extract { .. } | BrowserActionKind::Screenshot => false,
+            BrowserActionKind::Navigate { url } => Self::browser_navigation_has_consequence(url),
+            BrowserActionKind::Click { selector } => Self::browser_text_has_consequence(selector),
             BrowserActionKind::Type { selector, .. } => {
-                if Self::browser_selector_is_sensitive_input(selector) {
-                    ActionCategory::Destructive
-                } else {
-                    ActionCategory::Cautious
-                }
+                Self::browser_selector_is_sensitive_input(selector)
             }
         }
     }
 
-    fn classify_ui_click(role: Option<&str>, label: &str) -> ActionCategory {
+    fn ui_click_has_consequence(role: Option<&str>, label: &str) -> bool {
         let combined = match role.map(str::trim).filter(|value| !value.is_empty()) {
             Some(role) => format!("{role} {label}"),
             None => label.to_string(),
         };
-        if Self::control_text_has_consequence(&combined) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        Self::control_text_has_consequence(&combined)
     }
 
-    fn classify_ui_type(role: Option<&str>, label: Option<&str>) -> ActionCategory {
+    fn ui_type_has_consequence(role: Option<&str>, label: Option<&str>) -> bool {
         let mut combined = String::new();
         if let Some(role) = role.map(str::trim).filter(|value| !value.is_empty()) {
             combined.push_str(role);
@@ -1589,43 +1704,31 @@ impl PolicyEngine {
             }
             combined.push_str(label);
         }
-        if Self::control_text_is_sensitive_input(&combined) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        Self::control_text_is_sensitive_input(&combined)
     }
 
-    fn classify_ui_select(role: Option<&str>, label: &str, option: &str) -> ActionCategory {
+    fn ui_select_has_consequence(role: Option<&str>, label: &str, option: &str) -> bool {
         let combined = match role.map(str::trim).filter(|value| !value.is_empty()) {
             Some(role) => format!("{role} {label} {option}"),
             None => format!("{label} {option}"),
         };
-        if Self::control_text_has_consequence(&combined) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        Self::control_text_has_consequence(&combined)
     }
 
-    fn classify_ui_toggle(role: Option<&str>, label: &str, state: bool) -> ActionCategory {
+    fn ui_toggle_has_consequence(role: Option<&str>, label: &str, state: bool) -> bool {
         let desired = if state { "on" } else { "off" };
         let combined = match role.map(str::trim).filter(|value| !value.is_empty()) {
             Some(role) => format!("{role} {label} {desired}"),
             None => format!("{label} {desired}"),
         };
-        if Self::control_text_has_consequence(&combined) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        Self::control_text_has_consequence(&combined)
     }
 
-    fn classify_ui_pick(
+    fn ui_pick_has_consequence(
         role: Option<&str>,
         label: &str,
         container_label: Option<&str>,
-    ) -> ActionCategory {
+    ) -> bool {
         let mut parts = Vec::new();
         if let Some(role) = role.map(str::trim).filter(|value| !value.is_empty()) {
             parts.push(role);
@@ -1638,20 +1741,12 @@ impl PolicyEngine {
         }
         parts.push(label);
         let combined = parts.join(" ");
-        if Self::control_text_has_consequence(&combined) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        Self::control_text_has_consequence(&combined)
     }
 
-    fn classify_browser_navigate(url: &str) -> ActionCategory {
+    fn browser_navigation_has_consequence(url: &str) -> bool {
         let trimmed = url.trim().to_ascii_lowercase();
-        if trimmed.starts_with("javascript:") || trimmed.starts_with("data:text/html") {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        trimmed.starts_with("javascript:") || trimmed.starts_with("data:text/html")
     }
 
     fn browser_text_has_consequence(text: &str) -> bool {
@@ -1694,48 +1789,63 @@ impl PolicyEngine {
         out
     }
 
-    fn classify_shell(args: &[String]) -> ActionCategory {
-        let cmd = match args.first() {
-            Some(c) => c.as_str(),
-            None => return ActionCategory::Cautious,
-        };
-        // Strip any path prefix so "/usr/bin/rm" matches "rm".
-        let base_cmd = Path::new(cmd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(cmd);
-
-        if SHELL_DESTRUCTIVE_CMDS.contains(&base_cmd) {
+    #[cfg(test)]
+    fn legacy_shell_category(args: &[String]) -> ActionCategory {
+        if Self::shell_has_consequence(args) {
             return ActionCategory::Destructive;
         }
-        match base_cmd {
-            "curl" => return Self::classify_curl(args),
-            "wget" => return Self::classify_wget(args),
-            "env" | "exec" => return Self::classify_env_or_exec(args),
-            "xargs" => return Self::classify_xargs(args),
-            "tee" => return Self::classify_tee(args),
-            "find" => return Self::classify_find(args),
-            "awk" | "gawk" | "nawk" => return Self::classify_awk(args),
-            _ => {}
-        }
-        if SHELL_INTERPRETER_CMDS.contains(&base_cmd) {
-            return Self::classify_interpreter(args);
-        }
-        if SHELL_SAFE_CMDS.contains(&base_cmd) {
-            return ActionCategory::Safe;
-        }
-        ActionCategory::Cautious
-    }
-
-    fn classify_interpreter(args: &[String]) -> ActionCategory {
-        if Self::args_contain_destructive_intent(&args[1..]) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
+        let Some(command) = args.first() else {
+            return ActionCategory::Cautious;
+        };
+        let base_command = Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(command.as_str());
+        match base_command {
+            "env" | "exec" => Self::env_or_exec_command(args)
+                .map(Self::legacy_shell_category)
+                .unwrap_or(ActionCategory::Cautious),
+            "find" if Self::find_is_read_only(args) => ActionCategory::Safe,
+            "tee" if Self::tee_is_read_only(args) => ActionCategory::Safe,
+            command if SHELL_SAFE_CMDS.contains(&command) => ActionCategory::Safe,
+            _ => ActionCategory::Cautious,
         }
     }
 
-    fn classify_env_or_exec(args: &[String]) -> ActionCategory {
+    fn shell_has_consequence(args: &[String]) -> bool {
+        let Some(command) = args.first() else {
+            return false;
+        };
+        let base_command = Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(command.as_str());
+
+        if SHELL_DESTRUCTIVE_CMDS.contains(&base_command) {
+            return true;
+        }
+        match base_command {
+            "curl" => Self::curl_has_consequence(args),
+            "wget" => Self::wget_has_consequence(args),
+            "env" | "exec" => {
+                Self::env_or_exec_command(args).is_some_and(Self::shell_has_consequence)
+            }
+            "xargs" => Self::xargs_has_consequence(args),
+            "tee" => Self::tee_has_consequence(args),
+            "find" => Self::find_has_consequence(args),
+            "awk" | "gawk" | "nawk" => Self::awk_has_consequence(args),
+            command if SHELL_INTERPRETER_CMDS.contains(&command) => {
+                Self::interpreter_has_consequence(args)
+            }
+            _ => false,
+        }
+    }
+
+    fn interpreter_has_consequence(args: &[String]) -> bool {
+        Self::args_contain_destructive_intent(&args[1..])
+    }
+
+    fn env_or_exec_command(args: &[String]) -> Option<&[String]> {
         let mut idx = 1;
         while idx < args.len() {
             let arg = args[idx].as_str();
@@ -1761,51 +1871,42 @@ impl PolicyEngine {
             }
             break;
         }
-
-        if idx >= args.len() {
-            // `env` alone prints environment values, which may include secrets.
-            return ActionCategory::Cautious;
-        }
-        Self::classify_shell(&args[idx..])
+        (idx < args.len()).then_some(&args[idx..])
     }
 
-    fn classify_xargs(args: &[String]) -> ActionCategory {
-        if Self::args_contain_destructive_intent(&args[1..]) {
-            ActionCategory::Destructive
-        } else {
-            // xargs executes another command fed from stdin. Even when the visible
-            // command is benign, keep an audit trail because runtime input matters.
-            ActionCategory::Cautious
-        }
+    fn xargs_has_consequence(args: &[String]) -> bool {
+        Self::args_contain_destructive_intent(&args[1..])
     }
 
-    fn classify_find(args: &[String]) -> ActionCategory {
-        let mut saw_file_write_predicate = false;
+    fn find_has_consequence(args: &[String]) -> bool {
         for (idx, arg) in args.iter().enumerate().skip(1) {
             match arg.as_str() {
                 "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" => {
-                    return ActionCategory::Destructive;
+                    return true;
                 }
                 "-fprint" | "-fprintf" => {
-                    saw_file_write_predicate = true;
                     if let Some(path) = args.get(idx + 1) {
                         if Self::is_system_path(path) {
-                            return ActionCategory::Destructive;
+                            return true;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        if saw_file_write_predicate {
-            ActionCategory::Cautious
-        } else {
-            ActionCategory::Safe
-        }
+        false
     }
 
-    fn classify_tee(args: &[String]) -> ActionCategory {
-        let mut writes_file = false;
+    fn find_is_read_only(args: &[String]) -> bool {
+        !args.iter().skip(1).any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprintf"
+            )
+        })
+    }
+
+    fn tee_has_consequence(args: &[String]) -> bool {
         for arg in args.iter().skip(1) {
             if arg == "--" {
                 continue;
@@ -1813,32 +1914,30 @@ impl PolicyEngine {
             if arg.starts_with('-') {
                 continue;
             }
-            writes_file = true;
             if Self::is_system_path(arg) {
-                return ActionCategory::Destructive;
+                return true;
             }
         }
-        if writes_file {
-            ActionCategory::Cautious
-        } else {
-            ActionCategory::Safe
-        }
+        false
     }
 
-    fn classify_awk(args: &[String]) -> ActionCategory {
-        if Self::args_contain_destructive_intent(&args[1..])
+    #[cfg(test)]
+    fn tee_is_read_only(args: &[String]) -> bool {
+        !args
+            .iter()
+            .skip(1)
+            .any(|arg| arg != "--" && !arg.starts_with('-'))
+    }
+
+    fn awk_has_consequence(args: &[String]) -> bool {
+        Self::args_contain_destructive_intent(&args[1..])
             || args
                 .iter()
                 .skip(1)
                 .any(|arg| arg.to_ascii_lowercase().contains("system("))
-        {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
     }
 
-    fn classify_curl(args: &[String]) -> ActionCategory {
+    fn curl_has_consequence(args: &[String]) -> bool {
         let mut idx = 1;
         while idx < args.len() {
             let raw = args[idx].as_str();
@@ -1861,13 +1960,13 @@ impl PolicyEngine {
                 || lower.starts_with("--form-string=")
                 || lower.starts_with("--upload-file=")
             {
-                return ActionCategory::Destructive;
+                return true;
             }
 
             if raw == "-X" || lower == "--request" {
                 if let Some(method) = args.get(idx + 1) {
                     if Self::http_method_mutates(method) {
-                        return ActionCategory::Destructive;
+                        return true;
                     }
                 }
                 idx += 2;
@@ -1875,14 +1974,14 @@ impl PolicyEngine {
             }
             if let Some(method) = lower.strip_prefix("--request=") {
                 if Self::http_method_mutates(method) {
-                    return ActionCategory::Destructive;
+                    return true;
                 }
             }
 
             if raw == "-o" || lower == "--output" {
                 if let Some(path) = args.get(idx + 1) {
                     if Self::is_system_path(path) {
-                        return ActionCategory::Destructive;
+                        return true;
                     }
                 }
                 idx += 2;
@@ -1890,24 +1989,21 @@ impl PolicyEngine {
             }
             if let Some(path) = lower.strip_prefix("--output=") {
                 if Self::is_system_path(path) {
-                    return ActionCategory::Destructive;
+                    return true;
                 }
-            }
-            if raw == "-O" || lower == "--remote-name" {
-                return ActionCategory::Cautious;
             }
             idx += 1;
         }
-        ActionCategory::Cautious
+        false
     }
 
-    fn classify_wget(args: &[String]) -> ActionCategory {
+    fn wget_has_consequence(args: &[String]) -> bool {
         let mut idx = 1;
         while idx < args.len() {
             let raw = args[idx].as_str();
             let lower = args[idx].to_ascii_lowercase();
             if matches!(lower.as_str(), "--post-data" | "--post-file" | "--method") {
-                return ActionCategory::Destructive;
+                return true;
             }
             if lower.starts_with("--post-data=")
                 || lower.starts_with("--post-file=")
@@ -1916,7 +2012,7 @@ impl PolicyEngine {
                 || lower.starts_with("--method=patch")
                 || lower.starts_with("--method=delete")
             {
-                return ActionCategory::Destructive;
+                return true;
             }
             if matches!(
                 lower.as_str(),
@@ -1924,7 +2020,7 @@ impl PolicyEngine {
             ) {
                 if let Some(path) = args.get(idx + 1) {
                     if Self::is_system_path(path) {
-                        return ActionCategory::Destructive;
+                        return true;
                     }
                 }
                 idx += 2;
@@ -1932,13 +2028,13 @@ impl PolicyEngine {
             }
             if let Some(path) = lower.strip_prefix("--output-file=") {
                 if Self::is_system_path(path) {
-                    return ActionCategory::Destructive;
+                    return true;
                 }
             }
             if raw == "-O" {
                 if let Some(path) = args.get(idx + 1) {
                     if Self::is_system_path(path) {
-                        return ActionCategory::Destructive;
+                        return true;
                     }
                 }
                 idx += 2;
@@ -1946,7 +2042,7 @@ impl PolicyEngine {
             }
             idx += 1;
         }
-        ActionCategory::Cautious
+        false
     }
 
     fn args_contain_destructive_intent(args: &[String]) -> bool {
@@ -2006,25 +2102,24 @@ impl PolicyEngine {
         SYSTEM_PATH_PREFIXES.iter().any(|p| path_str.starts_with(p))
     }
 
-    /// Phase 38 / Codex finding [2]: AppleScript content classifier.
+    /// Phase 38 / Codex finding [2]: AppleScript consequence analyzer.
     ///
     /// Scans executable AppleScript text for any `APPLESCRIPT_DESTRUCTIVE_PHRASES`
-    /// phrase after removing string literals and comments. Any match →
-    /// Destructive (operator approval required). No match → Cautious (executes
-    /// immediately, audit-logged).
-    fn classify_applescript(script: &str) -> ActionCategory {
+    /// phrase after removing string literals and comments. A match requires
+    /// operator approval; no match remains subject to the structured axes.
+    fn applescript_has_consequence(script: &str) -> bool {
         let signal_text = Self::applescript_signal_text(script).to_ascii_lowercase();
         if Self::applescript_sends_message(script, &signal_text) {
-            return ActionCategory::Destructive;
+            return true;
         }
 
         if APPLESCRIPT_DESTRUCTIVE_PHRASES
             .iter()
             .any(|phrase| Self::contains_applescript_phrase(&signal_text, phrase))
         {
-            ActionCategory::Destructive
+            true
         } else {
-            ActionCategory::Cautious
+            false
         }
     }
 
@@ -2123,19 +2218,15 @@ impl PolicyEngine {
         ch.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
-    fn classify_file_write(path: &Path) -> ActionCategory {
-        // Phase 38 / Codex finding [3]: classify the NORMALIZED path so the
-        // category matches what the executor will actually write to. Without
-        // normalization, `~/../../etc/hosts` was misclassified as Cautious
-        // (no system prefix) but executed against `/etc/hosts`. The same
-        // normalizer is used by `execute_file_write` in `action::executor`.
+    fn file_write_has_consequence(path: &Path) -> bool {
+        // Phase 38 / Codex finding [3]: inspect the NORMALIZED path so policy
+        // matches what the executor will actually write to. Without
+        // normalization, `~/../../etc/hosts` did not look like a system path
+        // but executed against `/etc/hosts`. The same normalizer is used by
+        // `execute_file_write` in `action::executor`.
         let normalized = crate::action::executor::normalize_for_policy(path);
         let path_str = normalized.to_string_lossy();
-        if Self::normalized_path_is_system(&path_str) {
-            ActionCategory::Destructive
-        } else {
-            ActionCategory::Cautious
-        }
+        Self::normalized_path_is_system(&path_str)
     }
 
     /// Apply a model-specified category override.
@@ -2145,6 +2236,7 @@ impl PolicyEngine {
     ///   - `"cautious"` upgrades SAFE → CAUTIOUS only (not DESTRUCTIVE → CAUTIOUS).
     ///   - `"safe"` is always ignored — downgrading is not permitted.
     ///   - Unknown strings are silently ignored.
+    #[cfg(test)]
     fn apply_override(base: ActionCategory, override_str: Option<&str>) -> ActionCategory {
         match override_str {
             Some("destructive") => ActionCategory::Destructive,
@@ -3204,7 +3296,7 @@ mod tests {
         );
     }
 
-    // ── DEX-01 Slice A: structured policy shadow coverage ────────────────────
+    // ── DEX-01 structured policy coverage ────────────────────────────────────
 
     fn public_model_context() -> PolicyContext {
         PolicyContext {
@@ -3271,7 +3363,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_covers_every_action_spec_variant() {
+    fn structured_policy_covers_every_action_spec_variant() {
         let context = public_model_context();
         let cases = vec![
             (
@@ -3384,7 +3476,7 @@ mod tests {
         ];
 
         for (name, spec, effect, reach, category) in cases {
-            let decision = PolicyEngine::evaluate_shadow(&spec, &context);
+            let decision = PolicyEngine::evaluate(&spec, &context);
             assert_eq!(decision.effect, effect, "{name}: effect");
             assert_eq!(decision.reach, reach, "{name}: reach");
             assert_eq!(decision.category, category, "{name}: category");
@@ -3401,8 +3493,8 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_restricted_file_read_requires_approval() {
-        let decision = PolicyEngine::evaluate_shadow(
+    fn structured_policy_restricted_file_read_requires_approval() {
+        let decision = PolicyEngine::evaluate(
             &ActionSpec::FileRead {
                 path: std::path::PathBuf::from("~/.ssh/id_ed25519"),
             },
@@ -3468,11 +3560,10 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_restricted_read_alternate_lanes_require_approval() {
+    fn structured_policy_restricted_read_alternate_lanes_require_approval() {
         let context = public_model_context();
-        let shell_read =
-            PolicyEngine::evaluate_shadow(&shell(&["cat", "~/.ssh/id_ed25519"]), &context);
-        let browser_read = PolicyEngine::evaluate_shadow(
+        let shell_read = PolicyEngine::evaluate(&shell(&["cat", "~/.ssh/id_ed25519"]), &context);
+        let browser_read = PolicyEngine::evaluate(
             &browser_navigate_to("file:///Users/jason/.ssh/id_ed25519"),
             &context,
         );
@@ -3495,7 +3586,7 @@ mod tests {
 
     #[test]
     fn structured_policy_allows_ordinary_local_file_url_navigation() {
-        let decision = PolicyEngine::evaluate_shadow(
+        let decision = PolicyEngine::evaluate(
             &browser_navigate_to("file:///private/tmp/dexter-fixture.html"),
             &public_model_context(),
         );
@@ -3505,11 +3596,11 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_curl_get_exposes_legacy_egress_gap() {
+    fn structured_policy_curl_get_closes_legacy_egress_gap() {
         let spec = shell(&["curl", "https://example.com/?value=literal"]);
         assert_eq!(PolicyEngine::classify(&spec), ActionCategory::Cautious);
 
-        let decision = PolicyEngine::evaluate_shadow(&spec, &public_model_context());
+        let decision = PolicyEngine::evaluate(&spec, &public_model_context());
         assert_eq!(decision.reach, Reach::ExternalRead);
         assert_eq!(decision.category, ActionCategory::Destructive);
         assert!(decision.approval_required);
@@ -3522,16 +3613,14 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_distinguishes_loopback_from_external_navigation() {
+    fn structured_policy_distinguishes_loopback_from_external_navigation() {
         let context = public_model_context();
-        let loopback = PolicyEngine::evaluate_shadow(
+        let loopback = PolicyEngine::evaluate(
             &browser_navigate_to("http://127.0.0.1:8080/status"),
             &context,
         );
-        let external = PolicyEngine::evaluate_shadow(
-            &browser_navigate_to("https://example.com/status"),
-            &context,
-        );
+        let external =
+            PolicyEngine::evaluate(&browser_navigate_to("https://example.com/status"), &context);
 
         assert_eq!(loopback.reach, Reach::Loopback);
         assert_eq!(loopback.category, ActionCategory::Cautious);
@@ -3542,12 +3631,12 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_external_browser_mutations_use_live_origin_reach() {
+    fn structured_policy_external_browser_mutations_use_live_origin_reach() {
         let context = public_model_context();
-        let click = PolicyEngine::evaluate_shadow(&browser_click("#continue"), &context);
-        let type_text = PolicyEngine::evaluate_shadow(&browser_type("#query", "weather"), &context);
-        let extract = PolicyEngine::evaluate_shadow(&browser_extract(), &context);
-        let screenshot = PolicyEngine::evaluate_shadow(&browser_screenshot(), &context);
+        let click = PolicyEngine::evaluate(&browser_click("#continue"), &context);
+        let type_text = PolicyEngine::evaluate(&browser_type("#query", "weather"), &context);
+        let extract = PolicyEngine::evaluate(&browser_extract(), &context);
+        let screenshot = PolicyEngine::evaluate(&browser_screenshot(), &context);
 
         assert_eq!(click.reach, Reach::ExternalWrite);
         assert!(click.approval_required);
@@ -3560,7 +3649,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_deterministic_operator_intent_authorizes_exact_destination() {
+    fn structured_policy_deterministic_operator_intent_authorizes_exact_destination() {
         let spec = browser_navigate_to("https://example.com/operator-supplied");
         let context = PolicyContext {
             origin: ActionOrigin::DeterministicOperatorIntent,
@@ -3571,7 +3660,7 @@ mod tests {
             restricted_paths: Vec::new(),
         };
 
-        let decision = PolicyEngine::evaluate_shadow(&spec, &context);
+        let decision = PolicyEngine::evaluate(&spec, &context);
         assert_eq!(decision.category, ActionCategory::Cautious);
         assert!(!decision.approval_required);
         assert!(decision
@@ -3583,9 +3672,9 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_one_shot_approval_is_fingerprint_bound() {
+    fn structured_policy_one_shot_approval_is_fingerprint_bound() {
         let spec = browser_navigate_to("https://example.com/approved");
-        let initial = PolicyEngine::evaluate_shadow(&spec, &public_model_context());
+        let initial = PolicyEngine::evaluate(&spec, &public_model_context());
         let approved_context = PolicyContext {
             origin: ActionOrigin::OperatorApproved {
                 fingerprint: initial.action_fingerprint.clone(),
@@ -3596,7 +3685,7 @@ mod tests {
             operator_turn_id: "turn-structured-policy".to_string(),
             restricted_paths: Vec::new(),
         };
-        let approved = PolicyEngine::evaluate_shadow(&spec, &approved_context);
+        let approved = PolicyEngine::evaluate(&spec, &approved_context);
         assert!(!approved.approval_required);
         assert!(approved
             .reasons
@@ -3608,7 +3697,7 @@ mod tests {
             },
             ..approved_context
         };
-        let rejected = PolicyEngine::evaluate_shadow(&spec, &wrong_context);
+        let rejected = PolicyEngine::evaluate(&spec, &wrong_context);
         assert!(rejected.approval_required);
         assert!(rejected
             .reasons
@@ -3616,9 +3705,9 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_one_shot_approval_authorizes_legacy_destructive_action() {
+    fn structured_policy_one_shot_approval_authorizes_consequential_action() {
         let spec = shell(&["rm", "-f", "/tmp/dexter-approved-test"]);
-        let initial = PolicyEngine::evaluate_shadow(&spec, &public_model_context());
+        let initial = PolicyEngine::evaluate(&spec, &public_model_context());
         assert!(initial.approval_required);
 
         let approved_context = PolicyContext {
@@ -3631,7 +3720,7 @@ mod tests {
             operator_turn_id: "turn-structured-policy".to_string(),
             restricted_paths: Vec::new(),
         };
-        let approved = PolicyEngine::evaluate_shadow(&spec, &approved_context);
+        let approved = PolicyEngine::evaluate(&spec, &approved_context);
 
         assert!(!approved.approval_required);
         assert_eq!(approved.category, ActionCategory::Cautious);
@@ -3641,23 +3730,23 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_fingerprint_changes_with_action_and_turn() {
+    fn structured_policy_fingerprint_changes_with_action_and_turn() {
         let first_spec = browser_navigate_to("https://example.com/one");
         let second_spec = browser_navigate_to("https://example.com/two");
         let first_context = public_model_context();
         let mut second_context = public_model_context();
         second_context.operator_turn_id = "different-turn".to_string();
 
-        let first = PolicyEngine::evaluate_shadow(&first_spec, &first_context);
-        let changed_action = PolicyEngine::evaluate_shadow(&second_spec, &first_context);
-        let changed_turn = PolicyEngine::evaluate_shadow(&first_spec, &second_context);
+        let first = PolicyEngine::evaluate(&first_spec, &first_context);
+        let changed_action = PolicyEngine::evaluate(&second_spec, &first_context);
+        let changed_turn = PolicyEngine::evaluate(&first_spec, &second_context);
 
         assert_ne!(first.action_fingerprint, changed_action.action_fingerprint);
         assert_ne!(first.action_fingerprint, changed_turn.action_fingerprint);
     }
 
     #[test]
-    fn structured_shadow_untrusted_external_context_cannot_authorize_mutation() {
+    fn structured_policy_untrusted_external_context_cannot_authorize_mutation() {
         let context = PolicyContext {
             origin: ActionOrigin::ModelProposed,
             visible_context_sensitivity: DataSensitivity::Public,
@@ -3666,7 +3755,7 @@ mod tests {
             operator_turn_id: "turn-untrusted-page".to_string(),
             restricted_paths: Vec::new(),
         };
-        let decision = PolicyEngine::evaluate_shadow(&local_ui_spec("toggle"), &context);
+        let decision = PolicyEngine::evaluate(&local_ui_spec("toggle"), &context);
 
         assert_eq!(decision.reach, Reach::Local);
         assert!(decision.approval_required);
@@ -3676,8 +3765,8 @@ mod tests {
     }
 
     #[test]
-    fn structured_shadow_reason_codes_are_stable_snake_case() {
-        let decision = PolicyEngine::evaluate_shadow(
+    fn structured_policy_reason_codes_are_stable_snake_case() {
+        let decision = PolicyEngine::evaluate(
             &shell(&["curl", "https://example.com"]),
             &public_model_context(),
         );

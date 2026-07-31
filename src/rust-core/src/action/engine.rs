@@ -25,7 +25,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -550,28 +550,8 @@ impl ActionEngine {
         policy_context: PolicyContext,
     ) -> ActionOutcome {
         let action_id = Uuid::new_v4().to_string();
-        let legacy_category = PolicyEngine::classify(&spec);
         let policy_decision = PolicyEngine::evaluate(&spec, &policy_context);
         let category = policy_decision.category;
-        if category != legacy_category {
-            debug!(
-                action_id = %action_id,
-                trace_id,
-                action_type = Self::type_str(&spec),
-                policy_version = STRUCTURED_POLICY_VERSION,
-                legacy_category = Self::category_str(legacy_category),
-                policy_category = Self::category_str(category),
-                policy_approval_required = policy_decision.approval_required,
-                policy_effect = policy_decision.effect.as_str(),
-                policy_reach = policy_decision.reach.as_str(),
-                policy_sensitivity = policy_decision.sensitivity.as_str(),
-                policy_reversibility = policy_decision.reversibility.as_str(),
-                policy_context_trust = policy_context.visible_context_trust.as_str(),
-                policy_action_origin = policy_context.origin.as_str(),
-                policy_reasons = %policy_decision.reason_codes(),
-                "Structured policy decision differs from legacy category"
-            );
-        }
 
         if policy_decision.approval_required {
             let description = Self::describe_for_approval(&spec, &policy_decision);
@@ -1584,10 +1564,12 @@ impl ActionEngine {
     pub async fn record_preflight_failure(
         &self,
         spec: &ActionSpec,
-        category: ActionCategory,
+        context: &PolicyContext,
+        decision: &PolicyDecision,
         error: &str,
     ) -> ActionOutcome {
         let action_id = Uuid::new_v4().to_string();
+        let category = decision.category;
         let entry = AuditEntry {
             timestamp: Utc::now().to_rfc3339(),
             action_id: &action_id,
@@ -1600,7 +1582,7 @@ impl ActionEngine {
             error: Some(error.to_string()),
             duration_ms: None,
             operator_approved: None,
-            policy: PolicyAuditFields::default(),
+            policy: Self::policy_audit_fields(spec, context, decision),
         };
         {
             let guard = self.audit.lock().await;
@@ -2025,6 +2007,7 @@ fn record_action_audit_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{ContentTrust, DataSensitivity};
     use tempfile::tempdir;
 
     fn make_safe_shell() -> ActionSpec {
@@ -2210,10 +2193,15 @@ mod tests {
         let tmp = tempdir().unwrap();
         let engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
         let spec = make_message_send();
+        let context = engine
+            .model_policy_context("preflight-message")
+            .with_prompt_security(DataSensitivity::OperatorPrivate, ContentTrust::Operator);
+        let decision = PolicyEngine::evaluate(&spec, &context);
         let outcome = engine
             .record_preflight_failure(
                 &spec,
-                ActionCategory::Cautious,
+                &context,
+                &decision,
                 "Structured iMessage send refused before execution: Contacts name not found for Mom.",
             )
             .await;
@@ -2230,6 +2218,8 @@ mod tests {
         let audit = std::fs::read_to_string(audit_path).expect("audit log should exist");
         assert!(audit.contains("\"recipient\":\"Mom\""));
         assert!(audit.contains("\"body\":\"<12 bytes omitted>\""));
+        assert!(audit.contains("\"policy_version\":1"));
+        assert!(audit.contains("\"external_destination\":\"Mom\""));
         assert!(!audit.contains("I'll be late"));
     }
 

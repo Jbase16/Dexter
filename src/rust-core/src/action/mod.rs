@@ -8,7 +8,7 @@
 /// ## Module structure
 ///
 /// - `engine`   — `ActionEngine`, `ActionSpec`, `ActionOutcome`
-/// - `policy`   — `PolicyEngine::classify()`
+/// - `policy`   — `PolicyEngine::evaluate()`
 /// - `executor` — OS-level execution functions (shell, file ops, AppleScript)
 /// - `audit`    — `AuditLog` + `AuditEntry`: append-only JSONL audit record
 pub mod audit;

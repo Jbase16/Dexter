@@ -11,8 +11,8 @@ production-readiness review:
   older than the source, binaries, configuration, models, or toolchains it is
   meant to validate.
 
-This document defines the implementation contract. It does not claim either
-blocker is fixed.
+This document defines the implementation contract. DEX-01 is implemented and
+closed as of 2026-07-30; DEX-02 remains open.
 
 ## Implementation Progress
 
@@ -94,8 +94,21 @@ blocker is fixed.
   release Rust build and Swift build are clean.
 - A temporary signed release daemon also completed a live current-version
   lookup through the authorized retrieval path and was shut down afterward.
-- DEX-01 remains open only for Slice E compatibility evaluation/removal of the
-  legacy execution classifier.
+- **2026-07-30 — DEX-01 Slice E complete:** `PolicyEngine::evaluate` is now the
+  sole production action-policy entry point. Production lane analyzers return
+  structured axes or boolean consequence signals rather than legacy
+  `ActionCategory` decisions.
+- The historical classifier is compiled only for tests. Production derives the
+  compatibility category once from `PolicyDecision`; the action engine no
+  longer computes or logs a parallel legacy decision. Structured message-send
+  preflight failures now retain the same versioned policy audit fields as
+  normal action outcomes.
+- Slice E verification passed 915 Rust tests with 7 ignored, a warning-free
+  Rust release build, proto regeneration with no diff, the Swift build, and
+  the complete live synthetic action matrix across shell, file, browser, and
+  AppleScript lanes.
+- **DEX-01 is closed.** DEX-02 remains the only blocker in this implementation
+  plan.
 
 ## Outcome
 

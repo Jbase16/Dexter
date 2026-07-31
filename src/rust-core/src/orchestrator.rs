@@ -6106,13 +6106,18 @@ impl CoreOrchestrator {
             body: body.to_string(),
             rationale: Some("Structured iMessage send preflight".to_string()),
         };
-        let category = PolicyEngine::classify(&spec);
+        let policy_context = self.action_engine.model_policy_context_with_security(
+            trace_id,
+            PromptSecurity::new(DataSensitivity::OperatorPrivate, ContentTrust::Operator),
+        );
+        let policy_decision = PolicyEngine::evaluate(&spec, &policy_context);
+        let category = policy_decision.category;
         let action_type = ActionEngine::type_str(&spec);
         let action_category = ActionEngine::category_str(category);
         let description = ActionEngine::describe(&spec);
         let outcome = self
             .action_engine
-            .record_preflight_failure(&spec, category, error)
+            .record_preflight_failure(&spec, &policy_context, &policy_decision, error)
             .await;
 
         if let Err(e) = self.turn_records.attach_action_result(
