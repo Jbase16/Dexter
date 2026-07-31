@@ -440,6 +440,26 @@ pub const RETRIEVAL_MAX_MEMORY_HITS: usize = 3;
 /// the pipeline falls back to memory-only context.
 pub const RETRIEVAL_WEB_TIMEOUT_SECS: u64 = 10;
 
+/// Maximum number of HTTP redirects followed by the core retrieval client.
+///
+/// Retrieval uses a manual redirect loop so every hop is revalidated before
+/// another connection is opened. Five hops accommodates ordinary canonical-host
+/// and locale redirects without permitting an unbounded redirect chain.
+pub const RETRIEVAL_MAX_REDIRECTS: usize = 5;
+
+/// Maximum response bytes read from a retrieval endpoint before aborting.
+///
+/// The extracted prompt contribution is capped separately in characters. This
+/// byte limit protects the process before parsing or UTF-8 decoding a response.
+pub const RETRIEVAL_MAX_RESPONSE_BYTES: usize = 512 * 1024;
+
+/// Maximum operator-query length accepted by automatic core retrieval.
+///
+/// Automatic retrieval is for bounded factual lookups, not document upload.
+/// Longer operator content must be narrowed explicitly before it can leave the
+/// machine.
+pub const RETRIEVAL_MAX_QUERY_CHARS: usize = 512;
+
 /// HTTP timeout for the wttr.in weather fast-path (seconds).
 ///
 /// Phase 37.8: weather queries (e.g. "what's the weather in Tokyo?") are routed

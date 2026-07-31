@@ -91,7 +91,7 @@ use crate::{
     memory::{detect_memory_command, extract_facts, slug_id, MemoryCommand},
     personality::{PersonalityLayer, PromptProfile},
     proactive::ProactiveEngine,
-    retrieval::RetrievalPipeline,
+    retrieval::{AuthorizedRetrievalRequest, RetrievalPipeline},
     session::SessionStateManager,
     system,
     voice::{protocol::msg, sentence::SentenceSplitter, VoiceCoordinator},
@@ -2846,72 +2846,93 @@ impl CoreOrchestrator {
                 self.context.push_assistant(local_response.clone());
                 self.session_mgr.push_turn("assistant", &local_response);
             } else {
-                info!(
-                    session  = %self.session_id,
-                    trace_id = %trace_id,
-                    query    = %query,
-                    "Uncertainty sentinel intercepted — retrieving grounding context"
-                );
-                let bridge = Self::bridging_phrase(&trace_id);
-                self.send_text(bridge, false, &trace_id).await?;
-
-                let retrieval_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
-                    self.retrieval.retrieve_web_only(query),
-                )
-                .await;
-
-                let tool_content = match retrieval_result {
-                    Ok(Ok(result)) => {
+                match AuthorizedRetrievalRequest::from_current_operator_turn(&content, &trace_id) {
+                    Ok(request) => {
                         info!(
-                            session    = %self.session_id,
-                            source     = %result.source,
-                            confidence = result.confidence,
-                            "Uncertainty retrieval succeeded"
+                            session  = %self.session_id,
+                            trace_id = %trace_id,
+                            query_fingerprint = %request.policy().query_fingerprint,
+                            reasons = %request.policy().reason_codes(),
+                            "Uncertainty sentinel intercepted — current operator turn authorizes retrieval"
                         );
-                        format!(
-                            "[Retrieved: {}]\nSource: {}\nConfidence: {:.0}%\n\n{}",
-                            result.query,
-                            result.source,
-                            result.confidence * 100.0,
-                            result.text,
+                        let bridge = Self::bridging_phrase(&trace_id);
+                        self.send_text(bridge, false, &trace_id).await?;
+
+                        let retrieval_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
+                            self.retrieval.retrieve_web_only(&request),
                         )
-                    }
-                    Ok(Err(e)) => {
-                        warn!(session = %self.session_id, error = %e, "Uncertainty retrieval failed");
-                        format!("[Retrieval failed for: {}]", query)
-                    }
-                    Err(_timeout) => {
-                        warn!(session = %self.session_id, query = %query, "Uncertainty retrieval timed out");
-                        format!("[Retrieval timed out for: {}]", query)
-                    }
-                };
+                        .await;
 
-                self.context.push_retrieval(tool_content);
+                        let tool_content = match retrieval_result {
+                            Ok(Ok(result)) => {
+                                info!(
+                                    session    = %self.session_id,
+                                    source     = %result.source,
+                                    confidence = result.confidence,
+                                    "Uncertainty retrieval succeeded"
+                                );
+                                format!(
+                                    "[Retrieved: {}]\nSource: {}\nConfidence: {:.0}%\n\n{}",
+                                    result.query,
+                                    result.source,
+                                    result.confidence * 100.0,
+                                    result.text,
+                                )
+                            }
+                            Ok(Err(e)) => {
+                                warn!(session = %self.session_id, error = %e, "Uncertainty retrieval failed");
+                                format!("[Retrieval failed for current operator query: {e}]")
+                            }
+                            Err(_timeout) => {
+                                warn!(session = %self.session_id, "Uncertainty retrieval timed out");
+                                "[Retrieval timed out for current operator query]".to_string()
+                            }
+                        };
 
-                let reprompt_messages = self
-                    .prepare_messages_for_inference_with_profile(&[], PromptProfile::PrimarySlim);
-                generation_prompt_security = generation_prompt_security
-                    .combine(prompt_security_from_messages(&reprompt_messages));
-                let reprompt_model = self.model_config.primary.clone();
-                let reprompt_response = self
-                    .generate_and_stream(
-                        &reprompt_model,
-                        reprompt_messages,
-                        &trace_id,
-                        false,
-                        Some(PRIMARY_NUM_CTX),
-                        None,
-                    )
-                    .await?;
+                        self.context.push_retrieval(tool_content);
 
-                full_response.push_str(&reprompt_response);
-                if !reprompt_response.is_empty() {
-                    self.context.push_assistant_with_security(
-                        strip_context_markers(&reprompt_response),
-                        generation_prompt_security.sensitivity,
-                    );
-                    self.session_mgr.push_turn("assistant", &reprompt_response);
+                        let reprompt_messages = self.prepare_messages_for_inference_with_profile(
+                            &[],
+                            PromptProfile::PrimarySlim,
+                        );
+                        generation_prompt_security = generation_prompt_security
+                            .combine(prompt_security_from_messages(&reprompt_messages));
+                        let reprompt_model = self.model_config.primary.clone();
+                        let reprompt_response = self
+                            .generate_and_stream(
+                                &reprompt_model,
+                                reprompt_messages,
+                                &trace_id,
+                                false,
+                                Some(PRIMARY_NUM_CTX),
+                                None,
+                            )
+                            .await?;
+
+                        full_response.push_str(&reprompt_response);
+                        if !reprompt_response.is_empty() {
+                            self.context.push_assistant_with_security(
+                                strip_context_markers(&reprompt_response),
+                                generation_prompt_security.sensitivity,
+                            );
+                            self.session_mgr.push_turn("assistant", &reprompt_response);
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            session = %self.session_id,
+                            trace_id = %trace_id,
+                            query_fingerprint = %error.policy().query_fingerprint,
+                            reasons = %error.policy().reason_codes(),
+                            "Model uncertainty cannot authorize an outbound retrieval"
+                        );
+                        let response = "I couldn't verify that online without sending a new query off this Mac. Ask me to search the web for it if you want me to do that.";
+                        self.send_text(response, true, &trace_id).await?;
+                        full_response.push_str(response);
+                        self.context.push_assistant(response.to_string());
+                        self.session_mgr.push_turn("assistant", response);
+                    }
                 }
             }
             response_already_recorded = true;
@@ -2919,47 +2940,64 @@ impl CoreOrchestrator {
 
         // 7b. Post-generation uncertainty retrieval (Phase 9).
         if let Some(trigger) = self.retrieval.detect_post_trigger(&full_response) {
-            info!(session = %self.session_id, ?trigger, "Uncertainty marker — retrieving context");
-            match self
-                .retrieval
-                .retrieve(&self.engine, &embed_model, &trigger)
-                .await
-            {
-                Ok(ctx) => {
-                    let injection = self.retrieval.format_for_injection(&ctx);
-                    if !injection.is_empty() {
-                        let tool_msg = format!("[Retrieved context]\n{}", injection);
-                        self.context.push_retrieval(tool_msg.clone());
-                        self.session_mgr.push_turn("retrieval", &tool_msg);
-                        let follow_model = self.model_config.primary.clone();
-                        let follow_messages = self.prepare_messages_for_inference_with_profile(
-                            &[],
-                            PromptProfile::PrimarySlim,
-                        );
-                        generation_prompt_security = generation_prompt_security
-                            .combine(prompt_security_from_messages(&follow_messages));
-                        let follow_response = self
-                            .generate_and_stream(
-                                &follow_model,
-                                follow_messages,
-                                &trace_id,
-                                false,
-                                Some(PRIMARY_NUM_CTX),
-                                None,
-                            )
-                            .await?;
-                        self.context.push_assistant_with_security(
-                            strip_context_markers(&follow_response),
-                            generation_prompt_security.sensitivity,
-                        );
-                        self.session_mgr.push_turn("assistant", &follow_response);
-                        info!(session = %self.session_id, "Uncertainty follow-up generated successfully");
+            match AuthorizedRetrievalRequest::from_current_operator_turn(&content, &trace_id) {
+                Ok(request) => {
+                    info!(
+                        session = %self.session_id,
+                        ?trigger,
+                        query_fingerprint = %request.policy().query_fingerprint,
+                        reasons = %request.policy().reason_codes(),
+                        "Uncertainty marker — current operator turn authorizes retrieval"
+                    );
+                    match self
+                        .retrieval
+                        .retrieve(&self.engine, &embed_model, &trigger, &request)
+                        .await
+                    {
+                        Ok(ctx) => {
+                            let injection = self.retrieval.format_for_injection(&ctx);
+                            if !injection.is_empty() {
+                                let tool_msg = format!("[Retrieved context]\n{}", injection);
+                                self.context.push_retrieval(tool_msg.clone());
+                                self.session_mgr.push_turn("retrieval", &tool_msg);
+                                let follow_model = self.model_config.primary.clone();
+                                let follow_messages = self
+                                    .prepare_messages_for_inference_with_profile(
+                                        &[],
+                                        PromptProfile::PrimarySlim,
+                                    );
+                                generation_prompt_security = generation_prompt_security
+                                    .combine(prompt_security_from_messages(&follow_messages));
+                                let follow_response = self
+                                    .generate_and_stream(
+                                        &follow_model,
+                                        follow_messages,
+                                        &trace_id,
+                                        false,
+                                        Some(PRIMARY_NUM_CTX),
+                                        None,
+                                    )
+                                    .await?;
+                                self.context.push_assistant_with_security(
+                                    strip_context_markers(&follow_response),
+                                    generation_prompt_security.sensitivity,
+                                );
+                                self.session_mgr.push_turn("assistant", &follow_response);
+                                info!(session = %self.session_id, "Uncertainty follow-up generated successfully");
+                            }
+                        }
+                        Err(e) => warn!(
+                            session = %self.session_id,
+                            error   = %e,
+                            "Post-retrieval failed — uncertainty response not grounded"
+                        ),
                     }
                 }
-                Err(e) => warn!(
+                Err(error) => warn!(
                     session = %self.session_id,
-                    error   = %e,
-                    "Post-retrieval failed — uncertainty response not grounded"
+                    query_fingerprint = %error.policy().query_fingerprint,
+                    reasons = %error.policy().reason_codes(),
+                    "Post-generation model text did not authorize retrieval"
                 ),
             }
         }
@@ -5163,57 +5201,70 @@ impl CoreOrchestrator {
         //     Tracked with `retrieval_first_done` to avoid double-retrieval: if Phase 19
         //     already retrieved, Phase 9's detect_pre_trigger is skipped below.
         let retrieval_first_done = if is_retrieval_first_query(&content) {
-            info!(
-                session  = %self.session_id,
-                trace_id = %trace_id,
-                "Retrieval-first query detected — fetching before model call"
-            );
-            self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id)
-                .await?;
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
-                self.retrieval.retrieve_web_only(&content),
-            )
-            .await;
-            let injection = match result {
-                Ok(Ok(r)) => {
-                    info!(
-                        session = %self.session_id,
-                        source  = %r.source,
-                        "Retrieval-first: result obtained"
-                    );
-                    format!(
-                        "Retrieved fact for query '{query}':\n{text}\n(Source: {source})\n\n\
+            let request =
+                AuthorizedRetrievalRequest::from_current_operator_turn(&content, &trace_id);
+            if let Ok(request) = request {
+                info!(
+                    session  = %self.session_id,
+                    trace_id = %trace_id,
+                    query_fingerprint = %request.policy().query_fingerprint,
+                    reasons = %request.policy().reason_codes(),
+                    "Retrieval-first query detected — fetching before model call"
+                );
+                self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id)
+                    .await?;
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(RETRIEVAL_TIMEOUT_SECS),
+                    self.retrieval.retrieve_web_only(&request),
+                )
+                .await;
+                let injection = match result {
+                    Ok(Ok(r)) => {
+                        info!(
+                            session = %self.session_id,
+                            source  = %r.source,
+                            "Retrieval-first: result obtained"
+                        );
+                        format!(
+                            "Retrieved fact for query '{query}':\n{text}\n(Source: {source})\n\n\
                          Use the retrieved fact above to answer the question. \
                          Do not speculate beyond it.",
-                        query = content,
-                        text = r.text,
-                        source = r.source,
-                    )
-                }
-                Ok(Err(e)) => {
-                    warn!(session = %self.session_id, error = %e, "Retrieval-first: error");
-                    format!(
-                        "Retrieval for '{}' failed: {}. \
+                            query = content,
+                            text = r.text,
+                            source = r.source,
+                        )
+                    }
+                    Ok(Err(e)) => {
+                        warn!(session = %self.session_id, error = %e, "Retrieval-first: error");
+                        format!(
+                            "Retrieval for '{}' failed: {}. \
                          State that you cannot confirm this fact and why.",
-                        content, e
-                    )
-                }
-                Err(_timeout) => {
-                    warn!(session = %self.session_id, "Retrieval-first: timeout");
-                    format!(
-                        "Retrieval for '{}' timed out. \
+                            content, e
+                        )
+                    }
+                    Err(_timeout) => {
+                        warn!(session = %self.session_id, "Retrieval-first: timeout");
+                        format!(
+                            "Retrieval for '{}' timed out. \
                          State that you cannot confirm this fact right now.",
-                        content
-                    )
-                }
-            };
-            // Inject retrieval result — visible in all subsequent prepare_messages calls.
-            // Role is "user" with a `[Retrieved]` prefix (see push_tool_result docs):
-            // Ollama-compatible models only honor system/user/assistant roles; custom
-            // roles like "retrieval" are silently dropped by base-instruct models.
-            self.context.push_retrieval(injection);
-            true
+                            content
+                        )
+                    }
+                };
+                // Inject retrieval result — visible in all subsequent prepare_messages calls.
+                // Role is "user" with a `[Retrieved]` prefix (see push_tool_result docs):
+                // Ollama-compatible models only honor system/user/assistant roles; custom
+                // roles like "retrieval" are silently dropped by base-instruct models.
+                self.context.push_retrieval(injection);
+                true
+            } else {
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    "Retrieval-first classifier result failed core retrieval policy"
+                );
+                false
+            }
         } else {
             false
         };
@@ -5226,15 +5277,18 @@ impl CoreOrchestrator {
         let embed_model = self.model_config.embed.clone();
         let pre_retrieval_injection: Option<String> = if retrieval_first_done {
             None // Phase 19 already handled this
-        } else if let Some(trigger) = self.retrieval.detect_pre_trigger(
-            &content,
-            matches!(decision.category, Category::RetrievalFirst),
-        ) {
+        } else if let Ok(request) =
+            AuthorizedRetrievalRequest::from_current_operator_turn(&content, &trace_id)
+        {
+            let trigger = self
+                .retrieval
+                .detect_pre_trigger(matches!(decision.category, Category::RetrievalFirst))
+                .unwrap_or(crate::retrieval::RetrievalTrigger::MemorySearch);
             self.send_text(RETRIEVAL_ACKNOWLEDGMENT, false, &trace_id)
                 .await?;
             match self
                 .retrieval
-                .retrieve(&self.engine, &embed_model, &trigger)
+                .retrieve(&self.engine, &embed_model, &trigger, &request)
                 .await
             {
                 Ok(ctx) => {

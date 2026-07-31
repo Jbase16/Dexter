@@ -29,6 +29,27 @@ pub fn is_retrieval_first_query(input: &str) -> bool {
         || NEWS_PATTERNS.iter().any(|p| s.contains(p))
 }
 
+/// Narrow Rust-owned public-fact rules that may authorize core retrieval.
+///
+/// Weather belongs here but not in `is_retrieval_first_query`: the router path
+/// must retain the wttr.in fast-path rather than being intercepted by the
+/// DuckDuckGo-only pre-router path.
+pub fn is_core_retrieval_public_fact_query(input: &str) -> bool {
+    let s = input.trim().to_lowercase();
+    is_retrieval_first_query(input) || WEATHER_PATTERNS.iter().any(|p| s.contains(p))
+}
+
+/// Returns `true` when the operator explicitly asks Dexter to use the internet.
+///
+/// This is intentionally narrower than generic phrases such as "look up" or
+/// "find out", which can refer to local files, memory, or application state.
+pub fn is_explicit_online_retrieval_request(input: &str) -> bool {
+    let s = input.trim().to_lowercase();
+    EXPLICIT_ONLINE_PATTERNS
+        .iter()
+        .any(|pattern| s.contains(pattern))
+}
+
 /// Queries about the current date, time, day, or year.
 ///
 /// NOTE: deliberately empty. Time/date queries are answered by running the `date`
@@ -78,6 +99,30 @@ const NEWS_PATTERNS: &[&str] = &[
     "what's happening with",
     "any updates on",
     "what's new with",
+];
+
+/// Current weather is inherently time-sensitive public data.
+const WEATHER_PATTERNS: &[&str] = &[
+    "what's the weather",
+    "what is the weather",
+    "current weather",
+    "weather in ",
+    "weather for ",
+    "forecast for ",
+];
+
+/// Phrases that explicitly authorize an online lookup for the current turn.
+const EXPLICIT_ONLINE_PATTERNS: &[&str] = &[
+    "search the web",
+    "search online",
+    "browse the web",
+    "check the internet",
+    "look online",
+    "look it up online",
+    "look this up online",
+    "find this online",
+    "use the internet",
+    "web search",
 ];
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -136,6 +181,34 @@ mod tests {
         assert!(
             !is_retrieval_first_query("what is polymorphism"),
             "definition query must NOT be retrieval-first"
+        );
+    }
+
+    #[test]
+    fn core_retrieval_policy_detects_weather_as_narrow_public_fact() {
+        assert!(is_core_retrieval_public_fact_query(
+            "what's the weather in Sacramento?"
+        ));
+        assert!(is_core_retrieval_public_fact_query(
+            "forecast for Tokyo tomorrow"
+        ));
+        assert!(
+            !is_retrieval_first_query("what's the weather in Sacramento?"),
+            "weather must retain the router-owned wttr.in fast-path"
+        );
+    }
+
+    #[test]
+    fn explicit_online_request_requires_online_language() {
+        assert!(is_explicit_online_retrieval_request(
+            "search the web for the Rust release notes"
+        ));
+        assert!(is_explicit_online_retrieval_request(
+            "please look this up online"
+        ));
+        assert!(
+            !is_explicit_online_retrieval_request("look up my notes about Rust"),
+            "generic local lookup language must not authorize network retrieval"
         );
     }
 }

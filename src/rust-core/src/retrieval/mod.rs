@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod store;
 pub mod web;
 
+pub(crate) use pipeline::AuthorizedRetrievalRequest;
 #[allow(unused_imports)]
 // Phase 10+ callers via crate::retrieval::{RetrievalContext, RetrievalTrigger, RetrievalResult}
 pub use pipeline::{RetrievalContext, RetrievalPipeline, RetrievalResult, RetrievalTrigger};

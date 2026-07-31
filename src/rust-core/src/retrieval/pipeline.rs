@@ -17,9 +17,11 @@
 /// are non-fatal — the pipeline falls back to memory-only context.
 use std::path::Path;
 
+use thiserror::Error;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::action::policy::{PolicyEngine, RetrievalAuthorization, RetrievalPolicyDecision};
 use crate::constants::{
     LOCAL_RETRIEVAL_SKIP_WEB_THRESHOLD, MEMORY_DB_FILENAME, MEMORY_EMBED_MAX_CHARS,
     MEMORY_RECALL_THRESHOLD, MEMORY_RECALL_TOP_N, MEMORY_SOURCE_CONVERSATION,
@@ -27,6 +29,9 @@ use crate::constants::{
     RETRIEVAL_WEB_TIMEOUT_SECS, RETRIEVAL_WTTR_TIMEOUT_SECS, UNCERTAINTY_MARKER,
 };
 use crate::inference::engine::{EmbeddingRequest, InferenceEngine};
+use crate::inference::retrieval_classifier::{
+    is_core_retrieval_public_fact_query, is_explicit_online_retrieval_request,
+};
 
 use super::store::{MemoryEntry, VectorStore};
 use super::web::{FetchResult, WebRetriever};
@@ -51,25 +56,78 @@ pub struct RetrievalResult {
     pub confidence: f32,
 }
 
+/// Audit-safe capability label. A lookup starts at DuckDuckGo or wttr.in and
+/// may follow a validated HTTPS source link, so naming only the first host
+/// would understate the reachable boundary.
+const CORE_RETRIEVAL_DESTINATION: &str = "external_https_retrieval";
+
+/// A core retrieval request that can only be constructed from the exact current
+/// operator turn after Rust-owned policy authorization.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthorizedRetrievalRequest {
+    query: String,
+    policy: RetrievalPolicyDecision,
+}
+
+impl AuthorizedRetrievalRequest {
+    pub(crate) fn from_current_operator_turn(
+        operator_text: &str,
+        operator_turn_id: &str,
+    ) -> Result<Self, RetrievalAuthorizationError> {
+        let authorization = if is_explicit_online_retrieval_request(operator_text) {
+            RetrievalAuthorization::ExplicitOperatorRequest
+        } else if is_core_retrieval_public_fact_query(operator_text) {
+            RetrievalAuthorization::RustOwnedPublicFactRule
+        } else {
+            RetrievalAuthorization::Missing
+        };
+        let policy = PolicyEngine::evaluate_core_retrieval(
+            operator_text,
+            operator_text,
+            operator_turn_id,
+            authorization,
+            CORE_RETRIEVAL_DESTINATION,
+        );
+        if policy.approval_required {
+            return Err(RetrievalAuthorizationError { policy });
+        }
+        Ok(Self {
+            query: operator_text.trim().to_string(),
+            policy,
+        })
+    }
+
+    pub(crate) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(crate) fn policy(&self) -> &RetrievalPolicyDecision {
+        &self.policy
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("core retrieval requires explicit current-turn authorization")]
+pub(crate) struct RetrievalAuthorizationError {
+    policy: RetrievalPolicyDecision,
+}
+
+impl RetrievalAuthorizationError {
+    pub(crate) fn policy(&self) -> &RetrievalPolicyDecision {
+        &self.policy
+    }
+}
+
 /// What caused retrieval to trigger — governs which sources to query.
 #[derive(Debug, Clone)]
 pub enum RetrievalTrigger {
     /// Router classified user query as `Category::RetrievalFirst`.
     /// Search memory for context before generating the primary response.
-    MemorySearch { query: String },
+    MemorySearch,
     /// Post-generation: model expressed uncertainty via `UNCERTAINTY_MARKER`.
-    /// Retrieve context then generate a grounded follow-up response.
-    UncertaintyMarker { topic: String },
-}
-
-impl RetrievalTrigger {
-    /// Return the query string used to embed and search.
-    pub fn query(&self) -> &str {
-        match self {
-            Self::MemorySearch { query } => query,
-            Self::UncertaintyMarker { topic } => topic,
-        }
-    }
+    /// The marker is only a signal: its model-authored topic is never used as
+    /// the network query.
+    UncertaintyMarker,
 }
 
 /// Retrieved context ready for injection into the generation request.
@@ -126,15 +184,9 @@ impl RetrievalPipeline {
     /// `None` for all other categories.
     ///
     /// Pure function — no IO.
-    pub fn detect_pre_trigger(
-        &self,
-        user_message: &str,
-        is_retrieval_first: bool,
-    ) -> Option<RetrievalTrigger> {
+    pub fn detect_pre_trigger(&self, is_retrieval_first: bool) -> Option<RetrievalTrigger> {
         if is_retrieval_first {
-            Some(RetrievalTrigger::MemorySearch {
-                query: user_message.to_string(),
-            })
+            Some(RetrievalTrigger::MemorySearch)
         } else {
             None
         }
@@ -142,29 +194,20 @@ impl RetrievalPipeline {
 
     /// Post-generation trigger check.
     ///
-    /// Scans `response_text` for `UNCERTAINTY_MARKER`. If found, extracts the topic
-    /// as the text between the marker and the next `.` or end-of-line, trimmed.
-    ///
-    /// Returns `Some(UncertaintyMarker { topic })` or `None`.
+    /// Scans `response_text` for `UNCERTAINTY_MARKER`. The model-authored text
+    /// after the marker is deliberately not extracted or retained.
     /// Pure function — no IO.
     pub fn detect_post_trigger(&self, response_text: &str) -> Option<RetrievalTrigger> {
-        let marker_pos = response_text.find(UNCERTAINTY_MARKER)?;
-        let after = &response_text[marker_pos + UNCERTAINTY_MARKER.len()..];
-        // Extract topic: text up to the next '.' or end-of-line, trimmed.
-        let topic = after
-            .split_once('.')
-            .map(|(before, _)| before)
-            .unwrap_or_else(|| after.lines().next().unwrap_or(""))
-            .trim()
-            .to_string();
-        Some(RetrievalTrigger::UncertaintyMarker { topic })
+        response_text
+            .contains(UNCERTAINTY_MARKER)
+            .then_some(RetrievalTrigger::UncertaintyMarker)
     }
 
     // ── Retrieval ─────────────────────────────────────────────────────────────
 
     /// Execute retrieval for `trigger`:
     ///
-    /// 1. Embed `trigger.query()` via `engine.embed()`
+    /// 1. Embed the authorized current-turn query via `engine.embed()`
     /// 2. Search knowledge base (facts + cached web pages — conversation turns excluded)
     /// 3. Local-first check: if any hit ≥ LOCAL_RETRIEVAL_SKIP_WEB_THRESHOLD, skip web
     /// 4. Else fetch DuckDuckGo if UncertaintyMarker or no local knowledge
@@ -176,8 +219,9 @@ impl RetrievalPipeline {
         engine: &InferenceEngine,
         embed_model_name: &str,
         trigger: &RetrievalTrigger,
+        request: &AuthorizedRetrievalRequest,
     ) -> Result<RetrievalContext, Box<dyn std::error::Error + Send + Sync>> {
-        let query = trigger.query().to_string();
+        let query = request.query().to_string();
 
         // ── Step 1: embed the query ───────────────────────────────────────────
         // mxbai-embed-large performs better with this prefix on search queries.
@@ -233,7 +277,7 @@ impl RetrievalPipeline {
             .any(|h| h.similarity >= LOCAL_RETRIEVAL_SKIP_WEB_THRESHOLD);
 
         let should_fetch_web = !has_confident_local
-            && (matches!(trigger, RetrievalTrigger::UncertaintyMarker { .. })
+            && (matches!(trigger, RetrievalTrigger::UncertaintyMarker)
                 || knowledge_hits.is_empty());
 
         // Phase 37.8 — weather fast-path with cache bypass.
@@ -312,8 +356,9 @@ impl RetrievalPipeline {
     /// caching without blocking the response.
     pub async fn retrieve_web_only(
         &self,
-        query: &str,
+        request: &AuthorizedRetrievalRequest,
     ) -> Result<RetrievalResult, Box<dyn std::error::Error + Send + Sync>> {
+        let query = request.query();
         let encoded = urlencoding_encode(query);
         let api_url = format!(
             "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
@@ -341,7 +386,13 @@ impl RetrievalPipeline {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("https://duckduckgo.com")
                     .to_string();
-                info!(query = %query, source = %source, "retrieve_web_only: AbstractText hit");
+                info!(
+                    query_fingerprint = %request.policy().query_fingerprint,
+                    destination = %request.policy().destination,
+                    reasons = %request.policy().reason_codes(),
+                    source = %source,
+                    "retrieve_web_only: authorized AbstractText hit"
+                );
                 return Ok(RetrievalResult {
                     query: query.to_string(),
                     text: text.to_string(),
@@ -353,7 +404,13 @@ impl RetrievalPipeline {
 
         // Fall back to raw extracted body text from the DuckDuckGo response.
         // Confidence 0.5 — raw DDG response body is less reliable than AbstractText.
-        info!(query = %query, source = %fetch_result.url, "retrieve_web_only: raw body fallback");
+        info!(
+            query_fingerprint = %request.policy().query_fingerprint,
+            destination = %request.policy().destination,
+            reasons = %request.policy().reason_codes(),
+            source = %fetch_result.url,
+            "retrieve_web_only: authorized raw body fallback"
+        );
         Ok(RetrievalResult {
             query: query.to_string(),
             text: fetch_result.text,
@@ -1087,17 +1144,61 @@ mod tests {
     #[test]
     fn detect_pre_trigger_retrieval_first_returns_memory_search() {
         let p = make_pipeline();
-        let trigger = p.detect_pre_trigger("what version of Python is installed?", true);
+        let trigger = p.detect_pre_trigger(true);
         assert!(
             trigger.is_some(),
             "is_retrieval_first=true must return Some"
         );
         let trigger = trigger.unwrap();
         assert!(
-            matches!(trigger, RetrievalTrigger::MemorySearch { .. }),
+            matches!(trigger, RetrievalTrigger::MemorySearch),
             "trigger must be MemorySearch variant"
         );
-        assert_eq!(trigger.query(), "what version of Python is installed?");
+    }
+
+    #[test]
+    fn current_turn_public_fact_authorizes_bounded_retrieval() {
+        let request = AuthorizedRetrievalRequest::from_current_operator_turn(
+            "what is the latest version of Rust?",
+            "turn-public-fact",
+        )
+        .expect("narrow Rust-owned public fact rule should authorize retrieval");
+
+        assert_eq!(request.query(), "what is the latest version of Rust?");
+        assert!(!request.policy().approval_required);
+        assert!(request
+            .policy()
+            .reason_codes()
+            .contains("rust_owned_public_fact_rule"));
+    }
+
+    #[test]
+    fn ordinary_turn_cannot_become_outbound_query() {
+        let error = AuthorizedRetrievalRequest::from_current_operator_turn(
+            "summarize my local notes",
+            "turn-local",
+        )
+        .expect_err("ordinary local request must not authorize retrieval");
+
+        assert!(error.policy().approval_required);
+        assert!(error
+            .policy()
+            .reason_codes()
+            .contains("retrieval_authorization_missing"));
+    }
+
+    #[test]
+    fn explicit_online_request_authorizes_exact_current_turn() {
+        let request = AuthorizedRetrievalRequest::from_current_operator_turn(
+            "search the web for Rust release notes",
+            "turn-explicit-web",
+        )
+        .expect("explicit online request should authorize retrieval");
+
+        assert!(request
+            .policy()
+            .reason_codes()
+            .contains("explicit_online_request"));
     }
 
     // ── Embed-input truncation (mxbai-embed-large 512-token ceiling) ──────────
@@ -1323,7 +1424,7 @@ mod tests {
     #[test]
     fn detect_pre_trigger_chat_returns_none() {
         let p = make_pipeline();
-        let trigger = p.detect_pre_trigger("write me a poem about rivers", false);
+        let trigger = p.detect_pre_trigger(false);
         assert!(
             trigger.is_none(),
             "is_retrieval_first=false must return None"
@@ -1331,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_post_trigger_extracts_topic_from_marker() {
+    fn detect_post_trigger_does_not_extract_model_authored_topic() {
         let p = make_pipeline();
         let response = "I'm not certain about X. Let me check that for you.";
         let trigger = p.detect_post_trigger(response);
@@ -1339,15 +1440,7 @@ mod tests {
             trigger.is_some(),
             "uncertainty marker must trigger post-retrieval"
         );
-        match trigger.unwrap() {
-            RetrievalTrigger::UncertaintyMarker { topic } => {
-                assert_eq!(topic, "X", "topic must be extracted between marker and '.'");
-            }
-            other => panic!(
-                "expected UncertaintyMarker, got {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
+        assert!(matches!(trigger, Some(RetrievalTrigger::UncertaintyMarker)));
     }
 
     #[test]
@@ -1367,9 +1460,7 @@ mod tests {
             query: "test".to_string(),
             memory_hits: vec![],
             web_result: None,
-            trigger: RetrievalTrigger::MemorySearch {
-                query: "test".to_string(),
-            },
+            trigger: RetrievalTrigger::MemorySearch,
         };
         assert_eq!(
             p.format_for_injection(&ctx),
@@ -1398,9 +1489,7 @@ mod tests {
                 text: "web content here".to_string(),
                 fetched_at: "2026-03-08T00:00:00Z".to_string(),
             }),
-            trigger: RetrievalTrigger::MemorySearch {
-                query: "test".to_string(),
-            },
+            trigger: RetrievalTrigger::MemorySearch,
         };
         let formatted = p.format_for_injection(&ctx);
         assert!(

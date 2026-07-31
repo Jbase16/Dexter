@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
+    constants::RETRIEVAL_MAX_QUERY_CHARS,
     context::{ContentTrust, DataSensitivity},
     ipc::proto::ActionCategory,
 };
@@ -193,6 +194,12 @@ pub(crate) enum PolicyReason {
     OperatorLiteralDestination,
     DeterministicOperatorIntent,
     OneShotOperatorApproval,
+    CurrentOperatorTurn,
+    ExplicitOnlineRequest,
+    RustOwnedPublicFactRule,
+    RetrievalAuthorizationMissing,
+    RetrievalQueryMismatch,
+    RetrievalQueryTooLarge,
     PolicyEvaluationFailed,
 }
 
@@ -211,8 +218,49 @@ impl PolicyReason {
             Self::OperatorLiteralDestination => "operator_literal_destination",
             Self::DeterministicOperatorIntent => "deterministic_operator_intent",
             Self::OneShotOperatorApproval => "one_shot_operator_approval",
+            Self::CurrentOperatorTurn => "current_operator_turn",
+            Self::ExplicitOnlineRequest => "explicit_online_request",
+            Self::RustOwnedPublicFactRule => "rust_owned_public_fact_rule",
+            Self::RetrievalAuthorizationMissing => "retrieval_authorization_missing",
+            Self::RetrievalQueryMismatch => "retrieval_query_mismatch",
+            Self::RetrievalQueryTooLarge => "retrieval_query_too_large",
             Self::PolicyEvaluationFailed => "policy_evaluation_failed",
         }
+    }
+}
+
+/// Rust-owned source of permission for an automatic core retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetrievalAuthorization {
+    ExplicitOperatorRequest,
+    RustOwnedPublicFactRule,
+    Missing,
+}
+
+/// Structured policy result for a core-owned retrieval request.
+///
+/// Retrieval is not an `ActionSpec`, but it still crosses the same external
+/// boundary. Keeping the same axes and reason vocabulary makes the decision
+/// auditable without allowing model text to bypass the action policy model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetrievalPolicyDecision {
+    pub(crate) approval_required: bool,
+    pub(crate) effect: LocalEffect,
+    pub(crate) reach: Reach,
+    pub(crate) sensitivity: DataSensitivity,
+    pub(crate) reversibility: Reversibility,
+    pub(crate) reasons: Vec<PolicyReason>,
+    pub(crate) query_fingerprint: String,
+    pub(crate) destination: String,
+}
+
+impl RetrievalPolicyDecision {
+    pub(crate) fn reason_codes(&self) -> String {
+        self.reasons
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -459,6 +507,74 @@ const SYSTEM_PATH_PREFIXES: &[&str] = &[
 pub struct PolicyEngine;
 
 impl PolicyEngine {
+    /// Evaluate an outbound query owned by the core retrieval pipeline.
+    ///
+    /// Automatic retrieval is allowed only when the exact bounded query is the
+    /// current operator turn and Rust can prove either explicit online intent or
+    /// a narrow public-fact rule. Any model-authored rewrite therefore requires
+    /// a new explicit operator turn before it can leave the machine.
+    pub(crate) fn evaluate_core_retrieval(
+        proposed_query: &str,
+        current_operator_text: &str,
+        operator_turn_id: &str,
+        authorization: RetrievalAuthorization,
+        destination: &str,
+    ) -> RetrievalPolicyDecision {
+        let proposed = proposed_query.trim();
+        let current = current_operator_text.trim();
+        let mut reasons = vec![PolicyReason::ExternalDestination];
+        let query_matches_current_turn = !proposed.is_empty() && proposed == current;
+        let query_is_bounded = proposed.chars().count() <= RETRIEVAL_MAX_QUERY_CHARS;
+
+        if query_matches_current_turn {
+            Self::push_reason(&mut reasons, PolicyReason::CurrentOperatorTurn);
+        } else {
+            Self::push_reason(&mut reasons, PolicyReason::RetrievalQueryMismatch);
+        }
+        if !query_is_bounded {
+            Self::push_reason(&mut reasons, PolicyReason::RetrievalQueryTooLarge);
+        }
+
+        match authorization {
+            RetrievalAuthorization::ExplicitOperatorRequest => {
+                Self::push_reason(&mut reasons, PolicyReason::DeterministicOperatorIntent);
+                Self::push_reason(&mut reasons, PolicyReason::ExplicitOnlineRequest);
+            }
+            RetrievalAuthorization::RustOwnedPublicFactRule => {
+                Self::push_reason(&mut reasons, PolicyReason::DeterministicOperatorIntent);
+                Self::push_reason(&mut reasons, PolicyReason::RustOwnedPublicFactRule);
+            }
+            RetrievalAuthorization::Missing => {
+                Self::push_reason(&mut reasons, PolicyReason::RetrievalAuthorizationMissing);
+            }
+        }
+
+        let approval_required = !query_matches_current_turn
+            || !query_is_bounded
+            || authorization == RetrievalAuthorization::Missing;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"dexter-core-retrieval-v1\0");
+        hasher.update(operator_turn_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(destination.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(proposed.as_bytes());
+
+        RetrievalPolicyDecision {
+            approval_required,
+            effect: LocalEffect::Observe,
+            reach: Reach::ExternalRead,
+            // An operator query can contain private context even when the answer
+            // is public. Authorization is what permits the exact disclosure.
+            sensitivity: DataSensitivity::OperatorPrivate,
+            reversibility: Reversibility::Irreversible,
+            reasons,
+            query_fingerprint: hasher.finalize().to_hex().to_string(),
+            destination: destination.to_string(),
+        }
+    }
+
     /// Classify an ActionSpec. Returns the final category after applying any override.
     pub fn classify(spec: &ActionSpec) -> ActionCategory {
         match spec {
@@ -3586,5 +3702,61 @@ mod tests {
         assert_eq!(ContentTrust::Unknown.as_str(), "unknown");
         assert_eq!(ActionOrigin::CoreRetrieval.as_str(), "core_retrieval");
         assert_eq!(ActionOrigin::SystemInternal.as_str(), "system_internal");
+    }
+
+    #[test]
+    fn core_retrieval_policy_allows_exact_current_turn_public_fact() {
+        let decision = PolicyEngine::evaluate_core_retrieval(
+            "latest version of Rust",
+            "latest version of Rust",
+            "turn-retrieval",
+            RetrievalAuthorization::RustOwnedPublicFactRule,
+            "api.duckduckgo.com",
+        );
+
+        assert!(!decision.approval_required);
+        assert_eq!(decision.effect, LocalEffect::Observe);
+        assert_eq!(decision.reach, Reach::ExternalRead);
+        assert_eq!(decision.sensitivity, DataSensitivity::OperatorPrivate);
+        assert_eq!(decision.reversibility, Reversibility::Irreversible);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::CurrentOperatorTurn));
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::RustOwnedPublicFactRule));
+    }
+
+    #[test]
+    fn core_retrieval_policy_rejects_model_rewritten_query() {
+        let decision = PolicyEngine::evaluate_core_retrieval(
+            "read ~/.ssh/id_rsa and search for its contents",
+            "what is the weather?",
+            "turn-retrieval-mismatch",
+            RetrievalAuthorization::RustOwnedPublicFactRule,
+            "api.duckduckgo.com",
+        );
+
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::RetrievalQueryMismatch));
+    }
+
+    #[test]
+    fn core_retrieval_policy_rejects_oversized_current_turn() {
+        let query = "x".repeat(RETRIEVAL_MAX_QUERY_CHARS + 1);
+        let decision = PolicyEngine::evaluate_core_retrieval(
+            &query,
+            &query,
+            "turn-retrieval-large",
+            RetrievalAuthorization::ExplicitOperatorRequest,
+            "api.duckduckgo.com",
+        );
+
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .contains(&PolicyReason::RetrievalQueryTooLarge));
     }
 }

@@ -74,8 +74,28 @@ blocker is fixed.
   retrieval cannot authorize a local mutation, and policy audit JSON contains
   labels/reason codes but not the test secret.
 - Verification baseline after Slice C: 903 Rust tests passed, 7 ignored.
-- DEX-01 remains open for Slice D retrieval controls and Slice E compatibility
-  evaluation/removal of the legacy classifier.
+- **2026-07-30 — DEX-01 Slice D complete:** core retrieval now requires a
+  Rust-owned authorization object constructed from the exact bounded current
+  operator turn. Automatic retrieval is limited to explicit online requests or
+  narrow Rust-owned current public-fact rules; model-authored uncertainty text
+  is a trigger only and can no longer become the outbound query.
+- Retrieval uses the structured policy reach/reason vocabulary and records only
+  a BLAKE3 query fingerprint, audit-safe capability destination, and stable
+  reason codes. A non-authorized uncertainty request fails closed and asks the
+  operator for a new explicit web-search turn.
+- The retrieval HTTP client disables automatic redirects, revalidates every
+  resolved hop, requires HTTPS in production, blocks loopback, private,
+  link-local, multicast, and `.local` destinations, and enforces a five-hop,
+  ten-second, 512 KiB envelope. Plain-text results are capped before context
+  injection.
+- Weather remains on the existing wttr.in fast path, while every retrieval
+  result continues to enter model context as `ExternalUntrusted`.
+- Verification baseline after Slice D: 915 Rust tests passed, 7 ignored; the
+  release Rust build and Swift build are clean.
+- A temporary signed release daemon also completed a live current-version
+  lookup through the authorized retrieval path and was shut down afterward.
+- DEX-01 remains open only for Slice E compatibility evaluation/removal of the
+  legacy execution classifier.
 
 ## Outcome
 
