@@ -258,7 +258,7 @@ main() {
     assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "$diagnostic_token" || ok=1
     assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "Latest Action Summary" || ok=1
     assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "Recent Receipts" || ok=1
-    assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "raw message_send action was blocked" || ok=1
+    assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "reached the approval gate and was denied before execution" || ok=1
     assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "[HUDSmoke] showActionHistory" || ok=1
     assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "[HUDSmoke] showActionDiagnostic" || ok=1
     assert_contains "Swift HUD action surfaces smoke" "$SWIFT_LOG" "[HUDSmoke] showUtilityMarkdown" || ok=1

@@ -1,0 +1,135 @@
+{
+  "artifact_error": null,
+  "artifacts": {
+    "dexter_cli": {
+      "executable": true,
+      "path": "src/rust-core/target/release/dexter-cli",
+      "sha256": "ab837ef27a78add6ed3eb6712d144924896baa2718f00d348bc630e0846d352f",
+      "size_bytes": 7488704
+    },
+    "rust_core": {
+      "executable": true,
+      "path": "src/rust-core/target/release/dexter-core",
+      "sha256": "5e289c9a2aaf2f05dbbe6df47a14d74e68ae970ac27711efbbc7020b105f0b39",
+      "size_bytes": 16185984
+    },
+    "swift_product": {
+      "executable": true,
+      "path": "src/swift/.build/out/Products/Release/Dexter",
+      "sha256": "1483df1d0dbd6a4c1c6e6cd197203a09a7a6e432028b5055e996557740a563b8",
+      "size_bytes": 35676552
+    }
+  },
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "test system::residency::tests::tensor_shard_manifest_is_not_treated_as_missing_gguf_blob ... ok\ntest system::residency::tests::resolve_model_blob_reads_real_manifest_shape ... ok\ntest system::residency::tests::status_reflects_pin_state_and_wired_bytes ... ok\ntest voice::coordinator::tests::is_permanently_degraded_field_set_directly ... ok\ntest voice::coordinator::tests::is_tts_available_reflects_atomic_state ... ok\ntest voice::coordinator::tests::new_degraded_is_not_available ... ok\ntest voice::coordinator::tests::new_degraded_restart_count_is_zero ... ok\ntest voice::coordinator::tests::tts_arc_clone_points_to_same_allocation ... ok\ntest voice::coordinator::tests::voice_coordinator_clone_shares_state ... ok\ntest voice::coordinator::tests::voice_coordinator_tts_arc_shares_across_clones ... ok\ntest voice::protocol::tests::parse_handshake_browser_valid ... ok\ntest voice::protocol::tests::parse_handshake_malformed_json_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_startup_error_preserves_detail ... ok\ntest voice::protocol::tests::parse_handshake_stt_valid ... ok\ntest voice::protocol::tests::parse_handshake_unknown_worker_type_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_tts_valid ... ok\ntest voice::protocol::tests::parse_handshake_version_mismatch_returns_err ... ok\ntest voice::sentence::tests::flush_empty_buffer_returns_none ... ok\ntest voice::sentence::tests::push_boundary_at_or_above_min_length_returns_sentence ... ok\ntest voice::sentence::tests::flush_with_remaining_text_returns_it ... ok\ntest voice::sentence::tests::push_boundary_below_min_length_does_not_split ... ok\ntest voice::sentence::tests::push_empty_token_returns_empty_vec ... ok\ntest voice::sentence::tests::push_multi_sentence_returns_all_in_order ... ok\ntest voice::sentence::tests::push_no_boundary_accumulates_without_splitting ... ok\ntest voice::worker_client::tests::worker_error_display_includes_variant_info ... ok\ntest voice::worker_client::tests::worker_type_stt_as_str_returns_stt ... ok\ntest voice::worker_client::tests::worker_type_tts_as_str_returns_tts ... ok\ntest orchestrator::tests::capture_screen_returns_none_gracefully_when_screencapture_fails ... ok\ntest context::turn_record::tests::older_turn_record_without_runtime_field_remains_readable ... ok\ntest orchestrator::tests::empty_user_generation_is_recorded_as_failure_not_answered ... ok\ntest orchestrator::tests::synthetic_safe_action_injects_result_context ... ok\ntest system::runtime::tests::current_runtime_attestation_identifies_this_process ... ok\ntest inference::engine::tests::generate_stream_times_out_waiting_for_response_headers ... ok\ntest orchestrator::tests::operator_status_turn_is_recorded_as_host_evidence_not_model_chat ... ok\ntest orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record ... ok\ntest orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit ... ok\ntest orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit ... ok\n\ntest result: ok. 915 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.31s\n",
+      "duration_ms": 3508,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:02.312132+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/rust_unit.log",
+      "log_sha256": "7fd63d9beb49dfbc659f5c7bf06ab455831a3bd207e987c3fa5dfcef90de44be",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:23:58.803823+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release"
+      ],
+      "check_id": "rust_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.07s",
+      "duration_ms": 119,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:02.433059+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/rust_release.log",
+      "log_sha256": "7a7bb64a28cdda9b91e6e27f41be455104d929b5d7ad6dd5beca75fc5a47f1f4",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:02.313472+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--bin",
+        "dexter-cli"
+      ],
+      "check_id": "rust_cli_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.07s",
+      "duration_ms": 112,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:02.545602+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/rust_cli_release.log",
+      "log_sha256": "7a7bb64a28cdda9b91e6e27f41be455104d929b5d7ad6dd5beca75fc5a47f1f4",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:02.433249+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      "check_id": "python_workers",
+      "diagnostic_summary": "============================= test session starts ==============================\nplatform darwin -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/jason/Developer/Dex/src/python-workers\nconfigfile: pyproject.toml\ntestpaths: tests\nplugins: anyio-4.12.1, asyncio-1.3.0\nasyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function\ncollected 20 items\n\ntests/test_browser_worker.py .....                                       [ 25%]\ntests/test_protocol.py ......                                            [ 55%]\ntests/test_stt_worker.py .....                                           [ 80%]\ntests/test_tts_worker.py ....                                            [100%]\n\n============================== 20 passed in 2.53s ==============================",
+      "duration_ms": 3318,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:05.864650+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/python_workers.log",
+      "log_sha256": "100c985b7a79e12baea4d6d6833a458a533a67f84a6be2377021b32caa462ac6",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:02.545837+00:00",
+      "working_directory": "src/python-workers"
+    },
+    {
+      "argv": [
+        "make",
+        "proto-check"
+      ],
+      "check_id": "proto_consistency",
+      "diagnostic_summary": "==> Generating Swift proto bindings in a temporary directory\n==> Checked-in Swift proto bindings match\n==> Compiling the Rust core against the current proto\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s\n==> Proto check passed",
+      "duration_ms": 302,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:06.166624+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/proto_consistency.log",
+      "log_sha256": "bdff724d0f16e9c61a29c5639f4892903461c4c914e3499882ced3c40cf480d3",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:05.864864+00:00",
+      "working_directory": "."
+    },
+    {
+      "argv": [
+        "swift",
+        "build",
+        "-c",
+        "release"
+      ],
+      "check_id": "swift_release",
+      "diagnostic_summary": "2058 |             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_TranscriptChunk>(),\n2059 |             options: options,\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Bridge/generated/dexter.grpc.swift:2058:40: warning: 'ProtobufDeserializer' is deprecated: See https://forums.swift.org/t/80177 [#DeprecatedDeclaration]\n2056 |             request: request,\n2057 |             serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AudioChunk>(),\n2058 |             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_TranscriptChunk>(),\n     |                                        `- warning: 'ProtobufDeserializer' is deprecated: See https://forums.swift.org/t/80177 [#DeprecatedDeclaration]\n2059 |             options: options,\n2060 |             onResponse: handleResponse\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Voice/VoiceCapture.swift:350:13: warning: capture of 'activeSession' with non-Sendable type 'AVCaptureSession' in a '@Sendable' closure [#SendableClosureCaptures]\n348 |         guard let activeSession else { return }\n349 |         sessionQueue.async {\n350 |             activeSession.stopRunning()\n    |             `- warning: capture of 'activeSession' with non-Sendable type 'AVCaptureSession' in a '@Sendable' closure [#SendableClosureCaptures]\n351 |             print(\"[VoiceCapture] Session stopped \u2014 microphone released\")\n352 |         }\n\n/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVCaptureSession.h:137:12: note: class 'AVCaptureSession' does not conform to the 'Sendable' protocol\n 135 |  */\n 136 | API_AVAILABLE(macos(10.7), ios(4.0), macCatalyst(14.0), tvos(17.0), visionos(1.0)) API_UNAVAILABLE(watchos)\n 137 | @interface AVCaptureSession : NSObject\n     |            `- note: class 'AVCaptureSession' does not conform to the 'Sendable' protocol\n 138 | {\n 139 | @private\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Voice/VoiceCapture.swift:1:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'AVFoundation' as warnings [#AddPreconcurrencyImport]\n  1 | import AVFoundation\n    | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'AVFoundation' as warnings [#AddPreconcurrencyImport]\n  2 | \n  3 | /// Captures microphone audio via AVCaptureSession, applies energy-threshold VAD,\n\n[#AddPreconcurrencyImport]: <https://docs.swift.org/compiler/documentation/diagnostics/add-preconcurrency-import>\n[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>\n[#ImplicitStrongCapture]: <https://docs.swift.org/compiler/documentation/diagnostics/implicit-strong-capture>\n[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>\n[1697\u2009/\u20091699] Dexter-product\n[1698\u2009/\u20091699] Dexter-product\nBuild complete! (65.01 sec)",
+      "duration_ms": 70499,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:25:16.667323+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/swift_release.log",
+      "log_sha256": "e7673ef4273ac73842cd5f8549691ac4d28c6fcb5049fd3a044a093175441803",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:06.166886+00:00",
+      "working_directory": "src/swift"
+    }
+  ],
+  "finished_at": "2026-07-31T07:25:16.694728+00:00",
+  "release_run_id": "0c34cd22-3cd5-4a37-a3d6-b84ba42b7661",
+  "result": "PASS",
+  "schema_version": 1,
+  "started_at": "2026-07-31T07:23:58.803704+00:00"
+}

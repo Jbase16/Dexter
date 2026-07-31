@@ -29,6 +29,7 @@ SWIFT_PID=""
 TARGET_DIR="/tmp/dexter-hud-smoke-delete-me"
 MARKER="$TARGET_DIR/proof.txt"
 SMOKE_TEXT="${DEXTER_HUD_APPROVAL_SMOKE_TEXT:-Use a Dexter shell action to run exactly this command: rm -rf /tmp/dexter-hud-smoke-delete-me}"
+SMOKE_ACTION_JSON='{"type":"shell","args":["rm","-rf","/tmp/dexter-hud-smoke-delete-me"],"rationale":"deterministic HUD approval smoke","category_override":"destructive"}'
 
 PASS="PASS"
 FAIL="FAIL"
@@ -144,6 +145,7 @@ start_swift_smoke() {
         cd "$SWIFT_DIR" || exit 2
         DEXTER_HUD_SMOKE=1 \
         DEXTER_HUD_SMOKE_TEXT="$SMOKE_TEXT" \
+        DEXTER_HUD_SMOKE_ACTION_JSON="$SMOKE_ACTION_JSON" \
         DEXTER_HUD_SMOKE_ACTION_APPROVAL=deny \
         DEXTER_HUD_SMOKE_SKIP_VOICE_CAPTURE=1 \
         DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS="${DEXTER_HUD_SMOKE_SUBMIT_DELAY_SECS:-0}" \
@@ -233,7 +235,8 @@ run_assertions() {
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] enabled" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] voiceCaptureSkipped" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] sessionReady" || ok=1
-    assert_log_contains "$name" "$SWIFT_LOG" "[App] onTextSubmit fired: '$SMOKE_TEXT'" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] syntheticActionSubmit" || ok=1
+    assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] syntheticActionEnqueued" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[DexterClient] onResponse ← actionRequest:" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "[HUDSmoke] actionRequest" || ok=1
     assert_log_contains "$name" "$SWIFT_LOG" "category=destructive" || ok=1
@@ -250,7 +253,7 @@ run_assertions() {
     assert_log_contains "$name" "$SWIFT_LOG" "Action denied before execution:" || ok=1
 
     assert_log_contains "$name" "$CORE_LOG" "Action requires operator approval" || ok=1
-    assert_log_contains "$name" "$CORE_LOG" "DESTRUCTIVE action awaiting operator approval" || ok=1
+    assert_log_contains "$name" "$CORE_LOG" "DESTRUCTIVE synthetic action awaiting operator approval" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "ActionApproval received" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action rejected by operator" || ok=1
     assert_log_contains "$name" "$CORE_LOG" "Action receipt emitted" || ok=1

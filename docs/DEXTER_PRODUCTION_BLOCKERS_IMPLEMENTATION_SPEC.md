@@ -109,6 +109,66 @@ closed as of 2026-07-30; DEX-02 remains open.
   AppleScript lanes.
 - **DEX-01 is closed.** DEX-02 remains the only blocker in this implementation
   plan.
+- **2026-07-30 — DEX-02 Slice A complete:** `scripts/release_identity.py`
+  now computes deterministic, mutation-aware source-tree identities; hashes
+  effective config and personality inputs without recording their contents;
+  records macOS, architecture, Rust, Cargo, Swift, Python, and pytest identity;
+  probes Ollama client, daemon, API compatibility, configured model presence,
+  and model digests; and provides fsync-plus-rename atomic JSON output with a
+  Markdown identity view.
+- Slice A verification passed 16 focused standard-library unit tests. A live
+  identity collection also correctly distinguished the installed Ollama
+  app (`0.32.5`), the stale CLI selected from `PATH` (`0.24.0`), and the
+  currently unavailable daemon. The compatibility probe failed closed without
+  starting or mutating services.
+- **2026-07-30 — DEX-02 Slice B implementation complete:** `make proto-check`
+  regenerates Swift bindings in a temporary directory, compares both checked-in
+  outputs, and compiles the Rust core against the current proto.
+  `scripts/release_checks.py` records exact Rust, Python, proto, and Swift check
+  commands with timestamps, exit status, bounded redacted diagnostics, full-log
+  hashes, and hashes of the exact Rust core, CLI, and Swift release products.
+  `scripts/live-smoke-summary.sh` now emits atomic schema-versioned JSON target
+  evidence alongside its existing Markdown summaries.
+- Slice B component verification passed 22 focused standard-library tests,
+  shell syntax checks, and `make proto-check`. The expensive release-check and
+  live-smoke batteries remain intentionally deferred to the identity-bound
+  aggregate gate rather than being duplicated during this cost-bounded turn.
+- **2026-07-30 — DEX-02 Slice C implementation complete:**
+  `scripts/release_gate.py` acquires a non-blocking gate lock, creates one UUID
+  run ID, binds build and smoke evidence to that run, stops before live smokes
+  after build/unit failure, continues across useful smoke failure coverage,
+  compares start/end source, configuration, model, and toolchain identity, and
+  atomically publishes timestamped and latest JSON/Markdown manifests.
+  `make daily-driver-v1-gate` now delegates exclusively to this orchestrator.
+- Slice C component verification passed 28 focused standard-library tests,
+  including concurrent-lock rejection, run-ID mismatch rejection, source-change
+  failure, manual-pending semantics, and atomic timestamp/latest publication.
+  The full gate remains intentionally unexecuted until its expensive checks and
+  live smokes are requested as one authoritative release run.
+- **2026-07-30 — DEX-02 Slice D implementation complete:**
+  `scripts/release_status.py` consumes only authoritative `latest.json`,
+  validates the schema and required checks/targets/artifacts, compares current
+  source, configuration, personality, runtime, models, toolchains, and exact
+  release products, and reports `PASS`, `STALE`, `MISMATCH`, `FAIL`, `MISSING`,
+  or `INVALID`. Strict mode uses an unoverrideable 24-hour freshness window and
+  exits nonzero for every state except `PASS`; Markdown and older successful
+  manifests cannot satisfy it.
+- Slice D component verification passed 37 focused standard-library tests plus
+  normal/strict missing-evidence command checks. Operator documentation now
+  distinguishes release evidence from `dexter-cli --status` and HUD runtime
+  health, and states that runtime readiness cannot imply release PASS.
+- **2026-07-31 — DEX-02 Slice E implementation complete:**
+  `scripts/release_attestation.py` creates an optional atomic attestation only
+  for the exact latest UUID whose automated evidence remains a current strict
+  PASS. The separate attestation records checklist version, time, run ID, and a
+  canonical source/runtime/artifact identity fingerprint without operator
+  content. Status reports automated evidence and manual `PENDING`, `PASS`,
+  `INVALID`, or `INVALIDATED` state independently.
+- Slice E component verification passed 42 focused standard-library tests,
+  shell syntax checks, and Makefile dry-run validation. No real attestation was
+  created. All DEX-02 implementation slices are now present, but DEX-02 remains
+  open until one complete authoritative gate run succeeds against the current
+  identity and the final manifest is inspected.
 
 ## Outcome
 

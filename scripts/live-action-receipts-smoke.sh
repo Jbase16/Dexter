@@ -257,27 +257,27 @@ main() {
     fi
 
     if [[ "$ok" -eq 0 ]]; then
-        assert_contains "$denied_out" "Action denied before execution: Run: echo $denied_token." "denied action is visible to operator" || ok=1
+        assert_contains "$denied_out" "Action denied before execution: Run: echo $denied_token" "denied action is visible to operator" || ok=1
+        assert_contains "$denied_out" "Review reason: consequential_local_effect" "denied action includes policy reason" || ok=1
         assert_log_contains_since "$denied_offset" "Action status injected into conversation context" "denied action remembered in context" || ok=1
         assert_log_contains_since "$denied_offset" "Action denied" "denied context label logged" || ok=1
 
         "$CLI_BIN" --actions recent --limit 25 > "$recent_out" 2>&1 || ok=1
         "$CLI_BIN" --actions last > "$last_out" 2>&1 || ok=1
 
-        assert_contains "$recent_out" "target: echo $safe_token" "recent receipts include safe target" || ok=1
+        assert_contains "$recent_out" 'target: echo "<1 arguments omitted>"' "recent receipts redact shell arguments" || ok=1
         assert_contains "$recent_out" "review: no approval required | approval: not required" "recent receipts include safe approval" || ok=1
         assert_contains "$recent_out" "result: Succeeded: $safe_token" "recent receipts include safe output" || ok=1
 
-        assert_contains "$recent_out" "target: echo $denied_token" "recent receipts include denied target" || ok=1
         assert_contains "$recent_out" "DENIED  shell" "recent receipts include denied status" || ok=1
         assert_contains "$recent_out" "review: approval required | approval: denied" "recent receipts include denied approval" || ok=1
         assert_contains "$recent_out" "result: Denied before execution." "recent receipts include denied result" || ok=1
 
-        assert_contains "$recent_out" "target: echo $approved_token" "recent receipts include approved target" || ok=1
         assert_contains "$recent_out" "review: approval required | approval: approved" "recent receipts include approved approval" || ok=1
         assert_contains "$recent_out" "result: Succeeded: $approved_token" "recent receipts include approved output" || ok=1
 
-        assert_contains "$last_out" "target: echo $approved_token" "last receipt is newest approved action" || ok=1
+        assert_contains "$last_out" 'target: echo "<1 arguments omitted>"' "last receipt redacts shell arguments" || ok=1
+        assert_contains "$last_out" "result: Succeeded: $approved_token" "last receipt is newest approved action" || ok=1
         assert_contains "$last_out" "review: approval required | approval: approved" "last receipt includes approval" || ok=1
     fi
 

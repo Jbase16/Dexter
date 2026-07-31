@@ -44,28 +44,33 @@ class TestBrowserWorkerHandlers:
         page.title = AsyncMock(return_value="Example Domain")
 
         payload = json.dumps({"url": "https://example.com/"}).encode()
-        success, output, error = await handle_navigate(page, payload)
+        result = await handle_navigate(page, payload)
 
-        assert success is True
-        assert output == "https://example.com/\nPage title: Example Domain"
-        assert error == ""
+        assert result["success"] is True
+        assert result["output"] == "https://example.com/\nPage title: Example Domain"
+        assert result["error"] == ""
+        assert result["page_url"] == "https://example.com/"
+        assert result["page_title"] == "Example Domain"
         page.goto.assert_awaited_once_with("https://example.com/", timeout=30_000)
-        page.title.assert_awaited_once()
+        assert page.title.await_count == 2
 
     async def test_handle_extract_full_page(self):
         """handle_extract with selector=None returns page body text (capped at 10k)."""
         from workers.browser_worker import handle_extract
 
         page = AsyncMock()
+        page.url = "https://example.com/"
+        page.title = AsyncMock(return_value="Example Domain")
         page.query_selector_all = AsyncMock(return_value=[])
         page.inner_text = AsyncMock(return_value="Hello World")
 
         payload = json.dumps({"selector": None}).encode()
-        success, output, error = await handle_extract(page, payload)
+        result = await handle_extract(page, payload)
 
-        assert success is True
-        assert output == "Hello World"
-        assert error == ""
+        assert result["success"] is True
+        assert result["output"] == "Hello World"
+        assert result["error"] == ""
+        assert result["page_url"] == "https://example.com/"
         page.query_selector_all.assert_awaited_once_with("a[href]")
         page.inner_text.assert_awaited_once_with("body")
 
@@ -74,30 +79,37 @@ class TestBrowserWorkerHandlers:
         from workers.browser_worker import handle_navigate
 
         page = AsyncMock()
+        page.url = "about:blank"
+        page.title = AsyncMock(return_value="")
         page.goto.side_effect = Exception("net::ERR_NAME_NOT_RESOLVED")
 
         payload = json.dumps({"url": "https://doesnotexist.invalid/"}).encode()
-        success, output, error = await handle_navigate(page, payload)
+        result = await handle_navigate(page, payload)
 
-        assert success is False
-        assert output == ""
-        assert "ERR_NAME_NOT_RESOLVED" in error
+        assert result["success"] is False
+        assert result["output"] == ""
+        assert "ERR_NAME_NOT_RESOLVED" in result["error"]
+        assert result["error_kind"] == "navigation_failed"
+        assert result["page_url"] == "about:blank"
 
     async def test_handle_screenshot_creates_file_path(self):
         """handle_screenshot returns the screenshot path on success."""
         from workers.browser_worker import handle_screenshot
 
         page = AsyncMock()
+        page.url = "https://example.com/"
+        page.title = AsyncMock(return_value="Example Domain")
         page.screenshot = AsyncMock()
 
-        success, output, error = await handle_screenshot(page, b"")
+        result = await handle_screenshot(page, b"")
 
-        assert success is True
+        assert result["success"] is True
         # Phase 37 / B6: screenshots now save to operator's Desktop.
         from pathlib import Path
         expected_prefix = str(Path.home() / "Desktop" / "screenshot_")
-        assert output.startswith(expected_prefix)
-        assert output.endswith(".png")
-        assert error == ""
+        assert result["output"].startswith(expected_prefix)
+        assert result["output"].endswith(".png")
+        assert result["error"] == ""
+        assert result["page_url"] == "https://example.com/"
         # screenshot() was called with the path we returned.
         page.screenshot.assert_awaited_once()

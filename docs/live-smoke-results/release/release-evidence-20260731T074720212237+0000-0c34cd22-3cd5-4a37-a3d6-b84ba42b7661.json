@@ -1,0 +1,1081 @@
+{
+  "acceptance_targets": [
+    {
+      "argv": [
+        "make",
+        "live-smoke-dock-launcher"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 2000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:25:18-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-dock-launcher.log",
+      "log_sha256": "97e2ccd4205279daae59c39c0e7e40334cba949839571cfc57f564ddaf880c13",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:25:16-0700",
+      "target": "live-smoke-dock-launcher"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-process-control"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 5000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:25:23-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-process-control.log",
+      "log_sha256": "ed5155895fa539b45c2dff64253813d53e92f8af1d9fbc2bb21abfaab9a2d043",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:25:18-0700",
+      "target": "live-smoke-process-control"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-stop-report"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 4000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:25:27-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-stop-report.log",
+      "log_sha256": "8be6e3f17ad40af14ba6ea6c35a834dae0af5483be7008a66e83d07e61a1579a",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:25:23-0700",
+      "target": "live-smoke-stop-report"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-run-loop-lifecycle"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 39000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:26:06-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-run-loop-lifecycle.log",
+      "log_sha256": "4be39a44fb14085b93908883458ee84dd24967dd232be35560e76e04d1454d2a",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:25:27-0700",
+      "target": "live-smoke-run-loop-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-stale-swift-stop"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 11000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:26:17-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-stale-swift-stop.log",
+      "log_sha256": "6fff8caae70057018a342da519dea844a8d1f06a76515dc2d8ef6f6625bf21cb",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:26:06-0700",
+      "target": "live-smoke-stale-swift-stop"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-lifecycle"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 57000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:27:14-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-lifecycle.log",
+      "log_sha256": "b32bd8a99e1278c640fc3be709dfe25761d2448b3c45908265c71be26e043b92",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:26:17-0700",
+      "target": "live-smoke-hud-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-placement"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 28000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:27:42-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-placement.log",
+      "log_sha256": "2d90e334cd607daebc59ab8b5d1df56d8d967d0d0b2cca0582879c493dd0d6f4",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:27:14-0700",
+      "target": "live-smoke-hud-placement"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-placement-command"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 31000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:28:13-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-placement-command.log",
+      "log_sha256": "5f241744d53c7b50eb96338d10dabff8afea94ce39e2f25cb083ddb8b587dc41",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:27:42-0700",
+      "target": "live-smoke-placement-command"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-residency-proof"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 1000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:28:14-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-residency-proof.log",
+      "log_sha256": "ff7c9ffce228d1eea845138f50f9311de0aeeb74f845fda87bca063911783342",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:28:13-0700",
+      "target": "live-smoke-residency-proof"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-startup-readiness"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 13000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:28:27-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-startup-readiness.log",
+      "log_sha256": "68ababb07a09994faa1dbc1b116abc6d2ba2c19735700f14c04954ce9257acb0",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:28:14-0700",
+      "target": "live-smoke-startup-readiness"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-local-answers"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 23000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:28:50-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-local-answers.log",
+      "log_sha256": "2661b2f0ef28fa1ff5ac3bf3a60c2b62d921bd71589d88ad4d350993272174d3",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:28:27-0700",
+      "target": "live-smoke-local-answers"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-operator-status"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 19000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:29:09-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-operator-status.log",
+      "log_sha256": "8177ea062608ec7a130309e50936bcf66967decf82dcb0685ac0b76406864ffa",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:28:50-0700",
+      "target": "live-smoke-operator-status"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-health"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 51000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:30:00-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-health.log",
+      "log_sha256": "06a38fd8c161637f67d3dcd2cc05cb64df332d53ef6a48fede189c496e6a36c5",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:29:09-0700",
+      "target": "live-smoke-hud-health"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-unavailable-health"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 25000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:30:25-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-unavailable-health.log",
+      "log_sha256": "84bd0b00bb71b9740415282253842058aa5b4daf092136c83162b86e1593f730",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:30:00-0700",
+      "target": "live-smoke-hud-unavailable-health"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-external-failures"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 23000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:30:48-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-external-failures.log",
+      "log_sha256": "ee1ba1ad03168a75a7357396ad4e2a5967ba941f5694e541428610181c16dfe3",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:30:25-0700",
+      "target": "live-smoke-external-failures"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-diagnostic"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 16000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:31:04-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-action-diagnostic.log",
+      "log_sha256": "76f3d30c6a7cba0f770e169131862b3646f4af26275dcc7a01095bea48ae9853",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:30:48-0700",
+      "target": "live-smoke-action-diagnostic"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-context-turn-records"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 28000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:31:32-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-context-turn-records.log",
+      "log_sha256": "8005312dc08de0ba8986ed934d429485696093defe068631def5dcd4b0a1e679",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:31:04-0700",
+      "target": "live-smoke-context-turn-records"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-shortcut-action"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 26000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:31:58-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-shortcut-action.log",
+      "log_sha256": "f57adae5d531ac45620ddeb6074cad1db0436de647029338012f87d54b183600",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:31:32-0700",
+      "target": "live-smoke-shortcut-action"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-window-focus"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 20000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:32:18-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-window-focus.log",
+      "log_sha256": "822f3504662e84f3cbab294fae7009ae785fcb6d010e59d12021eb747ecbd1ff",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:31:58-0700",
+      "target": "live-smoke-window-focus"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-window-inspect"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 17000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:32:35-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-window-inspect.log",
+      "log_sha256": "dcee733211b58da9714b50705025795e8db65882eef695f5251f6035a1181415",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:32:18-0700",
+      "target": "live-smoke-window-inspect"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-snapshot"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 17000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:32:52-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-snapshot.log",
+      "log_sha256": "310df76b4e1d2099c3fdc4e1dd32dacf815adcb634423ff25fe62f0f4644c776",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:32:35-0700",
+      "target": "live-smoke-ui-snapshot"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-click"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 28000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:33:20-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-click.log",
+      "log_sha256": "4f65f6a9d846caa832573f78614ca150e97ce6dab7abe6c2c545d1b7610946a6",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:32:52-0700",
+      "target": "live-smoke-ui-click"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-type"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 21000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:33:41-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-type.log",
+      "log_sha256": "769488ec24b3d352c6f348e64bb7c9ba92f56f36c6ff2627b18470e1f32d60ac",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:33:20-0700",
+      "target": "live-smoke-ui-type"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-select"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 22000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:34:03-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-select.log",
+      "log_sha256": "635df9dcc7dfd16b0442c841c0ad7cf39802556b582152a2ff61814b01a00902",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:33:41-0700",
+      "target": "live-smoke-ui-select"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-toggle"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 20000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:34:23-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-toggle.log",
+      "log_sha256": "78563d4f59edec9ea8061a7ca20d1d099571e45ef7447932a33d9d6501da8530",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:34:03-0700",
+      "target": "live-smoke-ui-toggle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-pick"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 22000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:34:45-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-pick.log",
+      "log_sha256": "e3b6f2c1e510c34dbadf2843e34b8c771bed3e34493b8c99b2c35537466a7ec1",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:34:23-0700",
+      "target": "live-smoke-ui-pick"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-failure-diagnostic"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 22000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:35:07-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-ui-failure-diagnostic.log",
+      "log_sha256": "ddde612ed846107d090f63e9285fba0f658e569a91f49b87d9aff6c04c3100fc",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:34:45-0700",
+      "target": "live-smoke-ui-failure-diagnostic"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-matrix"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 31000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:35:38-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-action-matrix.log",
+      "log_sha256": "5ddfa3de0a83ea3b2b1f38a42e700d3ef2d0af74abb700e1ee17d3f35f03f8b1",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:35:07-0700",
+      "target": "live-smoke-action-matrix"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-browser-recovery"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 19000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:35:57-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-browser-recovery.log",
+      "log_sha256": "7199ba4f2fcdf0181d440358c694d1c3203821c8f55e60fbacdcc94ea8bd9fe7",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:35:38-0700",
+      "target": "live-smoke-browser-recovery"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-receipts"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 20000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:36:17-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-action-receipts.log",
+      "log_sha256": "ec8666aba1cd5f458ab65e3130e32d059743fec128267efd93206ae22fa66cd1",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:35:57-0700",
+      "target": "live-smoke-action-receipts"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-approval-lifecycle"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 25000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:36:42-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-approval-lifecycle.log",
+      "log_sha256": "3cd1470b7eb3e625884afc1051eb17cc28ee0d3c91e27fc442691345ee6281b4",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:36:17-0700",
+      "target": "live-smoke-approval-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-action-surfaces"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 46000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:37:28-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-action-surfaces.log",
+      "log_sha256": "a33c9f5b01dba5dca1592259a6954a53898e625f405b27a589413cb8cf7447fa",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:36:42-0700",
+      "target": "live-smoke-hud-action-surfaces"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-ui-failure"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 49000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:38:17-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-ui-failure.log",
+      "log_sha256": "84c1e11dedaf852583bde9c2a484b96cc6c7d32bd8d7b73102335621db3e517e",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:37:28-0700",
+      "target": "live-smoke-hud-ui-failure"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-approval"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 120000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:40:17-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-hud-approval.log",
+      "log_sha256": "1db3bddd1569107142dc6c996997dbcec394f914ccd269d79beb6d46cfcc7ffb",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:38:17-0700",
+      "target": "live-smoke-hud-approval"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-cancel"
+      ],
+      "battery": "acceptance",
+      "duration_ms": 30000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:40:47-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_002516/live-smoke-action-cancel.log",
+      "log_sha256": "86431b32d9e4b0f969e0869667a7e51b73b3e5389221fdef50e663b4fbd0300f",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:40:17-0700",
+      "target": "live-smoke-action-cancel"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-external-failures"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 17000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:41:04-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-external-failures.log",
+      "log_sha256": "654b2f8839906470abc56fd099d2eb9b28e732aec009a25d9b0d1fe7e1dae9a7",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:40:47-0700",
+      "target": "live-smoke-external-failures"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-diagnostic"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 10000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:41:14-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-action-diagnostic.log",
+      "log_sha256": "8bf63ffc143f6383a4a44dbe9ad7a3f4fbc1d89c8d2cc966c7aab29d5053855e",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:41:04-0700",
+      "target": "live-smoke-action-diagnostic"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-context-turn-records"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 19000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:41:33-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-context-turn-records.log",
+      "log_sha256": "975548a8fe5296236ec0bba2328e4a09749680aafcaf2132fca62d71931df14a",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:41:14-0700",
+      "target": "live-smoke-context-turn-records"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-shortcut-action"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 19000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:41:52-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-shortcut-action.log",
+      "log_sha256": "6fb95c8d03f8f256b4bb341ea848d3748399875a100925c7b539c33cb7429123",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:41:33-0700",
+      "target": "live-smoke-shortcut-action"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-window-focus"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 26000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:42:18-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-window-focus.log",
+      "log_sha256": "7ab39666e8706ce3a82227207f9b55bca08299732e3adc55e16faa88a1df0eeb",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:41:52-0700",
+      "target": "live-smoke-window-focus"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-window-inspect"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 19000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:42:37-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-window-inspect.log",
+      "log_sha256": "6165dcd169ab1035437567a3571bab3b88d856a17065903bb6f9cc71427654de",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:42:18-0700",
+      "target": "live-smoke-window-inspect"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-snapshot"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 18000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:42:55-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-snapshot.log",
+      "log_sha256": "406951dfefb611fc07171d546e3f41c595531892542dd5686c42e9a8d824615d",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:42:37-0700",
+      "target": "live-smoke-ui-snapshot"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-click"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 21000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:43:16-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-click.log",
+      "log_sha256": "4889b854a78c573489afe65da7cdd9c137ea9f3f6e72f6cae28c9a8430cd6c64",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:42:55-0700",
+      "target": "live-smoke-ui-click"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-type"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 20000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:43:36-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-type.log",
+      "log_sha256": "97e79fa44c2f2b3c9d599736d28d2838cd4eac72836b8a041ee22f3101ba43b3",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:43:16-0700",
+      "target": "live-smoke-ui-type"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-select"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 28000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:44:04-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-select.log",
+      "log_sha256": "36b0b26f790650169b03891e5eb5c9d5060a314e48ba12624f5072ae9b973c2b",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:43:36-0700",
+      "target": "live-smoke-ui-select"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-toggle"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 21000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:44:25-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-toggle.log",
+      "log_sha256": "d661049d54a2aba52e687dbbeef96764569bbb3bcffa67ce2e54c2d1bd7682f3",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:44:05-0700",
+      "target": "live-smoke-ui-toggle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-pick"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 22000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:44:47-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-pick.log",
+      "log_sha256": "c9b52e2f64b9598da4e55b73ae274df4542db67f55eb4669b3c60bbec337dfea",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:44:25-0700",
+      "target": "live-smoke-ui-pick"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-failure-diagnostic"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 22000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:45:09-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-ui-failure-diagnostic.log",
+      "log_sha256": "fe1529398b1e9cd6c28cadf064414a1d8056704e91103714def8c8b3c590400c",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:44:47-0700",
+      "target": "live-smoke-ui-failure-diagnostic"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-matrix"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 33000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:45:42-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-action-matrix.log",
+      "log_sha256": "5ddfa3de0a83ea3b2b1f38a42e700d3ef2d0af74abb700e1ee17d3f35f03f8b1",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:45:09-0700",
+      "target": "live-smoke-action-matrix"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-browser-recovery"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 17000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:45:59-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-browser-recovery.log",
+      "log_sha256": "7199ba4f2fcdf0181d440358c694d1c3203821c8f55e60fbacdcc94ea8bd9fe7",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:45:42-0700",
+      "target": "live-smoke-browser-recovery"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-browser-recovery-model"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 13000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:46:12-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-browser-recovery-model.log",
+      "log_sha256": "5afe63261202c8555cd45ea0f602a0509746dabb9ae91ce6949c4e373c9539df",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:45:59-0700",
+      "target": "live-smoke-browser-recovery-model"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-receipts"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 15000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:46:27-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-action-receipts.log",
+      "log_sha256": "4508eb7f9c9f8cf64a0f03c33645c210c13ffc24f702310f828afbe8b8f21235",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:46:12-0700",
+      "target": "live-smoke-action-receipts"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-approval-lifecycle"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 25000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T00:46:52-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-approval-lifecycle.log",
+      "log_sha256": "4a4d7e738171face3b20601b94bfd6f89e6b69d1c062e9f751c579e1781b33f2",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:46:27-0700",
+      "target": "live-smoke-approval-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-action-surfaces"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 1000,
+      "exit_status": 1,
+      "finished_at": "2026-07-31T00:46:53-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-hud-action-surfaces.log",
+      "log_sha256": "55ca0061afbe9653d211c4f75695b5741003b268381728f9a038af174b02036f",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:46:52-0700",
+      "target": "live-smoke-hud-action-surfaces"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-ui-failure"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 1000,
+      "exit_status": 1,
+      "finished_at": "2026-07-31T00:46:54-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-hud-ui-failure.log",
+      "log_sha256": "55ca0061afbe9653d211c4f75695b5741003b268381728f9a038af174b02036f",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:46:53-0700",
+      "target": "live-smoke-hud-ui-failure"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-approval"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 0,
+      "exit_status": 1,
+      "finished_at": "2026-07-31T00:46:54-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-hud-approval.log",
+      "log_sha256": "55ca0061afbe9653d211c4f75695b5741003b268381728f9a038af174b02036f",
+      "result": "FAIL",
+      "started_at": "2026-07-31T00:46:54-0700",
+      "target": "live-smoke-hud-approval"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-cancel"
+      ],
+      "battery": "action_safety_full",
+      "duration_ms": 25000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T00:47:19-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_004047/live-smoke-action-cancel.log",
+      "log_sha256": "725fcd18a8d6e1f8132e8897c9730f4471bb32b148f572607f784369a560ebdd",
+      "result": "PASS",
+      "started_at": "2026-07-31T00:46:54-0700",
+      "target": "live-smoke-action-cancel"
+    }
+  ],
+  "artifacts": {
+    "dexter_cli": {
+      "executable": true,
+      "path": "src/rust-core/target/release/dexter-cli",
+      "sha256": "ab837ef27a78add6ed3eb6712d144924896baa2718f00d348bc630e0846d352f",
+      "size_bytes": 7488704
+    },
+    "rust_core": {
+      "executable": true,
+      "path": "src/rust-core/target/release/dexter-core",
+      "sha256": "5e289c9a2aaf2f05dbbe6df47a14d74e68ae970ac27711efbbc7020b105f0b39",
+      "size_bytes": 16185984
+    },
+    "swift_product": {
+      "executable": true,
+      "path": "src/swift/.build/out/Products/Release/Dexter",
+      "sha256": "1483df1d0dbd6a4c1c6e6cd197203a09a7a6e432028b5055e996557740a563b8",
+      "size_bytes": 35676552
+    }
+  },
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "test system::residency::tests::tensor_shard_manifest_is_not_treated_as_missing_gguf_blob ... ok\ntest system::residency::tests::resolve_model_blob_reads_real_manifest_shape ... ok\ntest system::residency::tests::status_reflects_pin_state_and_wired_bytes ... ok\ntest voice::coordinator::tests::is_permanently_degraded_field_set_directly ... ok\ntest voice::coordinator::tests::is_tts_available_reflects_atomic_state ... ok\ntest voice::coordinator::tests::new_degraded_is_not_available ... ok\ntest voice::coordinator::tests::new_degraded_restart_count_is_zero ... ok\ntest voice::coordinator::tests::tts_arc_clone_points_to_same_allocation ... ok\ntest voice::coordinator::tests::voice_coordinator_clone_shares_state ... ok\ntest voice::coordinator::tests::voice_coordinator_tts_arc_shares_across_clones ... ok\ntest voice::protocol::tests::parse_handshake_browser_valid ... ok\ntest voice::protocol::tests::parse_handshake_malformed_json_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_startup_error_preserves_detail ... ok\ntest voice::protocol::tests::parse_handshake_stt_valid ... ok\ntest voice::protocol::tests::parse_handshake_unknown_worker_type_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_tts_valid ... ok\ntest voice::protocol::tests::parse_handshake_version_mismatch_returns_err ... ok\ntest voice::sentence::tests::flush_empty_buffer_returns_none ... ok\ntest voice::sentence::tests::push_boundary_at_or_above_min_length_returns_sentence ... ok\ntest voice::sentence::tests::flush_with_remaining_text_returns_it ... ok\ntest voice::sentence::tests::push_boundary_below_min_length_does_not_split ... ok\ntest voice::sentence::tests::push_empty_token_returns_empty_vec ... ok\ntest voice::sentence::tests::push_multi_sentence_returns_all_in_order ... ok\ntest voice::sentence::tests::push_no_boundary_accumulates_without_splitting ... ok\ntest voice::worker_client::tests::worker_error_display_includes_variant_info ... ok\ntest voice::worker_client::tests::worker_type_stt_as_str_returns_stt ... ok\ntest voice::worker_client::tests::worker_type_tts_as_str_returns_tts ... ok\ntest orchestrator::tests::capture_screen_returns_none_gracefully_when_screencapture_fails ... ok\ntest context::turn_record::tests::older_turn_record_without_runtime_field_remains_readable ... ok\ntest orchestrator::tests::empty_user_generation_is_recorded_as_failure_not_answered ... ok\ntest orchestrator::tests::synthetic_safe_action_injects_result_context ... ok\ntest system::runtime::tests::current_runtime_attestation_identifies_this_process ... ok\ntest inference::engine::tests::generate_stream_times_out_waiting_for_response_headers ... ok\ntest orchestrator::tests::operator_status_turn_is_recorded_as_host_evidence_not_model_chat ... ok\ntest orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record ... ok\ntest orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit ... ok\ntest orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit ... ok\n\ntest result: ok. 915 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.31s\n",
+      "duration_ms": 3508,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:02.312132+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/rust_unit.log",
+      "log_sha256": "7fd63d9beb49dfbc659f5c7bf06ab455831a3bd207e987c3fa5dfcef90de44be",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:23:58.803823+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release"
+      ],
+      "check_id": "rust_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.07s",
+      "duration_ms": 119,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:02.433059+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/rust_release.log",
+      "log_sha256": "7a7bb64a28cdda9b91e6e27f41be455104d929b5d7ad6dd5beca75fc5a47f1f4",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:02.313472+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--bin",
+        "dexter-cli"
+      ],
+      "check_id": "rust_cli_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.07s",
+      "duration_ms": 112,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:02.545602+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/rust_cli_release.log",
+      "log_sha256": "7a7bb64a28cdda9b91e6e27f41be455104d929b5d7ad6dd5beca75fc5a47f1f4",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:02.433249+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      "check_id": "python_workers",
+      "diagnostic_summary": "============================= test session starts ==============================\nplatform darwin -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/jason/Developer/Dex/src/python-workers\nconfigfile: pyproject.toml\ntestpaths: tests\nplugins: anyio-4.12.1, asyncio-1.3.0\nasyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function\ncollected 20 items\n\ntests/test_browser_worker.py .....                                       [ 25%]\ntests/test_protocol.py ......                                            [ 55%]\ntests/test_stt_worker.py .....                                           [ 80%]\ntests/test_tts_worker.py ....                                            [100%]\n\n============================== 20 passed in 2.53s ==============================",
+      "duration_ms": 3318,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:05.864650+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/python_workers.log",
+      "log_sha256": "100c985b7a79e12baea4d6d6833a458a533a67f84a6be2377021b32caa462ac6",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:02.545837+00:00",
+      "working_directory": "src/python-workers"
+    },
+    {
+      "argv": [
+        "make",
+        "proto-check"
+      ],
+      "check_id": "proto_consistency",
+      "diagnostic_summary": "==> Generating Swift proto bindings in a temporary directory\n==> Checked-in Swift proto bindings match\n==> Compiling the Rust core against the current proto\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s\n==> Proto check passed",
+      "duration_ms": 302,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:24:06.166624+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/proto_consistency.log",
+      "log_sha256": "bdff724d0f16e9c61a29c5639f4892903461c4c914e3499882ced3c40cf480d3",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:05.864864+00:00",
+      "working_directory": "."
+    },
+    {
+      "argv": [
+        "swift",
+        "build",
+        "-c",
+        "release"
+      ],
+      "check_id": "swift_release",
+      "diagnostic_summary": "2058 |             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_TranscriptChunk>(),\n2059 |             options: options,\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Bridge/generated/dexter.grpc.swift:2058:40: warning: 'ProtobufDeserializer' is deprecated: See https://forums.swift.org/t/80177 [#DeprecatedDeclaration]\n2056 |             request: request,\n2057 |             serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AudioChunk>(),\n2058 |             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_TranscriptChunk>(),\n     |                                        `- warning: 'ProtobufDeserializer' is deprecated: See https://forums.swift.org/t/80177 [#DeprecatedDeclaration]\n2059 |             options: options,\n2060 |             onResponse: handleResponse\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Voice/VoiceCapture.swift:350:13: warning: capture of 'activeSession' with non-Sendable type 'AVCaptureSession' in a '@Sendable' closure [#SendableClosureCaptures]\n348 |         guard let activeSession else { return }\n349 |         sessionQueue.async {\n350 |             activeSession.stopRunning()\n    |             `- warning: capture of 'activeSession' with non-Sendable type 'AVCaptureSession' in a '@Sendable' closure [#SendableClosureCaptures]\n351 |             print(\"[VoiceCapture] Session stopped \u2014 microphone released\")\n352 |         }\n\n/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVCaptureSession.h:137:12: note: class 'AVCaptureSession' does not conform to the 'Sendable' protocol\n 135 |  */\n 136 | API_AVAILABLE(macos(10.7), ios(4.0), macCatalyst(14.0), tvos(17.0), visionos(1.0)) API_UNAVAILABLE(watchos)\n 137 | @interface AVCaptureSession : NSObject\n     |            `- note: class 'AVCaptureSession' does not conform to the 'Sendable' protocol\n 138 | {\n 139 | @private\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Voice/VoiceCapture.swift:1:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'AVFoundation' as warnings [#AddPreconcurrencyImport]\n  1 | import AVFoundation\n    | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'AVFoundation' as warnings [#AddPreconcurrencyImport]\n  2 | \n  3 | /// Captures microphone audio via AVCaptureSession, applies energy-threshold VAD,\n\n[#AddPreconcurrencyImport]: <https://docs.swift.org/compiler/documentation/diagnostics/add-preconcurrency-import>\n[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>\n[#ImplicitStrongCapture]: <https://docs.swift.org/compiler/documentation/diagnostics/implicit-strong-capture>\n[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>\n[1697\u2009/\u20091699] Dexter-product\n[1698\u2009/\u20091699] Dexter-product\nBuild complete! (65.01 sec)",
+      "duration_ms": 70499,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:25:16.667323+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/0c34cd22-3cd5-4a37-a3d6-b84ba42b7661/build-logs/swift_release.log",
+      "log_sha256": "e7673ef4273ac73842cd5f8549691ac4d28c6fcb5049fd3a044a093175441803",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:24:06.166886+00:00",
+      "working_directory": "src/swift"
+    }
+  ],
+  "finished_at": "2026-07-31T07:47:20.212237+00:00",
+  "gate_errors": [
+    "acceptance smoke command exited 2",
+    "action_safety_full smoke command exited 2"
+  ],
+  "identity": {
+    "config_sha256": "f590b64200ff61173d603ec28b95e611ebb1104181cc384cf5d161fdb49e5b52",
+    "dexter_cli_binary_sha256": "ab837ef27a78add6ed3eb6712d144924896baa2718f00d348bc630e0846d352f",
+    "input_sha256": {
+      "gate_acceptance_status": "5a45e7a9583bc1865b363e77bb3aea5800a02a31cbd31949c7723feb62e33495",
+      "gate_attestation": "d5b2b0e744b144e3a956f7f383eb2b18f91241b921cbd37ec840ab7fd5d90df0",
+      "gate_identity_helper": "085fcccb8b071b6642c2ab9ee4183ca0f7073dc317b9bdaa411cf815ce55389b",
+      "gate_makefile": "57e9c6b5e048a1fe028743798864d9ffa973913907f801338d54300fee09ebaf",
+      "gate_orchestrator": "c8342822ade826be47d255e03889935753bfa349582bf893c4fc3e98955263b8",
+      "gate_proto_check": "5eb7386f460f54a5b284197ee141bf03450d6bd1aafb95eecdfc229347d1ac6e",
+      "gate_release_checks": "a4e8aaacfed76377bf483afc86a870040c3f9fc6e485633354f6189afab91774",
+      "gate_smoke_evidence": "ce6ec0f36673b4cd4936a48ca5197afa108863aca2391ab39c8771a1c8436079",
+      "gate_smoke_summary": "73604f31b6990b5c7eca01e97ef9dadead919ba33b53c2db8e5948bdba04e941",
+      "gate_status_consumer": "a1e5e4b6acbf79a828389695fae3d09d30f1798b21dfb23826fe89838dd12849",
+      "python_lock": "492454e415121bdff9d22a96c7a51bd0a78f63c5a8449576d7d54619d6898f66",
+      "python_manifest": "40aa2baedfb83a6f7d015fed6108db8434f28b46eb96a76f31517f9411d2b33c",
+      "rust_lock": "13d3532dd72f42ec8ff83c19907ce15c099a91dbd5262fefd0d3a5ee642a596b",
+      "shared_proto": "1e18a949e145a2d63356c5a93c3de8736611714a57ac7f2f57a3b46f9fd37cc0",
+      "swift_manifest": "a122208e0aeae8318b1ff7720ed43c2d8b905ff1657c3804282948e23de0603d",
+      "swift_proto_messages": "2a674512c69db81ac77e1942de1b4af1df379f6fb33cb2f9064253de69bb6d60",
+      "swift_proto_services": "7903bfd3b0fa22e8e6cdad51f3643729b66c05a708bbee681e08a766699a3677",
+      "swift_resolved": "d30f42ad2096b001122e8848ea38b38ebd5f814261c92108a7f82edc15c16841"
+    },
+    "personality_sha256": "679b9c7754922444570132f5124d7fc84c826a39c94ec831aaab7ba99a8213a9",
+    "rust_core_binary_sha256": "5e289c9a2aaf2f05dbbe6df47a14d74e68ae970ac27711efbbc7020b105f0b39",
+    "source_tree_end_sha256": "580afbea24d2ae012151e57676ca10e5bec05397af9984f79af530d8b7f952d5",
+    "source_tree_file_count": 210,
+    "source_tree_sha256": "580afbea24d2ae012151e57676ca10e5bec05397af9984f79af530d8b7f952d5",
+    "source_tree_start_sha256": "580afbea24d2ae012151e57676ca10e5bec05397af9984f79af530d8b7f952d5",
+    "swift_product_sha256": "1483df1d0dbd6a4c1c6e6cd197203a09a7a6e432028b5055e996557740a563b8"
+  },
+  "identity_changes": [],
+  "manual_checklist": {
+    "attested_at": null,
+    "status": "PENDING",
+    "version": 1
+  },
+  "release_state": "AUTOMATED_FAIL",
+  "result": "FAIL",
+  "run_id": "0c34cd22-3cd5-4a37-a3d6-b84ba42b7661",
+  "runtime": {
+    "architecture": "arm64",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "macos": "27.0 (26A5388g)",
+    "models": [
+      {
+        "available": true,
+        "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+        "tag": "qwen3:8b"
+      },
+      {
+        "available": true,
+        "digest": "21c59a2eae301d2b4ee734f0930728ddc284b4cbf9856b8ad7c3f1c11e056832",
+        "tag": "gemma4:26b-mlx"
+      },
+      {
+        "available": true,
+        "digest": "edba8017331d15236e57480eb45406c0d721db77a4cdcf234df500fc2ad3960c",
+        "tag": "deepseek-r1:32b"
+      },
+      {
+        "available": true,
+        "digest": "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
+        "tag": "gemma4:26b"
+      },
+      {
+        "available": false,
+        "digest": null,
+        "tag": "mxbai-embed-large"
+      }
+    ],
+    "ollama_api_compatibility": "FAIL",
+    "ollama_app": "0.32.5",
+    "ollama_base_url": "http://localhost:11434",
+    "ollama_client": "0.32.5",
+    "ollama_client_path": "/opt/homebrew/bin/ollama",
+    "ollama_daemon": "0.32.5",
+    "ollama_models_path": "/Users/jason/ollama-models",
+    "proto_generators": {
+      "protoc": "libprotoc 34.0",
+      "protoc_gen_grpc_swift_2": "2.2.0",
+      "protoc_gen_swift": "protoc-gen-swift 1.35.1"
+    },
+    "pytest": "unavailable",
+    "python": "3.14.5",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.23.5 clang-2100.3.23.3)"
+  },
+  "schema_version": 1,
+  "started_at": "2026-07-31T07:23:58.404708+00:00"
+}

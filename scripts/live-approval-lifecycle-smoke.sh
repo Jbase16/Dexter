@@ -246,10 +246,11 @@ main() {
         exit 1
     }
     assert_contains "$recent_out" "$yes_token" "recent action receipts" || ok=1
-    assert_contains "$recent_out" "$no_token" "recent action receipts" || ok=1
-    assert_contains "$recent_out" "$cancel_token" "recent action receipts" || ok=1
-    assert_contains "$recent_out" "$expired_token" "recent action receipts" || ok=1
+    assert_contains "$recent_out" "DENIED  shell" "recent action receipts" || ok=1
+    assert_contains "$recent_out" "result: Denied before execution." "recent action receipts" || ok=1
     assert_contains "$recent_out" "EXPIRED" "recent action receipts" || ok=1
+    assert_contains "$recent_out" "result: Approval expired before execution." "recent action receipts" || ok=1
+    assert_contains "$recent_out" 'target: echo "<1 arguments omitted>"' "recent action receipts redact shell arguments" || ok=1
 
     assert_log_contains "Typed approval response received during ALERT" "typed approval paths" || ok=1
     assert_log_contains "Cancellation word arrived during ALERT" "typed cancel path" || ok=1

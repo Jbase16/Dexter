@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Verify acceptance-status parsing against isolated fake live-smoke receipts.
+# Verify acceptance-status against isolated authoritative release evidence.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dexter-acceptance-status.XXXXXX")"
+RELEASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dexter-acceptance-release.XXXXXX")"
 EMPTY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dexter-acceptance-empty.XXXXXX")"
+OUT="$(mktemp "${TMPDIR:-/tmp}/dexter-acceptance-status.out.XXXXXX")"
+EMPTY_OUT="$(mktemp "${TMPDIR:-/tmp}/dexter-acceptance-status-empty.out.XXXXXX")"
+STRICT_EMPTY_OUT="$(mktemp "${TMPDIR:-/tmp}/dexter-acceptance-strict-empty.out.XXXXXX")"
 
 cleanup() {
-    rm -rf "$TMP_DIR" "$EMPTY_DIR"
+    rm -rf "$RELEASE_DIR" "$EMPTY_DIR"
+    rm -f "$OUT" "$EMPTY_OUT" "$STRICT_EMPTY_OUT"
 }
 trap cleanup EXIT
 
 fail() {
     printf '[FAIL] %s\n' "$1" >&2
     exit 1
-}
-
-pass() {
-    printf '[PASS] %s\n' "$1"
 }
 
 require_contains() {
@@ -33,131 +33,95 @@ require_contains() {
     fi
 }
 
-write_summary() {
-    local file="$1"
-    local started="$2"
-    shift 2
+python3 - "$ROOT_DIR" "$RELEASE_DIR/latest.json" <<'PY'
+from __future__ import annotations
 
-    {
-        printf '# Dexter Live Smoke Summary\n\n'
-        printf -- '- Started: `%s`\n' "$started"
-        printf -- '- Finished: `%s`\n' "$started"
-        printf -- '- Duration: `1s`\n'
-        printf -- '- Root: `%s`\n' "$ROOT_DIR"
-        printf -- '- Result: `PASS`\n'
-        printf -- '- Passed: `%s`\n' "$#"
-        printf -- '- Failed: `0`\n\n'
-        printf '## Targets\n\n'
-        printf '| Target | Result | Duration | Log |\n'
-        printf '|---|---:|---:|---|\n'
-        for target in "$@"; do
-            printf '| `%s` | PASS | `1s` | `/tmp/%s.log` |\n' "$target" "$target"
-        done
-    } > "$file"
+import json
+import sys
+from dataclasses import asdict
+from datetime import UTC, datetime
+from pathlib import Path
+
+root = Path(sys.argv[1])
+output = Path(sys.argv[2])
+sys.path.insert(0, str(root))
+
+from scripts.release_checks import CHECK_SPECS, collect_release_artifacts
+from scripts.release_identity import collect_release_identity
+from scripts.release_status import ACCEPTANCE_TARGETS, ACTION_SAFETY_FULL_TARGETS
+
+identity = collect_release_identity(root).to_dict()
+source = identity["source"]
+artifacts = {
+    name: asdict(artifact)
+    for name, artifact in collect_release_artifacts(root).items()
 }
+targets = [
+    {"battery": "acceptance", "target": target, "result": "PASS"}
+    for target in sorted(ACCEPTANCE_TARGETS)
+]
+targets.extend(
+    {
+        "battery": "action_safety_full",
+        "target": target,
+        "result": "PASS",
+    }
+    for target in sorted(ACTION_SAFETY_FULL_TARGETS)
+)
+now = datetime.now(UTC).isoformat()
+manifest = {
+    "schema_version": 1,
+    "run_id": "00000000-0000-4000-8000-000000000002",
+    "started_at": now,
+    "finished_at": now,
+    "result": "PASS",
+    "release_state": "AUTOMATED_PASS_MANUAL_PENDING",
+    "identity": {
+        "source_tree_sha256": source["sha256"],
+        "source_tree_file_count": source["file_count"],
+        "source_tree_start_sha256": source["sha256"],
+        "source_tree_end_sha256": source["sha256"],
+        "config_sha256": identity["config_sha256"],
+        "personality_sha256": identity["personality_sha256"],
+        "input_sha256": identity["input_sha256"],
+    },
+    "runtime": identity["runtime"],
+    "checks": [
+        {"check_id": spec.check_id, "result": "PASS"}
+        for spec in CHECK_SPECS
+    ],
+    "artifacts": artifacts,
+    "acceptance_targets": targets,
+    "identity_changes": [],
+    "gate_errors": [],
+    "manual_checklist": {
+        "version": 1,
+        "status": "PENDING",
+        "attested_at": None,
+    },
+}
+output.write_text(json.dumps(manifest), encoding="utf-8")
+PY
 
-write_summary "$TMP_DIR/live-smoke-20260609_010000.md" "2026-06-09T01:00:00-0700" \
-    live-smoke-dock-launcher \
-    live-smoke-process-control \
-    live-smoke-stop-report \
-    live-smoke-run-loop-lifecycle \
-    live-smoke-stale-swift-stop \
-    live-smoke-hud-lifecycle \
-    live-smoke-hud-placement \
-    live-smoke-placement-command
-
-write_summary "$TMP_DIR/live-smoke-20260609_020000.md" "2026-06-09T02:00:00-0700" \
-    live-smoke-residency-proof \
-    live-smoke-startup-readiness \
-    live-smoke-local-answers \
-    live-smoke-operator-status \
-    live-smoke-hud-health \
-    live-smoke-hud-unavailable-health
-
-write_summary "$TMP_DIR/live-smoke-20260609_030000.md" "2026-06-09T03:00:00-0700" \
-    live-smoke-external-failures \
-    live-smoke-action-diagnostic \
-    live-smoke-context-turn-records \
-    live-smoke-shortcut-action \
-    live-smoke-window-focus \
-    live-smoke-window-inspect \
-    live-smoke-ui-snapshot \
-    live-smoke-ui-click \
-    live-smoke-ui-type \
-    live-smoke-ui-select \
-    live-smoke-ui-toggle \
-    live-smoke-ui-pick \
-    live-smoke-ui-failure-diagnostic \
-    live-smoke-action-matrix \
-    live-smoke-browser-recovery \
-    live-smoke-action-receipts \
-    live-smoke-approval-lifecycle \
-    live-smoke-action-cancel
-
-write_summary "$TMP_DIR/live-smoke-20260609_040000.md" "2026-06-09T04:00:00-0700" \
-    live-smoke-dock-launcher \
-    live-smoke-process-control \
-    live-smoke-stop-report \
-    live-smoke-run-loop-lifecycle \
-    live-smoke-stale-swift-stop \
-    live-smoke-hud-lifecycle \
-    live-smoke-hud-placement \
-    live-smoke-placement-command \
-    live-smoke-residency-proof \
-    live-smoke-startup-readiness \
-    live-smoke-local-answers \
-    live-smoke-operator-status \
-    live-smoke-hud-health \
-    live-smoke-hud-unavailable-health \
-    live-smoke-external-failures \
-    live-smoke-action-diagnostic \
-    live-smoke-context-turn-records \
-    live-smoke-shortcut-action \
-    live-smoke-window-focus \
-    live-smoke-window-inspect \
-    live-smoke-ui-snapshot \
-    live-smoke-ui-click \
-    live-smoke-ui-type \
-    live-smoke-ui-select \
-    live-smoke-ui-toggle \
-    live-smoke-ui-pick \
-    live-smoke-ui-failure-diagnostic \
-    live-smoke-action-matrix \
-    live-smoke-browser-recovery \
-    live-smoke-browser-recovery-model \
-    live-smoke-action-receipts \
-    live-smoke-approval-lifecycle \
-    live-smoke-hud-action-surfaces \
-    live-smoke-hud-ui-failure \
-    live-smoke-hud-approval \
-    live-smoke-action-cancel
-
-OUT="$(mktemp "${TMPDIR:-/tmp}/dexter-acceptance-status.out.XXXXXX")"
-EMPTY_OUT="$(mktemp "${TMPDIR:-/tmp}/dexter-acceptance-status-empty.out.XXXXXX")"
-
-DEXTER_SMOKE_SUMMARY_DIR="$TMP_DIR" DEXTER_ACCEPTANCE_STRICT=1 "$ROOT_DIR/scripts/acceptance-status.sh" > "$OUT"
+DEXTER_RELEASE_EVIDENCE_DIR="$RELEASE_DIR" \
+    DEXTER_ACCEPTANCE_STRICT=1 \
+    bash "$ROOT_DIR/scripts/acceptance-status.sh" > "$OUT"
 
 require_contains "$OUT" '# Dexter Acceptance Status' "acceptance status missing title"
-require_contains "$OUT" 'Main acceptance battery | PASS' "main acceptance battery did not pass"
-require_contains "$OUT" 'Operator controls | PASS' "operator controls slice did not pass"
-require_contains "$OUT" 'Runtime health | PASS' "runtime health slice did not pass"
-require_contains "$OUT" 'Action safety | PASS' "action safety slice did not pass"
-require_contains "$OUT" 'Full action/HUD sweep | PASS' "full action/HUD sweep did not pass"
-require_contains "$OUT" 'make live-smoke-acceptance' "main acceptance command missing"
-require_contains "$OUT" 'make live-smoke-operator-controls' "operator controls command missing"
-require_contains "$OUT" 'make live-smoke-runtime-health' "runtime health command missing"
-require_contains "$OUT" 'make live-smoke-action-safety' "action safety command missing"
-require_contains "$OUT" 'make live-smoke-action-safety-full' "full action/HUD sweep command missing"
-require_contains "$OUT" 'live-smoke-residency-proof' "residency proof target missing"
-require_contains "$OUT" 'live-smoke-local-answers' "local answers target missing"
-require_contains "$OUT" 'live-smoke-browser-recovery-model' "model-driven browser recovery target missing"
+require_contains "$OUT" 'Automated evidence: \*\*PASS\*\*' "passing evidence was not accepted"
+require_contains "$OUT" 'Run ID: `00000000-0000-4000-8000-000000000002`' "run ID missing"
+require_contains "$OUT" 'Gate result: `PASS`' "gate result missing"
+require_contains "$OUT" 'Manual checklist: \*\*PENDING\*\*' "manual state missing"
 
-DEXTER_SMOKE_SUMMARY_DIR="$EMPTY_DIR" "$ROOT_DIR/scripts/acceptance-status.sh" > "$EMPTY_OUT"
-require_contains "$EMPTY_OUT" 'Operator controls | MISSING' "empty non-strict run should report missing operator controls"
+DEXTER_RELEASE_EVIDENCE_DIR="$EMPTY_DIR" \
+    bash "$ROOT_DIR/scripts/acceptance-status.sh" > "$EMPTY_OUT"
+require_contains "$EMPTY_OUT" 'Automated evidence: \*\*MISSING\*\*' \
+    "empty non-strict run should report missing evidence"
 
-if DEXTER_SMOKE_SUMMARY_DIR="$EMPTY_DIR" DEXTER_ACCEPTANCE_STRICT=1 "$ROOT_DIR/scripts/acceptance-status.sh" >/tmp/dexter-acceptance-strict-empty.out 2>&1; then
+if DEXTER_RELEASE_EVIDENCE_DIR="$EMPTY_DIR" \
+    DEXTER_ACCEPTANCE_STRICT=1 \
+    bash "$ROOT_DIR/scripts/acceptance-status.sh" >"$STRICT_EMPTY_OUT" 2>&1; then
     fail "strict acceptance status should fail when evidence is missing"
 fi
 
-rm -f "$OUT" "$EMPTY_OUT" /tmp/dexter-acceptance-strict-empty.out
-pass "acceptance status smoke passed"
+printf '[PASS] acceptance status smoke passed\n'

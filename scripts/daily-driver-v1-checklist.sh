@@ -14,9 +14,17 @@ make daily-driver-v1-gate
 
 That runs:
 
-1. `make live-smoke-acceptance`
-2. `make live-smoke-action-safety-full`
-3. `make acceptance-status-strict`
+1. Rust unit and release builds.
+2. The pinned Python worker suite.
+3. Non-mutating proto consistency checks.
+4. The Swift release build.
+5. Exact release-artifact hashing.
+6. `make live-smoke-acceptance`.
+7. `make live-smoke-action-safety-full`.
+8. Start/end source, configuration, model, and toolchain identity comparison.
+
+Automated success is recorded as `AUTOMATED_PASS_MANUAL_PENDING`. Printing this
+checklist does not record or imply manual completion.
 
 Manual checks before calling v1 done:
 
@@ -46,4 +54,15 @@ Voice policy:
 - Voice is maintenance-only for v1.
 - Existing STT/TTS health and restart behavior must stay intact.
 - No richer voice UX is required for Daily-driver v1.
+
+Optional run-bound attestation, only after completing every manual item:
+
+```bash
+make acceptance-status-strict
+make daily-driver-v1-attest RUN_ID="<exact Run ID from acceptance-status>"
+```
+
+Attestation records only the run ID, checklist version, timestamp, and identity
+fingerprint. It does not record checklist answers or operator content. Any
+identity change invalidates it.
 EOF

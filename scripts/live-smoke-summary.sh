@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/live-smoke-summary.sh - run live-smoke targets and write a markdown receipt.
+# scripts/live-smoke-summary.sh - run live-smoke targets and write JSON + Markdown receipts.
 #
 # Usage:
 #   scripts/live-smoke-summary.sh
@@ -21,8 +21,11 @@ SUMMARY_DIR="${DEXTER_SMOKE_SUMMARY_DIR:-$ROOT_DIR/docs/live-smoke-results}"
 STAMP="$(date '+%Y%m%d_%H%M%S')"
 SUMMARY_FILE="$SUMMARY_DIR/live-smoke-$STAMP.md"
 LATEST_FILE="$SUMMARY_DIR/latest.md"
+SUMMARY_JSON_FILE="${DEXTER_SMOKE_SUMMARY_JSON_FILE:-$SUMMARY_DIR/live-smoke-$STAMP.json}"
+LATEST_JSON_FILE="$SUMMARY_DIR/latest.json"
 INDEX_FILE="$SUMMARY_DIR/index.md"
 LOG_DIR="$SUMMARY_DIR/logs/$STAMP"
+TARGET_RESULTS_FILE="$LOG_DIR/targets.tsv"
 
 DEFAULT_TARGETS=(
     live-smoke-startup-readiness
@@ -250,6 +253,7 @@ else
 fi
 
 mkdir -p "$LOG_DIR"
+: > "$TARGET_RESULTS_FILE"
 
 STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 START_EPOCH="$(date '+%s')"
@@ -269,6 +273,7 @@ fi
 
 for target in "${TARGETS[@]}"; do
     target_start="$(date '+%s')"
+    target_started_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
     log_file="$LOG_DIR/$target.log"
     TARGET_NAMES+=("$target")
     TARGET_LOGS+=("$log_file")
@@ -282,9 +287,13 @@ for target in "${TARGETS[@]}"; do
         if ! require_active_gui_session 2>&1 | tee "$log_file"; then
             status=1
             target_end="$(date '+%s')"
+            target_finished_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
             duration="$((target_end - target_start))"
             TARGET_DURATIONS+=("$(duration_label "$duration")")
             TARGET_STATUSES+=("FAIL")
+            printf '%s\tFAIL\t%s\t%s\t%s\t%s\t%s\n' \
+                "$target" "$duration" "$status" "$log_file" \
+                "$target_started_at" "$target_finished_at" >> "$TARGET_RESULTS_FILE"
             overall_status=1
             say FAIL "$target skipped before launch: active unlocked GUI session required"
             if [[ "$FAIL_FAST" -eq 1 ]]; then
@@ -304,14 +313,21 @@ for target in "${TARGETS[@]}"; do
     status="${PIPESTATUS[0]}"
 
     target_end="$(date '+%s')"
+    target_finished_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
     duration="$((target_end - target_start))"
     TARGET_DURATIONS+=("$(duration_label "$duration")")
 
     if [[ "$status" -eq 0 ]]; then
         TARGET_STATUSES+=("PASS")
+        printf '%s\tPASS\t%s\t%s\t%s\t%s\t%s\n' \
+            "$target" "$duration" "$status" "$log_file" \
+            "$target_started_at" "$target_finished_at" >> "$TARGET_RESULTS_FILE"
         say PASS "$target completed in $(duration_label "$duration")"
     else
         TARGET_STATUSES+=("FAIL")
+        printf '%s\tFAIL\t%s\t%s\t%s\t%s\t%s\n' \
+            "$target" "$duration" "$status" "$log_file" \
+            "$target_started_at" "$target_finished_at" >> "$TARGET_RESULTS_FILE"
         overall_status=1
         say FAIL "$target exited $status after $(duration_label "$duration")"
         if [[ "$FAIL_FAST" -eq 1 ]]; then
@@ -325,6 +341,7 @@ done
 FINISHED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 END_EPOCH="$(date '+%s')"
 TOTAL_DURATION="$(duration_label "$((END_EPOCH - START_EPOCH))")"
+TOTAL_DURATION_SECONDS="$((END_EPOCH - START_EPOCH))"
 
 pass_count=0
 fail_count=0
@@ -335,6 +352,22 @@ for status in "${TARGET_STATUSES[@]}"; do
         fail_count=$((fail_count + 1))
     fi
 done
+
+SUMMARY_MODE="$([[ "$FAIL_FAST" -eq 1 ]] && echo fail-fast || echo continue-on-failure)"
+if ! python3 "$ROOT_DIR/scripts/smoke_evidence.py" \
+    --root "$ROOT_DIR" \
+    --results-tsv "$TARGET_RESULTS_FILE" \
+    --output "$SUMMARY_JSON_FILE" \
+    --latest "$LATEST_JSON_FILE" \
+    --started-at "$STARTED_AT" \
+    --finished-at "$FINISHED_AT" \
+    --duration-seconds "$TOTAL_DURATION_SECONDS" \
+    --mode "$SUMMARY_MODE" \
+    --stop-reason "$SUMMARY_STOP_REASON"; then
+    say FAIL "machine-readable smoke evidence could not be written"
+    overall_status=1
+    SUMMARY_STOP_REASON="machine_evidence_write_failed"
+fi
 
 {
     echo "# Dexter Live Smoke Summary"
@@ -397,7 +430,9 @@ cp "$SUMMARY_FILE" "$LATEST_FILE"
 rebuild_summary_index
 
 say INFO "summary written: $SUMMARY_FILE"
+say INFO "JSON summary: $SUMMARY_JSON_FILE"
 say INFO "latest summary: $LATEST_FILE"
+say INFO "latest JSON summary: $LATEST_JSON_FILE"
 say INFO "summary index: $INDEX_FILE"
 
 exit "$overall_status"

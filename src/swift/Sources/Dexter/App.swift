@@ -180,6 +180,9 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                                 await MainActor.run {
                                     if !sessionReady {
                                         HUDSmokeConfig.log("autoSubmitSkipped sessionReady=false")
+                                    } else if let actionJSON = HUDSmokeConfig.actionJSON {
+                                        HUDSmokeConfig.log("syntheticActionSubmit")
+                                        Task { await c.sendSyntheticActionForSmoke(actionJSON) }
                                     } else if HUDSmokeConfig.fromVoice {
                                         window?.hud.showOperatorInput(HUDSmokeConfig.text)
                                         Task { await c.sendVoiceSmokeInput(HUDSmokeConfig.text) }
@@ -589,6 +592,12 @@ private enum HUDSmokeConfig {
 
     static let text: String = {
         ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_TEXT"] ?? "what's 2 plus 2"
+    }()
+
+    static let actionJSON: String? = {
+        let raw = ProcessInfo.processInfo.environment["DEXTER_HUD_SMOKE_ACTION_JSON"] ?? ""
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
     }()
 
     static let healthRequest: Bool = {

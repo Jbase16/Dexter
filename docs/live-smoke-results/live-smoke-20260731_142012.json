@@ -1,0 +1,44 @@
+{
+  "duration_ms": 202000,
+  "failed": 1,
+  "finished_at": "2026-07-31T14:23:34-0700",
+  "generated_at": "2026-07-31T21:23:34.464027+00:00",
+  "mode": "continue-on-failure",
+  "passed": 1,
+  "release_run_id": null,
+  "result": "FAIL",
+  "root": "/Users/jason/Developer/Dex",
+  "schema_version": 1,
+  "started_at": "2026-07-31T14:20:12-0700",
+  "stop_reason": "completed",
+  "targets": [
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-action-surfaces"
+      ],
+      "duration_ms": 72000,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T14:21:24-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_142012/live-smoke-hud-action-surfaces.log",
+      "log_sha256": "3ece1f7c9429de5d29d85e552df170e022904761631b6dad746bdfa7f0984dbd",
+      "result": "PASS",
+      "started_at": "2026-07-31T14:20:12-0700",
+      "target": "live-smoke-hud-action-surfaces"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-approval"
+      ],
+      "duration_ms": 130000,
+      "exit_status": 2,
+      "finished_at": "2026-07-31T14:23:34-0700",
+      "log_path": "docs/live-smoke-results/logs/20260731_142012/live-smoke-hud-approval.log",
+      "log_sha256": "8cf4256198002209dbd2b2535d391a753b8c1372b95d5f769e77b436e676b22c",
+      "result": "FAIL",
+      "started_at": "2026-07-31T14:21:24-0700",
+      "target": "live-smoke-hud-approval"
+    }
+  ]
+}

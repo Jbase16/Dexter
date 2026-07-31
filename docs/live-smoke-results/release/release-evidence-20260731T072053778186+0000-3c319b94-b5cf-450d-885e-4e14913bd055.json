@@ -1,0 +1,171 @@
+{
+  "acceptance_targets": [],
+  "artifacts": {},
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "test system::residency::tests::status_reflects_pin_state_and_wired_bytes ... ok\ntest voice::coordinator::tests::is_permanently_degraded_false_initially ... ok\ntest voice::coordinator::tests::is_permanently_degraded_field_set_directly ... ok\ntest voice::coordinator::tests::is_tts_available_reflects_atomic_state ... ok\ntest voice::coordinator::tests::new_degraded_is_not_available ... ok\ntest voice::coordinator::tests::new_degraded_restart_count_is_zero ... ok\ntest voice::coordinator::tests::tts_arc_clone_points_to_same_allocation ... ok\ntest voice::coordinator::tests::voice_coordinator_clone_shares_state ... ok\ntest voice::coordinator::tests::voice_coordinator_tts_arc_shares_across_clones ... ok\ntest voice::protocol::tests::parse_handshake_browser_valid ... ok\ntest voice::protocol::tests::parse_handshake_malformed_json_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_startup_error_preserves_detail ... ok\ntest voice::protocol::tests::parse_handshake_stt_valid ... ok\ntest voice::protocol::tests::parse_handshake_tts_valid ... ok\ntest voice::protocol::tests::parse_handshake_unknown_worker_type_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_version_mismatch_returns_err ... ok\ntest voice::sentence::tests::flush_empty_buffer_returns_none ... ok\ntest voice::sentence::tests::flush_with_remaining_text_returns_it ... ok\ntest voice::sentence::tests::push_boundary_at_or_above_min_length_returns_sentence ... ok\ntest voice::sentence::tests::push_boundary_below_min_length_does_not_split ... ok\ntest voice::sentence::tests::push_empty_token_returns_empty_vec ... ok\ntest voice::sentence::tests::push_multi_sentence_returns_all_in_order ... ok\ntest voice::sentence::tests::push_no_boundary_accumulates_without_splitting ... ok\ntest voice::worker_client::tests::worker_error_display_includes_variant_info ... ok\ntest voice::worker_client::tests::worker_type_stt_as_str_returns_stt ... ok\ntest voice::worker_client::tests::worker_type_tts_as_str_returns_tts ... ok\ntest context::turn_record::tests::action_result_records_ui_failure_diagnostic_without_raw_typed_text ... ok\ntest action::executor::tests::execute_applescript_timeout_reports_failure ... ok\ntest orchestrator::tests::empty_user_generation_is_recorded_as_failure_not_answered ... ok\ntest orchestrator::tests::synthetic_safe_action_injects_result_context ... ok\ntest context::turn_record::tests::older_turn_record_without_runtime_field_remains_readable ... ok\ntest system::runtime::tests::current_runtime_attestation_identifies_this_process ... ok\ntest inference::engine::tests::generate_stream_times_out_waiting_for_response_headers ... ok\ntest orchestrator::tests::operator_status_turn_is_recorded_as_host_evidence_not_model_chat ... ok\ntest orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record ... ok\ntest orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit ... ok\ntest orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit ... ok\n\ntest result: ok. 915 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.18s\n",
+      "duration_ms": 3304,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:20:33.877482+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/rust_unit.log",
+      "log_sha256": "d705dab1992bb98378b026c0a4c6540e8a57e2592f03c0935aca9bd2eb9a5750",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:20:30.573181+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release"
+      ],
+      "check_id": "rust_release",
+      "diagnostic_summary": "   Compiling dexter-core v0.1.0 (/Users/jason/Developer/Dex/src/rust-core)\n    Finished `release` profile [optimized] target(s) in 14.38s",
+      "duration_ms": 14425,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:20:48.304389+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/rust_release.log",
+      "log_sha256": "76c4a2b234e1ea8b25ee94c115f9678d9e2c73b646b2b0be211e5e4e450ff9a5",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:20:33.879085+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--bin",
+        "dexter-cli"
+      ],
+      "check_id": "rust_cli_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.24s",
+      "duration_ms": 300,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:20:48.604767+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/rust_cli_release.log",
+      "log_sha256": "d1235ea4563620b53ef5bdd2da5f595fec9d54f9efb48376378c20547dd95e57",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:20:48.304730+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      "check_id": "python_workers",
+      "diagnostic_summary": "tests/test_browser_worker.py:64: ValueError\n____________ TestBrowserWorkerHandlers.test_handle_navigate_failure ____________\n\nself = <tests.test_browser_worker.TestBrowserWorkerHandlers object at 0x1066bb380>\n\n    async def test_handle_navigate_failure(self):\n        \"\"\"handle_navigate returns (False, '', error_message) on Playwright exception.\"\"\"\n        from workers.browser_worker import handle_navigate\n    \n        page = AsyncMock()\n        page.goto.side_effect = Exception(\"net::ERR_NAME_NOT_RESOLVED\")\n    \n        payload = json.dumps({\"url\": \"https://doesnotexist.invalid/\"}).encode()\n>       success, output, error = await handle_navigate(page, payload)\n        ^^^^^^^^^^^^^^^^^^^^^^\nE       ValueError: too many values to unpack (expected 3)\n\ntests/test_browser_worker.py:80: ValueError\n______ TestBrowserWorkerHandlers.test_handle_screenshot_creates_file_path ______\n\nself = <tests.test_browser_worker.TestBrowserWorkerHandlers object at 0x1066bbb60>\n\n    async def test_handle_screenshot_creates_file_path(self):\n        \"\"\"handle_screenshot returns the screenshot path on success.\"\"\"\n        from workers.browser_worker import handle_screenshot\n    \n        page = AsyncMock()\n        page.screenshot = AsyncMock()\n    \n>       success, output, error = await handle_screenshot(page, b\"\")\n        ^^^^^^^^^^^^^^^^^^^^^^\nE       ValueError: too many values to unpack (expected 3)\n\ntests/test_browser_worker.py:93: ValueError\n=========================== short test summary info ============================\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_navigate_success\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_extract_full_page\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_navigate_failure\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_screenshot_creates_file_path\n========================= 4 failed, 16 passed in 3.74s =========================",
+      "duration_ms": 4714,
+      "exit_status": 1,
+      "finished_at": "2026-07-31T07:20:53.318902+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/python_workers.log",
+      "log_sha256": "66a580747b3806056b36dafe60b22bf12743693ae94348679e151dee7828c114",
+      "result": "FAIL",
+      "started_at": "2026-07-31T07:20:48.604984+00:00",
+      "working_directory": "src/python-workers"
+    }
+  ],
+  "finished_at": "2026-07-31T07:20:53.778186+00:00",
+  "gate_errors": [
+    "build checks command exited 1"
+  ],
+  "identity": {
+    "config_sha256": "f590b64200ff61173d603ec28b95e611ebb1104181cc384cf5d161fdb49e5b52",
+    "dexter_cli_binary_sha256": null,
+    "input_sha256": {
+      "gate_acceptance_status": "5a45e7a9583bc1865b363e77bb3aea5800a02a31cbd31949c7723feb62e33495",
+      "gate_attestation": "d5b2b0e744b144e3a956f7f383eb2b18f91241b921cbd37ec840ab7fd5d90df0",
+      "gate_identity_helper": "085fcccb8b071b6642c2ab9ee4183ca0f7073dc317b9bdaa411cf815ce55389b",
+      "gate_makefile": "57e9c6b5e048a1fe028743798864d9ffa973913907f801338d54300fee09ebaf",
+      "gate_orchestrator": "c8342822ade826be47d255e03889935753bfa349582bf893c4fc3e98955263b8",
+      "gate_proto_check": "5eb7386f460f54a5b284197ee141bf03450d6bd1aafb95eecdfc229347d1ac6e",
+      "gate_release_checks": "a4e8aaacfed76377bf483afc86a870040c3f9fc6e485633354f6189afab91774",
+      "gate_smoke_evidence": "ce6ec0f36673b4cd4936a48ca5197afa108863aca2391ab39c8771a1c8436079",
+      "gate_smoke_summary": "73604f31b6990b5c7eca01e97ef9dadead919ba33b53c2db8e5948bdba04e941",
+      "gate_status_consumer": "a1e5e4b6acbf79a828389695fae3d09d30f1798b21dfb23826fe89838dd12849",
+      "python_lock": "492454e415121bdff9d22a96c7a51bd0a78f63c5a8449576d7d54619d6898f66",
+      "python_manifest": "40aa2baedfb83a6f7d015fed6108db8434f28b46eb96a76f31517f9411d2b33c",
+      "rust_lock": "13d3532dd72f42ec8ff83c19907ce15c099a91dbd5262fefd0d3a5ee642a596b",
+      "shared_proto": "1e18a949e145a2d63356c5a93c3de8736611714a57ac7f2f57a3b46f9fd37cc0",
+      "swift_manifest": "a122208e0aeae8318b1ff7720ed43c2d8b905ff1657c3804282948e23de0603d",
+      "swift_proto_messages": "2a674512c69db81ac77e1942de1b4af1df379f6fb33cb2f9064253de69bb6d60",
+      "swift_proto_services": "7903bfd3b0fa22e8e6cdad51f3643729b66c05a708bbee681e08a766699a3677",
+      "swift_resolved": "d30f42ad2096b001122e8848ea38b38ebd5f814261c92108a7f82edc15c16841"
+    },
+    "personality_sha256": "679b9c7754922444570132f5124d7fc84c826a39c94ec831aaab7ba99a8213a9",
+    "rust_core_binary_sha256": null,
+    "source_tree_end_sha256": "d1893c8524b154a45605fe7104c946e4bf597170b2f4f4a595f1c5e317ccee8b",
+    "source_tree_file_count": 210,
+    "source_tree_sha256": "d1893c8524b154a45605fe7104c946e4bf597170b2f4f4a595f1c5e317ccee8b",
+    "source_tree_start_sha256": "d1893c8524b154a45605fe7104c946e4bf597170b2f4f4a595f1c5e317ccee8b",
+    "swift_product_sha256": null
+  },
+  "identity_changes": [],
+  "manual_checklist": {
+    "attested_at": null,
+    "status": "PENDING",
+    "version": 1
+  },
+  "release_state": "AUTOMATED_FAIL",
+  "result": "FAIL",
+  "run_id": "3c319b94-b5cf-450d-885e-4e14913bd055",
+  "runtime": {
+    "architecture": "arm64",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "macos": "27.0 (26A5388g)",
+    "models": [
+      {
+        "available": true,
+        "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+        "tag": "qwen3:8b"
+      },
+      {
+        "available": true,
+        "digest": "21c59a2eae301d2b4ee734f0930728ddc284b4cbf9856b8ad7c3f1c11e056832",
+        "tag": "gemma4:26b-mlx"
+      },
+      {
+        "available": true,
+        "digest": "edba8017331d15236e57480eb45406c0d721db77a4cdcf234df500fc2ad3960c",
+        "tag": "deepseek-r1:32b"
+      },
+      {
+        "available": true,
+        "digest": "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
+        "tag": "gemma4:26b"
+      },
+      {
+        "available": false,
+        "digest": null,
+        "tag": "mxbai-embed-large"
+      }
+    ],
+    "ollama_api_compatibility": "FAIL",
+    "ollama_app": "0.32.5",
+    "ollama_base_url": "http://localhost:11434",
+    "ollama_client": "0.32.5",
+    "ollama_client_path": "/opt/homebrew/bin/ollama",
+    "ollama_daemon": "0.32.5",
+    "ollama_models_path": "/Users/jason/ollama-models",
+    "proto_generators": {
+      "protoc": "libprotoc 34.0",
+      "protoc_gen_grpc_swift_2": "2.2.0",
+      "protoc_gen_swift": "protoc-gen-swift 1.35.1"
+    },
+    "pytest": "unavailable",
+    "python": "3.14.5",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.23.5 clang-2100.3.23.3)"
+  },
+  "schema_version": 1,
+  "started_at": "2026-07-31T07:20:30.167386+00:00"
+}

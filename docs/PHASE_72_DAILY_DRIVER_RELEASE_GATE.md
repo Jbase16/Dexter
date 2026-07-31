@@ -34,10 +34,15 @@ make daily-driver-v1-gate
 
 This runs:
 
-1. `make live-smoke-acceptance`
-2. `make live-smoke-action-safety-full`
-3. `make acceptance-status-strict`
-4. `make daily-driver-v1-checklist`
+1. Rust unit tests and release builds.
+2. The pinned Python worker suite.
+3. Non-mutating proto consistency verification.
+4. The Swift release build and exact artifact hashing.
+5. `make live-smoke-acceptance`.
+6. `make live-smoke-action-safety-full`.
+7. Start/end source, configuration, model, and toolchain identity comparison.
+8. Atomic run-bound JSON and Markdown publication.
+9. `make daily-driver-v1-checklist`.
 
 `live-smoke-acceptance` proves operator controls, runtime health, local answers,
 actions, browser recovery, UI/window actions, receipts, approvals, HUD action
@@ -45,6 +50,19 @@ surfaces, and cancellation.
 
 `live-smoke-action-safety-full` adds the full action/HUD/model-driven browser
 recovery sweep. It intentionally remains heavier than the daily lane.
+
+Inspect the latest authoritative evidence with:
+
+```bash
+make acceptance-status
+make acceptance-status-strict
+```
+
+The consumer reads only `docs/live-smoke-results/release/latest.json`. Strict
+mode requires a current identity-matched PASS no more than 24 hours old.
+Possible states are `PASS`, `STALE`, `MISMATCH`, `FAIL`, `MISSING`, and
+`INVALID`. Historical Markdown and older PASS manifests are diagnostic views,
+not release authority.
 
 ### Opt-in Contacts/iMessage Lane
 
@@ -84,6 +102,18 @@ Manual v1 checks:
 - Restart a worker from HUD Status, then confirm status returns to ready.
 - Start a new session from the HUD.
 - Quit Dexter from the HUD/app menu without hunting for the terminal.
+
+Optional attestation after every item is complete:
+
+```bash
+make acceptance-status-strict
+make daily-driver-v1-attest RUN_ID="<exact Run ID from acceptance-status>"
+```
+
+Attestation is versioned and bound to the latest run's identity fingerprint.
+It stores no checklist answers or operator content. A different run starts
+`PENDING`, and an identity mismatch invalidates an existing attestation.
+Automated and manual status are always displayed separately.
 
 ## Not Required For Daily-driver v1
 

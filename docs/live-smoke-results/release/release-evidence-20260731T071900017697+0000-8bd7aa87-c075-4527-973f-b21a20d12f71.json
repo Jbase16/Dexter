@@ -1,0 +1,118 @@
+{
+  "acceptance_targets": [],
+  "artifacts": {},
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "called `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n---- ipc::server::tests::stream_audio_returns_ok_stream_when_worker_unavailable stdout ----\n\nthread 'ipc::server::tests::stream_audio_returns_ok_stream_when_worker_unavailable' (8992355) panicked at src/ipc/server.rs:2208:50:\ncalled `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\n\n---- ipc::server::tests::session_opens_with_idle_state stdout ----\n\nthread 'ipc::server::tests::session_opens_with_idle_state' (8992354) panicked at src/ipc/server.rs:2208:50:\ncalled `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\n\n---- orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record stdout ----\n\nthread 'orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record' (8992551) panicked at src/orchestrator.rs:15057:9:\nassertion failed: generation.output_preview.starts_with(&format!(\"PID {pid} is `\"))\n\n---- orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit stdout ----\n\nthread 'orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit' (8992640) panicked at src/orchestrator.rs:17332:9:\nassertion failed: generation.output_preview.starts_with(\"No. The prior PID answer\")\n\n---- orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit stdout ----\n\nthread 'orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit' (8992641) panicked at src/orchestrator.rs:17290:9:\nassertion failed: generation.output_preview.starts_with(\"No. The prior PID answer\")\n\n\nfailures:\n    inference::engine::tests::generate_stream_times_out_waiting_for_response_headers\n    ipc::server::tests::session_opens_with_idle_state\n    ipc::server::tests::stream_audio_returns_ok_stream_when_worker_unavailable\n    orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record\n    orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit\n    orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit\n\ntest result: FAILED. 909 passed; 6 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.62s\n\nerror: test failed, to rerun pass `--bin dexter-core`",
+      "duration_ms": 3037,
+      "exit_status": 101,
+      "finished_at": "2026-07-31T07:18:59.702859+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/8bd7aa87-c075-4527-973f-b21a20d12f71/build-logs/rust_unit.log",
+      "log_sha256": "da4da35788f93459659595dfba7c935858c0b7980df05887274dab1b38133397",
+      "result": "FAIL",
+      "started_at": "2026-07-31T07:18:56.665032+00:00",
+      "working_directory": "src/rust-core"
+    }
+  ],
+  "finished_at": "2026-07-31T07:19:00.017697+00:00",
+  "gate_errors": [
+    "build checks command exited 1"
+  ],
+  "identity": {
+    "config_sha256": "f590b64200ff61173d603ec28b95e611ebb1104181cc384cf5d161fdb49e5b52",
+    "dexter_cli_binary_sha256": null,
+    "input_sha256": {
+      "gate_acceptance_status": "5a45e7a9583bc1865b363e77bb3aea5800a02a31cbd31949c7723feb62e33495",
+      "gate_attestation": "d5b2b0e744b144e3a956f7f383eb2b18f91241b921cbd37ec840ab7fd5d90df0",
+      "gate_identity_helper": "085fcccb8b071b6642c2ab9ee4183ca0f7073dc317b9bdaa411cf815ce55389b",
+      "gate_makefile": "57e9c6b5e048a1fe028743798864d9ffa973913907f801338d54300fee09ebaf",
+      "gate_orchestrator": "c8342822ade826be47d255e03889935753bfa349582bf893c4fc3e98955263b8",
+      "gate_proto_check": "5eb7386f460f54a5b284197ee141bf03450d6bd1aafb95eecdfc229347d1ac6e",
+      "gate_release_checks": "a4e8aaacfed76377bf483afc86a870040c3f9fc6e485633354f6189afab91774",
+      "gate_smoke_evidence": "ce6ec0f36673b4cd4936a48ca5197afa108863aca2391ab39c8771a1c8436079",
+      "gate_smoke_summary": "73604f31b6990b5c7eca01e97ef9dadead919ba33b53c2db8e5948bdba04e941",
+      "gate_status_consumer": "a1e5e4b6acbf79a828389695fae3d09d30f1798b21dfb23826fe89838dd12849",
+      "python_lock": "492454e415121bdff9d22a96c7a51bd0a78f63c5a8449576d7d54619d6898f66",
+      "python_manifest": "40aa2baedfb83a6f7d015fed6108db8434f28b46eb96a76f31517f9411d2b33c",
+      "rust_lock": "13d3532dd72f42ec8ff83c19907ce15c099a91dbd5262fefd0d3a5ee642a596b",
+      "shared_proto": "1e18a949e145a2d63356c5a93c3de8736611714a57ac7f2f57a3b46f9fd37cc0",
+      "swift_manifest": "a122208e0aeae8318b1ff7720ed43c2d8b905ff1657c3804282948e23de0603d",
+      "swift_proto_messages": "2a674512c69db81ac77e1942de1b4af1df379f6fb33cb2f9064253de69bb6d60",
+      "swift_proto_services": "7903bfd3b0fa22e8e6cdad51f3643729b66c05a708bbee681e08a766699a3677",
+      "swift_resolved": "d30f42ad2096b001122e8848ea38b38ebd5f814261c92108a7f82edc15c16841"
+    },
+    "personality_sha256": "679b9c7754922444570132f5124d7fc84c826a39c94ec831aaab7ba99a8213a9",
+    "rust_core_binary_sha256": null,
+    "source_tree_end_sha256": "d1893c8524b154a45605fe7104c946e4bf597170b2f4f4a595f1c5e317ccee8b",
+    "source_tree_file_count": 210,
+    "source_tree_sha256": "d1893c8524b154a45605fe7104c946e4bf597170b2f4f4a595f1c5e317ccee8b",
+    "source_tree_start_sha256": "d1893c8524b154a45605fe7104c946e4bf597170b2f4f4a595f1c5e317ccee8b",
+    "swift_product_sha256": null
+  },
+  "identity_changes": [],
+  "manual_checklist": {
+    "attested_at": null,
+    "status": "PENDING",
+    "version": 1
+  },
+  "release_state": "AUTOMATED_FAIL",
+  "result": "FAIL",
+  "run_id": "8bd7aa87-c075-4527-973f-b21a20d12f71",
+  "runtime": {
+    "architecture": "arm64",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "macos": "27.0 (26A5388g)",
+    "models": [
+      {
+        "available": false,
+        "digest": null,
+        "tag": "qwen3:8b"
+      },
+      {
+        "available": false,
+        "digest": null,
+        "tag": "gemma4:26b-mlx"
+      },
+      {
+        "available": false,
+        "digest": null,
+        "tag": "deepseek-r1:32b"
+      },
+      {
+        "available": false,
+        "digest": null,
+        "tag": "gemma4:26b"
+      },
+      {
+        "available": false,
+        "digest": null,
+        "tag": "mxbai-embed-large"
+      }
+    ],
+    "ollama_api_compatibility": "FAIL",
+    "ollama_app": "0.32.5",
+    "ollama_base_url": "http://localhost:11434",
+    "ollama_client": "0.24.0",
+    "ollama_client_path": "/opt/homebrew/bin/ollama",
+    "ollama_daemon": "unavailable",
+    "ollama_models_path": "/Users/jason/ollama-models",
+    "proto_generators": {
+      "protoc": "libprotoc 34.0",
+      "protoc_gen_grpc_swift_2": "2.2.0",
+      "protoc_gen_swift": "protoc-gen-swift 1.35.1"
+    },
+    "pytest": "unavailable",
+    "python": "3.14.5",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.23.5 clang-2100.3.23.3)"
+  },
+  "schema_version": 1,
+  "started_at": "2026-07-31T07:18:55.909017+00:00"
+}

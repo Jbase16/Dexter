@@ -1,0 +1,29 @@
+{
+  "artifact_error": null,
+  "artifacts": {},
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "called `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n---- ipc::server::tests::stream_audio_returns_ok_stream_when_worker_unavailable stdout ----\n\nthread 'ipc::server::tests::stream_audio_returns_ok_stream_when_worker_unavailable' (8992355) panicked at src/ipc/server.rs:2208:50:\ncalled `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\n\n---- ipc::server::tests::session_opens_with_idle_state stdout ----\n\nthread 'ipc::server::tests::session_opens_with_idle_state' (8992354) panicked at src/ipc/server.rs:2208:50:\ncalled `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: \"Operation not permitted\" }\n\n---- orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record stdout ----\n\nthread 'orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record' (8992551) panicked at src/orchestrator.rs:15057:9:\nassertion failed: generation.output_preview.starts_with(&format!(\"PID {pid} is `\"))\n\n---- orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit stdout ----\n\nthread 'orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit' (8992640) panicked at src/orchestrator.rs:17332:9:\nassertion failed: generation.output_preview.starts_with(\"No. The prior PID answer\")\n\n---- orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit stdout ----\n\nthread 'orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit' (8992641) panicked at src/orchestrator.rs:17290:9:\nassertion failed: generation.output_preview.starts_with(\"No. The prior PID answer\")\n\n\nfailures:\n    inference::engine::tests::generate_stream_times_out_waiting_for_response_headers\n    ipc::server::tests::session_opens_with_idle_state\n    ipc::server::tests::stream_audio_returns_ok_stream_when_worker_unavailable\n    orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record\n    orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit\n    orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit\n\ntest result: FAILED. 909 passed; 6 failed; 7 ignored; 0 measured; 0 filtered out; finished in 2.62s\n\nerror: test failed, to rerun pass `--bin dexter-core`",
+      "duration_ms": 3037,
+      "exit_status": 101,
+      "finished_at": "2026-07-31T07:18:59.702859+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/8bd7aa87-c075-4527-973f-b21a20d12f71/build-logs/rust_unit.log",
+      "log_sha256": "da4da35788f93459659595dfba7c935858c0b7980df05887274dab1b38133397",
+      "result": "FAIL",
+      "started_at": "2026-07-31T07:18:56.665032+00:00",
+      "working_directory": "src/rust-core"
+    }
+  ],
+  "finished_at": "2026-07-31T07:18:59.704076+00:00",
+  "release_run_id": "8bd7aa87-c075-4527-973f-b21a20d12f71",
+  "result": "FAIL",
+  "schema_version": 1,
+  "started_at": "2026-07-31T07:18:56.664924+00:00"
+}

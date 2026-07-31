@@ -329,12 +329,29 @@ make acceptance-status
 make acceptance-status-strict
 ```
 
-That report reads `docs/live-smoke-results/live-smoke-*.md` and shows the most
-recent passing receipt for the combined acceptance battery plus operator
-controls, runtime health, action safety, and the full action/HUD sweep. The
-diagnostic bundle includes the same section so a single report can answer which
-major acceptance slices have already passed. The strict variant exits non-zero
-if any required acceptance slice has no passing saved receipt.
+That report reads only the authoritative
+`docs/live-smoke-results/release/latest.json`. It never searches older PASS
+receipts and Markdown cannot satisfy strict mode. Status is one of:
+
+- `PASS`: the latest complete manifest is under 24 hours old and matches the
+  current source, configuration, personality, toolchains, models, and release
+  artifacts.
+- `STALE`: identity matches, but the evidence is older than 24 hours.
+- `MISMATCH`: current source, runtime, or artifacts differ.
+- `FAIL`: the latest gate or one of its recorded checks failed.
+- `MISSING`: required checks, targets, artifacts, or authoritative JSON are
+  absent.
+- `INVALID`: JSON parsing, schema, or internal consistency failed.
+
+`make acceptance-status` is informational and exits successfully after
+reporting the state. `make acceptance-status-strict` exits nonzero unless the
+state is exactly `PASS`. `DEXTER_ACCEPTANCE_MAX_AGE_HOURS` may adjust freshness
+for the informational command only; strict mode always uses 24 hours.
+
+These release-evidence states are separate from live daemon health.
+`dexter-cli --status` and the HUD Status surface continue to report the current
+daemon, workers, models, recovery controls, and recent actions; they do not
+convert runtime readiness into a release PASS.
 
 To generate one fresh receipt for all three focused acceptance slices:
 
@@ -353,13 +370,36 @@ For the Daily-driver v1 release gate, run:
 make daily-driver-v1-gate
 ```
 
-That runs the combined acceptance battery, the full action/HUD/model-driven
-browser recovery sweep, strict acceptance-status verification, and then prints
-the short manual checklist. To print only the manual checklist:
+That runs the required Rust, Python, proto, and Swift checks; hashes the exact
+release products; runs the combined acceptance and full action/HUD batteries;
+compares start/end identity; atomically publishes one run-bound JSON/Markdown
+manifest; and prints the short manual checklist. Automated success is
+`AUTOMATED_PASS_MANUAL_PENDING`, never an implied manual PASS. To print only the
+manual checklist:
 
 ```bash
 make daily-driver-v1-checklist
 ```
+
+Manual attestation is optional. After completing every checklist item, first
+confirm the automated evidence still reports strict `PASS`, then bind the
+attestation to that exact run:
+
+```bash
+make acceptance-status-strict
+make daily-driver-v1-attest RUN_ID="<exact Run ID from acceptance-status>"
+```
+
+The attestation is stored separately under
+`docs/live-smoke-results/release/attestations/`. It records only the run ID,
+checklist version, timestamp, and identity fingerprint. It cannot be created
+for stale, mismatched, failing, or non-latest evidence. A new gate run leaves
+the new run `PENDING`; any source, configuration, runtime, model, toolchain, or
+artifact mismatch displays an existing attestation as `INVALIDATED`.
+
+`make acceptance-status` always displays automated evidence and manual state
+separately. Manual `PASS` never converts stale or mismatched automated evidence
+to release `PASS`.
 
 The v1 gate still excludes real-send Contacts/iMessage checks unless you opt in
 with the explicit messaging smoke commands above. Voice remains maintenance-only

@@ -195,8 +195,8 @@ main() {
 
         assert_contains "$why_out" "### Action Diagnostic" "why prints diagnostic header" || ok=1
         assert_contains "$why_out" "Most Likely Cause" "why prints cause section" || ok=1
-        assert_contains "$why_out" "raw message_send action was blocked" "why explains Contacts resolution boundary" || ok=1
-        assert_contains "$why_out" "message_send must be resolved by the orchestrator" "why includes concrete evidence" || ok=1
+        assert_contains "$why_out" "reached the approval gate and was denied before execution" "why explains external-egress denial" || ok=1
+        assert_contains "$why_out" "Evidence: Denied before execution." "why includes concrete evidence" || ok=1
         assert_contains "$why_out" "Recent Action Evidence" "why prints action evidence section" || ok=1
         assert_contains "$why_out" "Send iMessage to: $recipient" "why identifies blocked recipient" || ok=1
     fi

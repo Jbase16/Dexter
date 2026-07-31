@@ -205,6 +205,13 @@ run_action_quiet() {
     "$CLI_BIN" --quiet --idle-timeout 180 --action-json "$action_json" > "$out_file" 2>&1
 }
 
+run_action_approve() {
+    local out_file="$1"
+    local action_json="$2"
+    : > "$out_file"
+    "$CLI_BIN" --quiet --auto-approve --idle-timeout 180 --action-json "$action_json" > "$out_file" 2>&1
+}
+
 run_text_quiet() {
     local out_file="$1"
     local text="$2"
@@ -213,7 +220,7 @@ run_text_quiet() {
 }
 
 test_message_send_fails_closed() {
-    local name="generic message_send action fails closed"
+    local name="generic message_send action requires external-egress approval"
     local action_json offset out ok
     action_json='{"type":"message_send","recipient":"Dexter External Smoke","body":"external failure smoke","rationale":"external failure smoke"}'
     offset="$(log_bytes)"
@@ -227,14 +234,17 @@ test_message_send_fails_closed() {
         return 1
     fi
 
-    assert_file_contains "$out" "message_send must be resolved by the orchestrator before execution" "$name" || ok=1
+    assert_file_contains "$out" "Action denied before execution: Send iMessage to: Dexter External Smoke" "$name" || ok=1
+    assert_file_contains "$out" "Review reason: external_destination,external_mutation,private_context_visible,model_generated_egress" "$name" || ok=1
     assert_count_at_least "$name" "$offset" "Synthetic ActionSpec received from dexter-cli" 1 || ok=1
     assert_count_at_least "$name" "$offset" "Action status injected into conversation context" 1 || ok=1
-    assert_absent_since "$name" "$offset" "Action requires operator approval" || ok=1
+    assert_count_at_least "$name" "$offset" "Action requires operator approval" 1 || ok=1
+    assert_count_at_least "$name" "$offset" "Action rejected by operator" 1 || ok=1
+    assert_absent_since "$name" "$offset" "message_send must be resolved by the orchestrator before execution" || ok=1
     rm -f "$out"
 
     if [[ "$ok" -eq 0 ]]; then
-        say "$PASS" "$name - structured send cannot bypass orchestrator Contacts resolution"
+        say "$PASS" "$name - structured send cannot bypass external-egress approval"
         return 0
     fi
     return 1
@@ -249,7 +259,7 @@ test_applescript_error_reports_failure() {
     out="$(mktemp -t dexter-external-applescript-error.XXXXXX)"
     ok=0
 
-    if ! run_action_quiet "$out" "$action_json"; then
+    if ! run_action_approve "$out" "$action_json"; then
         say "$FAIL" "$name - dexter-cli failed"
         cat "$out"
         rm -f "$out"
@@ -279,7 +289,7 @@ test_applescript_timeout_reports_failure() {
     recent="$(mktemp -t dexter-external-applescript-timeout-recent.XXXXXX)"
     ok=0
 
-    if ! run_action_quiet "$out" "$action_json"; then
+    if ! run_action_approve "$out" "$action_json"; then
         say "$FAIL" "$name - dexter-cli failed"
         cat "$out"
         rm -f "$out" "$recent"

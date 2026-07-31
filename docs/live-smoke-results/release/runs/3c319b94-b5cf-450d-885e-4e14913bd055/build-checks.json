@@ -1,0 +1,82 @@
+{
+  "artifact_error": null,
+  "artifacts": {},
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "test system::residency::tests::status_reflects_pin_state_and_wired_bytes ... ok\ntest voice::coordinator::tests::is_permanently_degraded_false_initially ... ok\ntest voice::coordinator::tests::is_permanently_degraded_field_set_directly ... ok\ntest voice::coordinator::tests::is_tts_available_reflects_atomic_state ... ok\ntest voice::coordinator::tests::new_degraded_is_not_available ... ok\ntest voice::coordinator::tests::new_degraded_restart_count_is_zero ... ok\ntest voice::coordinator::tests::tts_arc_clone_points_to_same_allocation ... ok\ntest voice::coordinator::tests::voice_coordinator_clone_shares_state ... ok\ntest voice::coordinator::tests::voice_coordinator_tts_arc_shares_across_clones ... ok\ntest voice::protocol::tests::parse_handshake_browser_valid ... ok\ntest voice::protocol::tests::parse_handshake_malformed_json_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_startup_error_preserves_detail ... ok\ntest voice::protocol::tests::parse_handshake_stt_valid ... ok\ntest voice::protocol::tests::parse_handshake_tts_valid ... ok\ntest voice::protocol::tests::parse_handshake_unknown_worker_type_returns_err ... ok\ntest voice::protocol::tests::parse_handshake_version_mismatch_returns_err ... ok\ntest voice::sentence::tests::flush_empty_buffer_returns_none ... ok\ntest voice::sentence::tests::flush_with_remaining_text_returns_it ... ok\ntest voice::sentence::tests::push_boundary_at_or_above_min_length_returns_sentence ... ok\ntest voice::sentence::tests::push_boundary_below_min_length_does_not_split ... ok\ntest voice::sentence::tests::push_empty_token_returns_empty_vec ... ok\ntest voice::sentence::tests::push_multi_sentence_returns_all_in_order ... ok\ntest voice::sentence::tests::push_no_boundary_accumulates_without_splitting ... ok\ntest voice::worker_client::tests::worker_error_display_includes_variant_info ... ok\ntest voice::worker_client::tests::worker_type_stt_as_str_returns_stt ... ok\ntest voice::worker_client::tests::worker_type_tts_as_str_returns_tts ... ok\ntest context::turn_record::tests::action_result_records_ui_failure_diagnostic_without_raw_typed_text ... ok\ntest action::executor::tests::execute_applescript_timeout_reports_failure ... ok\ntest orchestrator::tests::empty_user_generation_is_recorded_as_failure_not_answered ... ok\ntest orchestrator::tests::synthetic_safe_action_injects_result_context ... ok\ntest context::turn_record::tests::older_turn_record_without_runtime_field_remains_readable ... ok\ntest system::runtime::tests::current_runtime_attestation_identifies_this_process ... ok\ntest inference::engine::tests::generate_stream_times_out_waiting_for_response_headers ... ok\ntest orchestrator::tests::operator_status_turn_is_recorded_as_host_evidence_not_model_chat ... ok\ntest orchestrator::tests::local_pid_question_writes_deterministic_completed_turn_record ... ok\ntest orchestrator::tests::truthfulness_challenge_after_pid_report_uses_deterministic_audit ... ok\ntest orchestrator::tests::truthfulness_challenge_after_numbered_process_reference_uses_deterministic_audit ... ok\n\ntest result: ok. 915 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.18s\n",
+      "duration_ms": 3304,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:20:33.877482+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/rust_unit.log",
+      "log_sha256": "d705dab1992bb98378b026c0a4c6540e8a57e2592f03c0935aca9bd2eb9a5750",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:20:30.573181+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release"
+      ],
+      "check_id": "rust_release",
+      "diagnostic_summary": "   Compiling dexter-core v0.1.0 (/Users/jason/Developer/Dex/src/rust-core)\n    Finished `release` profile [optimized] target(s) in 14.38s",
+      "duration_ms": 14425,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:20:48.304389+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/rust_release.log",
+      "log_sha256": "76c4a2b234e1ea8b25ee94c115f9678d9e2c73b646b2b0be211e5e4e450ff9a5",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:20:33.879085+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--bin",
+        "dexter-cli"
+      ],
+      "check_id": "rust_cli_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.24s",
+      "duration_ms": 300,
+      "exit_status": 0,
+      "finished_at": "2026-07-31T07:20:48.604767+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/rust_cli_release.log",
+      "log_sha256": "d1235ea4563620b53ef5bdd2da5f595fec9d54f9efb48376378c20547dd95e57",
+      "result": "PASS",
+      "started_at": "2026-07-31T07:20:48.304730+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      "check_id": "python_workers",
+      "diagnostic_summary": "tests/test_browser_worker.py:64: ValueError\n____________ TestBrowserWorkerHandlers.test_handle_navigate_failure ____________\n\nself = <tests.test_browser_worker.TestBrowserWorkerHandlers object at 0x1066bb380>\n\n    async def test_handle_navigate_failure(self):\n        \"\"\"handle_navigate returns (False, '', error_message) on Playwright exception.\"\"\"\n        from workers.browser_worker import handle_navigate\n    \n        page = AsyncMock()\n        page.goto.side_effect = Exception(\"net::ERR_NAME_NOT_RESOLVED\")\n    \n        payload = json.dumps({\"url\": \"https://doesnotexist.invalid/\"}).encode()\n>       success, output, error = await handle_navigate(page, payload)\n        ^^^^^^^^^^^^^^^^^^^^^^\nE       ValueError: too many values to unpack (expected 3)\n\ntests/test_browser_worker.py:80: ValueError\n______ TestBrowserWorkerHandlers.test_handle_screenshot_creates_file_path ______\n\nself = <tests.test_browser_worker.TestBrowserWorkerHandlers object at 0x1066bbb60>\n\n    async def test_handle_screenshot_creates_file_path(self):\n        \"\"\"handle_screenshot returns the screenshot path on success.\"\"\"\n        from workers.browser_worker import handle_screenshot\n    \n        page = AsyncMock()\n        page.screenshot = AsyncMock()\n    \n>       success, output, error = await handle_screenshot(page, b\"\")\n        ^^^^^^^^^^^^^^^^^^^^^^\nE       ValueError: too many values to unpack (expected 3)\n\ntests/test_browser_worker.py:93: ValueError\n=========================== short test summary info ============================\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_navigate_success\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_extract_full_page\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_navigate_failure\nFAILED tests/test_browser_worker.py::TestBrowserWorkerHandlers::test_handle_screenshot_creates_file_path\n========================= 4 failed, 16 passed in 3.74s =========================",
+      "duration_ms": 4714,
+      "exit_status": 1,
+      "finished_at": "2026-07-31T07:20:53.318902+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/3c319b94-b5cf-450d-885e-4e14913bd055/build-logs/python_workers.log",
+      "log_sha256": "66a580747b3806056b36dafe60b22bf12743693ae94348679e151dee7828c114",
+      "result": "FAIL",
+      "started_at": "2026-07-31T07:20:48.604984+00:00",
+      "working_directory": "src/python-workers"
+    }
+  ],
+  "finished_at": "2026-07-31T07:20:53.319276+00:00",
+  "release_run_id": "3c319b94-b5cf-450d-885e-4e14913bd055",
+  "result": "FAIL",
+  "schema_version": 1,
+  "started_at": "2026-07-31T07:20:30.573065+00:00"
+}

@@ -1333,6 +1333,27 @@ actor DexterClient {
         await sendTextInput(text, fromVoice: false, label: "sendTypedInput")
     }
 
+    /// Test-only path for deterministic HUD approval smokes. It uses the same
+    /// UIAction envelope as dexter-cli --action-json, avoiding model compliance
+    /// as a precondition for exercising the real Swift approval UI.
+    func sendSyntheticActionForSmoke(_ actionJSON: String) {
+        guard let sessionID = currentSessionID else {
+            print("[HUDSmoke] syntheticActionDropped sessionID=NIL")
+            return
+        }
+        let payload = #"{"source":"dexter-cli","kind":"action_json","action_json":\#(actionJSON)}"#
+        let event = Dexter_V1_ClientEvent.with {
+            $0.traceID = UUID().uuidString
+            $0.sessionID = sessionID
+            $0.uiAction = Dexter_V1_UIAction.with {
+                $0.type = .unspecified
+                $0.payload = payload
+            }
+        }
+        send(event)
+        print("[HUDSmoke] syntheticActionEnqueued")
+    }
+
     /// Smoke tests may start their scripted submit task before the bidirectional
     /// session stream has installed `eventContinuation`. Production HUD submits
     /// keep their old fail-fast behavior; smoke scripts use this bounded wait to

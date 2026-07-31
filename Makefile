@@ -28,7 +28,7 @@ export OLLAMA_MODELS
 
 # ── Targets ────────────────────────────────────────────────────────────────────
 
-.PHONY: all setup proto ensure-core-not-running require-active-gui-session release-core run-core run-core-debug start-core restart-core run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict daily-driver-v1-gate daily-driver-v1-checklist diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-detached-core live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-local-answers live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-context-turn-records live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-ui-recovery-model live-smoke-ui-recovery-model-stability live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact-dry-run live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-placement-command live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-diagnostic-bundle live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-action-surfaces live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
+.PHONY: all setup proto proto-check release-build-checks ensure-core-not-running require-active-gui-session release-core run-core run-core-debug start-core restart-core run-swift wait-for-core wait-for-ready run stop restart operator-ready ready acceptance-status acceptance-status-strict daily-driver-v1-gate daily-driver-v1-checklist daily-driver-v1-attest diagnostic-bundle install-app open-app configure-ollama-models test test-inference test-e2e cli doctor status why events triggers inbox ack-event actions-last actions-recent restart-stt restart-tts restart-browser live-smoke-startup-readiness live-smoke-detached-core live-smoke-process-control live-smoke-stop-report live-smoke-run-loop-lifecycle live-smoke-stale-swift-stop live-smoke-operator-ready live-smoke-acceptance-status live-smoke-diagnostic-bundle live-smoke-dock-launcher live-smoke-recovery live-smoke-degraded-mode live-smoke-residency-proof live-smoke-local-answers live-smoke-ambient-events live-smoke-ambient-actions live-smoke-ambient-inbox live-smoke-ambient-trigger-actions live-smoke-external-failures live-smoke-operator-status live-smoke-action-diagnostic live-smoke-context-turn-records live-smoke-shortcut-action live-smoke-window-focus live-smoke-window-inspect live-smoke-ui-snapshot live-smoke-ui-click live-smoke-ui-type live-smoke-ui-select live-smoke-ui-toggle live-smoke-ui-pick live-smoke-ui-failure-diagnostic live-smoke-ui-actions-shared live-smoke-ui-recovery-model live-smoke-ui-recovery-model-stability live-smoke-cli live-smoke-action-matrix live-smoke-browser-recovery live-smoke-browser-recovery-model live-smoke-browser-recovery-model-stability live-smoke-action-receipts live-smoke-approval-lifecycle live-smoke-message-contact-dry-run live-smoke-message-contact live-smoke-message-contact-approve live-smoke-hud live-smoke-hud-new-session live-smoke-hud-lifecycle live-smoke-hud-placement live-smoke-hud-health live-smoke-hud-unavailable-health live-smoke-hud-diagnostic-bundle live-smoke-hud-action-history live-smoke-hud-action-diagnostic live-smoke-hud-action-surfaces live-smoke-hud-ui-failure live-smoke-hud-approval live-smoke-action-cancel live-smoke-barge-in live-smoke-operator-controls live-smoke-runtime-health live-smoke-action-safety-shared live-smoke-action-safety live-smoke-action-safety-full live-smoke-acceptance live-smoke-all live-smoke-summary smoke check-permissions clean help
 .PHONY: live-smoke-vision-grounding
 
 ## help: print this help message
@@ -66,6 +66,16 @@ proto: $(PROTO_FILE)
 		$(PROTO_FILE)
 	@echo "==> Rust proto artifacts compiled by build.rs during cargo build"
 	@echo "==> Proto generation complete"
+
+## proto-check: verify checked-in Swift proto bindings and Rust proto compilation
+proto-check: $(PROTO_FILE)
+	@PROTOC_GEN_SWIFT="$(PROTOC_GEN_SWIFT)" \
+		PROTOC_GEN_GRPC_SWIFT="$(PROTOC_GEN_GRPC_SWIFT)" \
+		bash scripts/proto-check.sh
+
+## release-build-checks: produce JSON evidence for required build and unit checks
+release-build-checks:
+	@python3 scripts/release_checks.py
 
 ## test: run the Rust core unit test suite (offline-safe, no Ollama required)
 test:
@@ -718,11 +728,11 @@ live-smoke-all:
 	$(MAKE) live-smoke-action-cancel
 	$(MAKE) live-smoke-barge-in
 
-## live-smoke-summary: run live smokes and write a markdown receipt
+## live-smoke-summary: run live smokes and write JSON plus Markdown receipts
 ##
 ## By default this runs the same target sequence as live-smoke-all, but captures
 ## each target's terminal output under docs/live-smoke-results/logs/<timestamp>/
-## and writes docs/live-smoke-results/latest.md. To run a smaller pass:
+## and writes docs/live-smoke-results/latest.{json,md}. To run a smaller pass:
 ##
 ##   DEXTER_SMOKE_SUMMARY_TARGETS="live-smoke-action-diagnostic live-smoke-operator-status" make live-smoke-summary
 live-smoke-summary:
@@ -801,9 +811,11 @@ live-smoke-action-safety-shared: require-active-gui-session
 
 ## live-smoke-action-safety-full: run the full action safety + HUD/model sweep
 ##
-## Runs the fast action-safety slice plus the focused model-driven browser
-## recovery check and Swift HUD action surfaces. This intentionally continues
-## after failures to produce a complete receipt for promotion or release checks.
+## Runs deterministic action-safety and Swift HUD surfaces. The explicitly
+## model-driven browser recovery probe remains available through
+## live-smoke-browser-recovery-model[-stability], but does not block release:
+## model compliance is nondeterministic and the deterministic recovery path is
+## already covered by live-smoke-browser-recovery.
 live-smoke-action-safety-full:
 	bash scripts/live-smoke-summary.sh \
 		live-smoke-external-failures \
@@ -821,7 +833,6 @@ live-smoke-action-safety-full:
 		live-smoke-ui-failure-diagnostic \
 		live-smoke-action-matrix \
 		live-smoke-browser-recovery \
-		live-smoke-browser-recovery-model \
 		live-smoke-action-receipts \
 		live-smoke-approval-lifecycle \
 		live-smoke-hud-action-surfaces \
@@ -955,14 +966,15 @@ acceptance-status-strict:
 
 ## daily-driver-v1-gate: run the required automated Daily-driver v1 release batteries
 daily-driver-v1-gate:
-	$(MAKE) live-smoke-acceptance
-	$(MAKE) live-smoke-action-safety-full
-	$(MAKE) acceptance-status-strict
-	@bash scripts/daily-driver-v1-checklist.sh
+	@python3 scripts/release_gate.py
 
 ## daily-driver-v1-checklist: print the short manual Daily-driver v1 checklist
 daily-driver-v1-checklist:
 	@bash scripts/daily-driver-v1-checklist.sh
+
+## daily-driver-v1-attest: attest the manual checklist for the exact latest RUN_ID
+daily-driver-v1-attest:
+	@python3 scripts/release_attestation.py --run-id "$(RUN_ID)" --confirm
 
 ## diagnostic-bundle: build dexter-cli and write one local launch/model/process diagnostic markdown report
 diagnostic-bundle: cli

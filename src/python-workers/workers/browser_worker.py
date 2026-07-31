@@ -399,7 +399,7 @@ async def handle_extract(page: Page, payload: bytes) -> dict:
 
 
 async def handle_screenshot(page: Page, _payload: bytes) -> dict:
-    """Save a screenshot to /tmp/dexter-screenshots/ and return the path."""
+    """Save a screenshot to the operator's Desktop and return the path."""
     try:
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         # Timestamp in ms provides uniqueness without requiring UUIDs.
