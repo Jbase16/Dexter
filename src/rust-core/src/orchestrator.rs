@@ -7268,6 +7268,8 @@ impl CoreOrchestrator {
             ModelId::Primary | ModelId::Vision => {
                 if matches!(category, Category::Code) {
                     PromptProfile::CodeFull
+                } else if matches!(category, Category::OperatorDiagnostic) {
+                    PromptProfile::PrimaryFull
                 } else if !matched_domains.is_empty()
                     || Self::looks_action_capable_request(user_text)
                 {
@@ -11521,9 +11523,7 @@ fn latest_deterministic_local_evidence(messages: &[Message]) -> Option<Determini
             .ok()?;
         return Some(DeterministicLocalEvidence::Process { pid });
     }
-    if content.starts_with("In the preceding ")
-        && content.contains("The numbered identity came from the saved host report")
-    {
+    if content.starts_with("In the preceding ") && content.contains("saved host report") {
         let pid = content
             .split_once(" (PID ")?
             .1
@@ -13687,6 +13687,18 @@ mod tests {
             &Category::Chat,
             &[],
             "open Safari and search for local model benchmarks",
+        );
+
+        assert_eq!(profile, PromptProfile::PrimaryFull);
+    }
+
+    #[test]
+    fn prompt_profile_operator_diagnostic_uses_full_contract() {
+        let profile = CoreOrchestrator::prompt_profile_for_turn(
+            ModelId::Primary,
+            &Category::OperatorDiagnostic,
+            &[],
+            "ok so why is it saying that?",
         );
 
         assert_eq!(profile, PromptProfile::PrimaryFull);
@@ -17246,6 +17258,16 @@ end tell"#;
             latest_deterministic_local_evidence(&[referenced_report]),
             Some(DeterministicLocalEvidence::Process { pid: 55681 })
         );
+
+        for report in [
+            "In the preceding CPU report, #1 was `kernel_task` (PID 0). That PID is no longer running, so the process exited after the sample. The identity came from the saved host report; I did not ask the model or search the web.",
+            "In the preceding CPU report, #1 was `kernel_task` (PID 0). A fresh local lookup failed: ps exited with status 1. The numbered identity still comes from the saved host report; I did not ask the model or search the web.",
+        ] {
+            assert_eq!(
+                latest_deterministic_local_evidence(&[Message::assistant(report)]),
+                Some(DeterministicLocalEvidence::Process { pid: 0 })
+            );
+        }
 
         let messages = vec![
             Message::assistant(

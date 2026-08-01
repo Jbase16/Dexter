@@ -79,7 +79,8 @@ release-build-checks:
 
 ## test: run the Rust core unit test suite (offline-safe, no Ollama required)
 test:
-	cd $(RUST_CORE_DIR) && cargo test -q
+	cd $(RUST_CORE_DIR) && cargo test
+
 ## test-e2e: run all integration tests (requires live Ollama + models)
 ##
 ## Includes Phase 4 InferenceEngine, Phase 6 orchestrator e2e, Phase 15 memory sample,
@@ -93,7 +94,8 @@ test:
 ## To run only unit tests: make test
 ## To run both:            make test && make test-e2e
 test-e2e:
-	cd $(RUST_CORE_DIR) && cargo test -q -- --ignored
+	cd $(RUST_CORE_DIR) && cargo test -- --ignored
+
 ## test-inference: deprecated alias for test-e2e
 test-inference:
 	@echo "⚠  test-inference is deprecated — use 'make test-e2e' instead"

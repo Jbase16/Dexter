@@ -61,7 +61,7 @@ class ArtifactEvidence:
 CHECK_SPECS = (
     CheckSpec(
         "rust_unit",
-        ("cargo", "test", "--bin", "dexter-core"),
+        ("cargo", "test", "-q", "--bin", "dexter-core"),
         "src/rust-core",
     ),
     CheckSpec(
@@ -150,6 +150,7 @@ def run_check(
                 process.kill()
                 raise RuntimeError(f"{spec.check_id}: command output pipe unavailable")
             try:
+                mirror = os.environ.get("DEXTER_GATE_VERBOSE") == "1"
                 with process.stdout:
                     for chunk in iter(lambda: process.stdout.read(64 * 1024), b""):
                         log_file.write(chunk)

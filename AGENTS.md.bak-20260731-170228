@@ -429,13 +429,3 @@ When this file is loaded as part of a code-review or audit task:
   finding rather than guess.
 - One finding per record. Don't bundle.
 - Be terse on rationale; expansive only on proposed code.
-
-## Command output discipline
-
-- Never run test/gate/build commands with full output streaming into the conversation.
-- Always redirect output to a file and read only the summary:
-  `make <target> > /tmp/dexter-<target>.log 2>&1; tail -30 /tmp/dexter-<target>.log`
-- Use `cargo test -q`, never bare `cargo test`; the suite has 1,000+ tests and
-  per-test lines consume roughly 21,000 tokens per run.
-- Prefer one-shot `exec` over `exec_command`/`write_stdin` for commands that
-  terminate on their own. Do not poll a finished command for more output.

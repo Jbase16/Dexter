@@ -7,6 +7,8 @@
 /// Stage 1 — Category classification (rule-based keyword matching on the last REAL
 /// operator message — `MessageOrigin::User`, not synthetic role="user" injections):
 ///   Chat   — default for conversational interaction and information requests
+///   OperatorDiagnostic — Dexter action/release/terminal diagnostics that require
+///            the full operator contract and technical conversation continuity
 ///   Code   — detected via programming-intent keywords in the last user message
 ///   Vision — detected via image/screen-reference keywords in the text ONLY; actual
 ///            image-attachment presence is validated downstream by the orchestrator,
@@ -77,6 +79,11 @@ pub enum Category {
     /// General conversational interaction, information requests, Q&A.
     /// Routes to FAST or PRIMARY depending on complexity.
     Chat,
+
+    /// Questions about Dexter's own action receipts, approval behavior, release
+    /// gates, test reruns, terminal output, and structured recovery vocabulary.
+    /// Routes to PRIMARY so the full operator/action contract is available.
+    OperatorDiagnostic,
 
     /// Code generation, review, refactor, debugging, test writing.
     /// Routes to CODE or PRIMARY depending on complexity.
@@ -677,6 +684,40 @@ impl ModelRouter {
             return Category::Code;
         }
 
+        // Dexter operator diagnostics need the full action/policy contract. This
+        // check follows explicit Code intent so "implement the ui_type handler"
+        // still reaches the coding model, while plain questions about Dexter's
+        // structured action vocabulary do not fall through to FAST/minimal.
+        if contains_any(
+            &lower,
+            &[
+                "make why",
+                "action diagnostic",
+                "action receipt",
+                "recent action evidence",
+                "approval gate",
+                "approval required",
+                "release gate",
+                "daily-driver-v1",
+                "failed test",
+                "failed parts of the test",
+                "re-run just",
+                "rerun just",
+                "output of that command",
+                "explain what the output means",
+                "in my terminal",
+                "snapshot_then_replan",
+                "ui_snapshot",
+                "ui_click",
+                "ui_type",
+                "ui_select",
+                "ui_toggle",
+                "ui_pick",
+            ],
+        ) {
+            return Category::OperatorDiagnostic;
+        }
+
         // Default: conversational.
         Category::Chat
     }
@@ -888,6 +929,14 @@ impl ModelRouter {
                 Some(ModelId::Fast),
                 format!("category=retrieval_first complexity={} → PRIMARY (retrieval context injected by Phase 9)",
                         complexity.value()),
+            ),
+
+            // Operator diagnostics must carry Dexter's full action and approval
+            // vocabulary. Complexity does not make these safe for FAST/minimal.
+            (Category::OperatorDiagnostic, c) => (
+                ModelId::Primary,
+                Some(ModelId::Fast),
+                format!("category=operator_diagnostic complexity={} → PRIMARY (full operator contract)", c.value()),
             ),
 
             // ── Chat ────────────────────────────────────────────────────────────
@@ -1594,6 +1643,55 @@ mod tests {
         let decision = router().route(&[user_msg("what time is it")]);
         assert_eq!(decision.category, Category::Chat);
         assert_eq!(decision.model, ModelId::Fast);
+    }
+
+    #[test]
+    fn operator_diagnostic_phrases_route_to_primary() {
+        for query in [
+            "make why",
+            "can you explain what that means? in my terminal",
+            "I was referring to the output of that command",
+            "I did see output. Im asking you to explain what the output means.",
+            "how do I re-run just those failed tests",
+            "what does snapshot_then_replan mean?",
+        ] {
+            let decision = router().route(&[user_msg(query)]);
+            assert_eq!(
+                decision.category,
+                Category::OperatorDiagnostic,
+                "operator diagnostic misclassified: {query}"
+            );
+            assert_eq!(
+                decision.model,
+                ModelId::Primary,
+                "diagnostic must use PRIMARY: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_diagnostic_clipboard_followup_inherits_category() {
+        let decision = router().route(&[
+            user_msg("I did see output. Im asking you to explain what the output means."),
+            assistant_msg("I need the visible output."),
+            user_msg("it's copied to my clipboard"),
+        ]);
+
+        assert_eq!(decision.category, Category::OperatorDiagnostic);
+        assert_eq!(
+            decision.inherited_category,
+            Some(Category::OperatorDiagnostic)
+        );
+        assert_eq!(decision.model, ModelId::Primary);
+    }
+
+    #[test]
+    fn explicit_code_intent_wins_over_operator_diagnostic_vocabulary() {
+        let decision =
+            router().route(&[user_msg("implement the ui_type handler in orchestrator.rs")]);
+
+        assert_eq!(decision.category, Category::Code);
+        assert_eq!(decision.model, ModelId::Code);
     }
 
     // ── Sticky follow-up inheritance (Phase 37.7) ─────────────────────────────
@@ -2378,6 +2476,10 @@ const STRONG_CONTINUATION_CUES: &[&str] = &[
     "rewrite it",
     "rewrite this",
     "rewrite that",
+    // Operator-evidence follow-ups.
+    "copied to my clipboard",
+    "that command",
+    "the output",
     // Comparative follow-ups
     "faster",
     "slower",
