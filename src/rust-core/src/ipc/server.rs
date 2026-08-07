@@ -2047,6 +2047,8 @@ mod startup_health_tests {
             description: "Run: echo hi".to_string(),
             outcome: "executed".to_string(),
             summary: "Succeeded: hi".to_string(),
+            rationale: None,
+            approval_response_source: None,
         }];
 
         let markdown = latest_action_summary_markdown(&receipts);
@@ -2067,6 +2069,8 @@ mod startup_health_tests {
             summary:
                 "Failed: message_send actions must be resolved by the orchestrator before execution"
                     .to_string(),
+            rationale: None,
+            approval_response_source: None,
         }];
 
         let markdown = latest_action_summary_markdown(&receipts);

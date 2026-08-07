@@ -500,7 +500,47 @@ impl ActionEngine {
             action_origin: Some(context.origin.as_str().to_string()),
             action_fingerprint: Some(decision.action_fingerprint.clone()),
             external_destination: PolicyEngine::external_destination(spec),
+            approval_response_source: None,
         }
+    }
+
+    fn with_approval_response_source(
+        mut policy: PolicyAuditFields,
+        operator_note: &str,
+    ) -> PolicyAuditFields {
+        let source = if operator_note.starts_with("Swift HUD smoke auto-") {
+            if operator_note.contains("denied") {
+                "hud_smoke_auto_denied"
+            } else {
+                "hud_smoke_auto_approved"
+            }
+        } else if operator_note.starts_with("dexter-cli auto-") {
+            if operator_note.contains("denied") {
+                "cli_auto_denied"
+            } else {
+                "cli_auto_approved"
+            }
+        } else if operator_note == "typed-approval" {
+            "typed_operator_approved"
+        } else if operator_note == "typed-denial" {
+            "typed_operator_denied"
+        } else if operator_note == "typed-cancel" {
+            "typed_operator_cancelled"
+        } else if operator_note.starts_with("Swift HUD operator ") {
+            if operator_note.ends_with("approved") {
+                "hud_operator_approved"
+            } else {
+                "hud_operator_denied"
+            }
+        } else if operator_note.starts_with("Swift HUD approval expired") {
+            "hud_approval_expired"
+        } else if operator_note.is_empty() {
+            "unspecified_client_response"
+        } else {
+            "client_noted_response"
+        };
+        policy.approval_response_source = Some(source.to_string());
+        policy
     }
 
     // Phase 38c: `start_browser` removed — the browser worker is now spawned
@@ -647,10 +687,13 @@ impl ActionEngine {
                 error: Some("approval expired before operator response".to_string()),
                 duration_ms: None,
                 operator_approved: Some(false),
-                policy: Self::policy_audit_fields(
-                    &pending.spec,
-                    &pending.policy_context,
-                    &pending.policy_decision,
+                policy: Self::with_approval_response_source(
+                    Self::policy_audit_fields(
+                        &pending.spec,
+                        &pending.policy_context,
+                        &pending.policy_decision,
+                    ),
+                    operator_note,
                 ),
             };
             let guard = self.audit.lock().await;
@@ -683,10 +726,13 @@ impl ActionEngine {
                 error: None,
                 duration_ms: None,
                 operator_approved: Some(false),
-                policy: Self::policy_audit_fields(
-                    &pending.spec,
-                    &pending.policy_context,
-                    &pending.policy_decision,
+                policy: Self::with_approval_response_source(
+                    Self::policy_audit_fields(
+                        &pending.spec,
+                        &pending.policy_context,
+                        &pending.policy_decision,
+                    ),
+                    operator_note,
                 ),
             };
             let guard = self.audit.lock().await;
@@ -728,10 +774,9 @@ impl ActionEngine {
                 error: Some("approved action failed policy fingerprint revalidation".to_string()),
                 duration_ms: None,
                 operator_approved: Some(true),
-                policy: Self::policy_audit_fields(
-                    &pending.spec,
-                    &approved_context,
-                    &approved_decision,
+                policy: Self::with_approval_response_source(
+                    Self::policy_audit_fields(&pending.spec, &approved_context, &approved_decision),
+                    operator_note,
                 ),
             };
             let guard = self.audit.lock().await;
@@ -749,12 +794,16 @@ impl ActionEngine {
             action_id = %action_id,
             "Operator approved DESTRUCTIVE action — executing exact stored spec"
         );
+        let approved_policy = Self::with_approval_response_source(
+            Self::policy_audit_fields(&pending.spec, &approved_context, &approved_decision),
+            operator_note,
+        );
         self.execute_and_log(
             action_id,
             &pending.spec,
             pending.policy_decision.category,
             Some(true),
-            Self::policy_audit_fields(&pending.spec, &approved_context, &approved_decision),
+            approved_policy,
         )
         .await
     }
@@ -781,11 +830,15 @@ impl ActionEngine {
                 error: Some("session ended before operator responded".to_string()),
                 duration_ms: None,
                 operator_approved: None, // null = session ended, not an explicit rejection
-                policy: Self::policy_audit_fields(
-                    &pending.spec,
-                    &pending.policy_context,
-                    &pending.policy_decision,
-                ),
+                policy: {
+                    let mut policy = Self::policy_audit_fields(
+                        &pending.spec,
+                        &pending.policy_context,
+                        &pending.policy_decision,
+                    );
+                    policy.approval_response_source = Some("session_closed".to_string());
+                    policy
+                },
             };
             if let Err(e) = guard.append(&entry) {
                 error!(
@@ -2819,7 +2872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_rejected_removes_from_pending() {
+    async fn resolve_rejected_records_hud_smoke_auto_denial_source() {
         let tmp = tempdir().unwrap();
         let mut engine = ActionEngine::new(tmp.path(), BrowserCoordinator::new_degraded());
 
@@ -2829,7 +2882,9 @@ mod tests {
             other => panic!("expected PendingApproval, got: {other:?}"),
         };
 
-        let resolved = engine.resolve(&action_id, false, "rejected by test").await;
+        let resolved = engine
+            .resolve(&action_id, false, "Swift HUD smoke auto-denied")
+            .await;
         assert!(
             matches!(resolved, ActionOutcome::Rejected { .. }),
             "got: {resolved:?}"
@@ -2848,6 +2903,12 @@ mod tests {
         assert_eq!(event.payload["action_id"], action_id);
         assert_eq!(event.payload["outcome"], "rejected");
         assert_eq!(event.payload["operator_approved"], false);
+
+        let audit = std::fs::read_to_string(tmp.path().join(crate::constants::AUDIT_LOG_FILENAME))
+            .expect("denied action should write audit evidence");
+        let row: serde_json::Value =
+            serde_json::from_str(audit.lines().last().expect("audit row")).unwrap();
+        assert_eq!(row["approval_response_source"], "hud_smoke_auto_denied");
     }
 
     #[tokio::test]

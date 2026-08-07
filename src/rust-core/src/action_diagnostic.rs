@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use tracing::debug;
+
 use crate::{
     action::audit::{recent_action_receipts, ActionAuditReceipt},
     action_evidence::{
@@ -68,7 +70,7 @@ pub(crate) fn build_action_diagnostic(
     } else {
         input.limit.min(100)
     };
-    let (audit_log_path, receipts) = if input.ignore_action_receipts {
+    let (audit_log_path, mut receipts) = if input.ignore_action_receipts {
         (
             input.state_dir.join(crate::constants::AUDIT_LOG_FILENAME),
             Vec::new(),
@@ -76,6 +78,10 @@ pub(crate) fn build_action_diagnostic(
     } else {
         recent_action_receipts(input.state_dir, limit)?
     };
+
+    if let Some(user_text) = input.current_user_text.as_deref() {
+        prioritize_relevant_receipt(&mut receipts, user_text);
+    }
 
     let current_clue =
         analyze_current_turn_for_action_clue(input.current_user_text, input.current_assistant_text);
@@ -91,7 +97,7 @@ pub(crate) fn build_action_diagnostic(
         .first()
         .filter(|receipt| receipt.outcome != "executed")
     {
-        action_receipt_diagnosis(receipt)
+        action_receipt_diagnosis_with_provenance(receipt)
     } else if let Some(clue) = session_clue {
         clue.diagnosis.clone()
     } else if receipts.first().is_some() {
@@ -127,6 +133,69 @@ pub(crate) fn build_action_diagnostic(
         has_session_clue: session_clue.is_some(),
         has_diagnostic,
     })
+}
+
+fn prioritize_relevant_receipt(receipts: &mut Vec<ActionAuditReceipt>, user_text: &str) {
+    let query = user_text.to_ascii_lowercase();
+    let mut best: Option<(usize, usize)> = None;
+    for (index, receipt) in receipts.iter().enumerate() {
+        let mut score = 0usize;
+        let description = receipt.description.to_ascii_lowercase();
+        if query.contains("rm -rf") && description.contains("rm -rf") {
+            score += 100;
+        }
+        if (query.contains("denied") || query.contains("denial")) && receipt.outcome == "denied" {
+            score += 25;
+        }
+        if query.contains(&receipt.action_type.to_ascii_lowercase()) {
+            score += 10;
+        }
+        if let Some(rationale) = &receipt.rationale {
+            let rationale = rationale.to_ascii_lowercase();
+            if query.contains("smoke") && rationale.contains("smoke") {
+                score += 20;
+            }
+        }
+        if score > best.map(|(_, best_score)| best_score).unwrap_or(0) {
+            best = Some((index, score));
+        }
+    }
+    if let Some((index, score)) = best.filter(|(_, score)| *score > 0) {
+        if index > 0 {
+            let receipt = receipts.remove(index);
+            receipts.insert(0, receipt);
+        }
+        debug!(
+            score,
+            "Action diagnostic prioritized query-relevant receipt"
+        );
+    }
+}
+
+fn action_receipt_diagnosis_with_provenance(receipt: &ActionAuditReceipt) -> String {
+    match receipt.approval_response_source.as_deref() {
+        Some("hud_smoke_auto_denied" | "hud_smoke_auto_denied_legacy") => format!(
+            "The destructive action reached Dexter's approval gate, and the deterministic HUD smoke harness automatically denied it before execution without showing the normal interactive approval alert. Target: {}.",
+            receipt.description
+        ),
+        Some("cli_auto_denied") => format!(
+            "The destructive action reached Dexter's approval gate, and dexter-cli automatically denied it before execution. Target: {}.",
+            receipt.description
+        ),
+        Some("typed_operator_denied") => format!(
+            "The destructive action reached Dexter's approval gate and the operator denied it by typed response before execution. Target: {}.",
+            receipt.description
+        ),
+        Some("typed_operator_cancelled") => format!(
+            "The destructive action reached Dexter's approval gate and the operator cancelled it by typed response before execution. Target: {}.",
+            receipt.description
+        ),
+        Some("hud_operator_denied") => format!(
+            "The destructive action reached Dexter's HUD approval alert and the operator denied it before execution. Target: {}.",
+            receipt.description
+        ),
+        _ => action_receipt_diagnosis(receipt),
+    }
 }
 
 fn load_latest_session_clue(state_dir: &Path) -> Option<SessionActionClue> {
@@ -368,8 +437,10 @@ fn format_action_diagnostic_markdown(
         .filter(|receipt| receipt.outcome != "executed")
     {
         let block = format_failed_action_evidence_block(receipt);
-        debug_assert!(block.contains(cause));
         out.push_str(&block);
+        if !block.contains(cause) {
+            out.push_str(&format!("- Approval provenance: {cause}\n"));
+        }
     } else if let Some(clue) = session_clue {
         out.push_str(&format!("- {}\n", clue.diagnosis));
         out.push_str(&format!("- Evidence: {}\n", clue.evidence));
@@ -418,6 +489,12 @@ fn format_action_diagnostic_markdown(
                 receipt.description,
                 receipt.summary
             ));
+            if let Some(source) = &receipt.approval_response_source {
+                out.push_str(&format!("  approval response source: `{source}`\n"));
+            }
+            if let Some(rationale) = &receipt.rationale {
+                out.push_str(&format!("  rationale: {rationale}\n"));
+            }
         }
     }
 

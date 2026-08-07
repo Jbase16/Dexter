@@ -783,7 +783,13 @@ actor DexterClient {
                                         }
                                     }
                                     let response = await alert.beginSheetModal(for: window)
-                                    finish(approved: response == .alertFirstButtonReturn, note: "")
+                                    let operatorApproved = response == .alertFirstButtonReturn
+                                    finish(
+                                        approved: operatorApproved,
+                                        note: operatorApproved
+                                            ? "Swift HUD operator approved"
+                                            : "Swift HUD operator denied"
+                                    )
                                 }
                             }
                             approved = decision.0

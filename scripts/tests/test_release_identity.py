@@ -184,6 +184,30 @@ class RuntimeIdentityTests(unittest.TestCase):
         self.assertEqual(compatibility, "PASS")
         self.assertEqual(models[0].digest, "sha256:a")
 
+    def test_ollama_probe_matches_implicit_latest_tag(self) -> None:
+        responses = (
+            {"version": "0.32.6"},
+            {
+                "models": [
+                    {
+                        "name": "mxbai-embed-large:latest",
+                        "digest": "sha256:embed",
+                    }
+                ]
+            },
+        )
+        with mock.patch(
+            "scripts.release_identity._get_json", side_effect=responses
+        ):
+            _, compatibility, models = probe_ollama(
+                {"embed": "mxbai-embed-large"},
+                base_url="http://localhost:11434",
+            )
+        self.assertEqual(compatibility, "PASS")
+        self.assertEqual(models[0].tag, "mxbai-embed-large")
+        self.assertEqual(models[0].digest, "sha256:embed")
+        self.assertTrue(models[0].available)
+
     def test_ollama_probe_fails_closed_when_a_configured_model_is_missing(self) -> None:
         responses = ({"version": "1.0"}, {"models": []})
         with mock.patch(

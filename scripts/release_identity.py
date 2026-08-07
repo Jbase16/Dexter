@@ -506,6 +506,11 @@ def _get_json(url: str) -> Mapping[str, Any]:
     return payload
 
 
+def _canonical_ollama_tag(tag: str) -> str:
+    final_segment = tag.rsplit("/", 1)[-1]
+    return tag if ":" in final_segment else f"{tag}:latest"
+
+
 def probe_ollama(
     configured_models: Mapping[str, str],
     *,
@@ -538,13 +543,15 @@ def probe_ollama(
         tag = raw_model.get("name") or raw_model.get("model")
         digest = raw_model.get("digest")
         if isinstance(tag, str):
-            available[tag] = digest if isinstance(digest, str) else None
+            available[_canonical_ollama_tag(tag)] = (
+                digest if isinstance(digest, str) else None
+            )
 
     models = tuple(
         ModelIdentity(
             tag=tag,
-            digest=available.get(tag),
-            available=tag in available,
+            digest=available.get(_canonical_ollama_tag(tag)),
+            available=_canonical_ollama_tag(tag) in available,
         )
         for tag in dict.fromkeys(configured_models.values())
     )

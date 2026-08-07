@@ -50,6 +50,8 @@ pub struct PolicyAuditFields {
     pub action_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_destination: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_response_source: Option<String>,
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────
@@ -185,6 +187,8 @@ pub struct ActionAuditReceipt {
     pub description: String,
     pub outcome: String,
     pub summary: String,
+    pub rationale: Option<String>,
+    pub approval_response_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +201,7 @@ struct AuditEntryRecord {
     outcome: String,
     output_preview: Option<String>,
     error: Option<String>,
+    approval_response_source: Option<String>,
 }
 
 /// Read the newest action receipts from `{state_dir}/audit.jsonl`.
@@ -237,6 +242,19 @@ pub fn recent_action_receipts(
 
 impl AuditEntryRecord {
     fn to_receipt(&self) -> ActionAuditReceipt {
+        let rationale = clean_line(json_string(&self.spec_json, "rationale"))
+            .map(|value| value.chars().take(180).collect::<String>());
+        let approval_response_source = self.approval_response_source.clone().or_else(|| {
+            if rationale.as_deref() == Some("deterministic HUD approval smoke") {
+                match self.outcome.as_str() {
+                    "rejected" => Some("hud_smoke_auto_denied_legacy".to_string()),
+                    "success" => Some("hud_smoke_auto_approved_legacy".to_string()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        });
         ActionAuditReceipt {
             action_id: self.action_id.clone(),
             action_type: self.action_type.clone(),
@@ -248,6 +266,8 @@ impl AuditEntryRecord {
                 self.output_preview.as_deref(),
                 self.error.as_deref(),
             ),
+            rationale,
+            approval_response_source,
         }
     }
 }

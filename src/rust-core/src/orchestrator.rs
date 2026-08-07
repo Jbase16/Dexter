@@ -28,7 +28,7 @@
 /// that indicates an unrecoverable session state — it means the gRPC send channel to
 /// Swift has been dropped, and the reader task will exit and call `shutdown()`.
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -47,6 +47,7 @@ use crate::{
         ui_diagnostics::{UiFailureKind, UiRecoveryDirective},
         ActionEngine, ActionOutcome, ActionResult, ActionSpec, ExecutorHandle, PolicyEngine,
     },
+    action_diagnostic::{build_action_diagnostic, ActionDiagnosticInput},
     ambient::{self, AmbientEvent, AmbientEventStore},
     browser::diagnostics::{
         classify_worker_error_kind, BrowserFailureKind, BrowserRecoveryDirective,
@@ -127,6 +128,104 @@ enum IndexicalReferenceTarget {
     FocusedElement,
     Shell,
     Unknown,
+}
+
+fn is_action_diagnostic_evidence_request(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    [
+        "make why",
+        "action diagnostic",
+        "action receipt",
+        "action evidence",
+        "recent action",
+        "latest action",
+        "approval gate",
+        "approval required",
+        "approve it",
+        "approve that",
+        "asked me to approve",
+        "alert me to approve",
+        "denied",
+        "denial",
+        "rm -rf",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn is_deterministic_action_diagnostic_request(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    if [
+        "make why",
+        "action diagnostic",
+        "action receipt",
+        "action evidence",
+        "recent action",
+        "latest action",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    let asks_about_approval = lower.contains("denied")
+        || lower.contains("denial")
+        || lower.contains("approval gate")
+        || lower.contains("approval required")
+        || lower.contains("approve it")
+        || lower.contains("alert me to approve");
+    asks_about_approval
+        && (lower.contains("dexter")
+            || lower.contains("action")
+            || lower.contains("command")
+            || lower.contains("rm -rf"))
+}
+
+fn build_operator_action_diagnostic_evidence(
+    state_dir: &Path,
+    user_text: &str,
+) -> Result<
+    Option<(
+        crate::inference::engine::Message,
+        crate::context::turn_record::EvidenceRecord,
+    )>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    if !is_action_diagnostic_evidence_request(user_text) {
+        return Ok(None);
+    }
+
+    let report = build_action_diagnostic(ActionDiagnosticInput {
+        state_dir,
+        limit: 3,
+        current_user_text: Some(user_text.to_string()),
+        current_assistant_text: None,
+        health_warnings: Vec::new(),
+        only_if_clue: false,
+        ignore_action_receipts: false,
+    })?;
+    let injection = format!(
+        "AUTHORITATIVE LOCAL ACTION DIAGNOSTIC (daemon-generated; not model inference):\n\
+         {}\n\
+         Use only this report when explaining what happened. A policy denial means the action was blocked before execution; it is not an operating-system permission failure. Do not claim that an interactive approval alert was shown unless the report proves it. If the report has no relevant receipt, say that the local evidence is unavailable instead of guessing.",
+        report.markdown
+    );
+    let evidence = crate::context::turn_record::EvidenceRecord::new(
+        "action_diagnostic",
+        format!(
+            "daemon action diagnostic attached; receipts={}; has_diagnostic={}; cause={}",
+            report.receipts.len(),
+            report.has_diagnostic,
+            report.cause
+        ),
+    )
+    .with_payload_hash(&injection);
+
+    Ok(Some((
+        crate::inference::engine::Message::system(injection),
+        evidence,
+    )))
 }
 
 /// Returns `true` if `content` begins with any prefix in [`TOOL_RESULT_PREFIXES`].
@@ -1145,7 +1244,7 @@ impl SharedDaemonState {
     ///   3. Embed model (mxbai-embed-large — fire-and-forget, non-critical)
     ///   4. FAST model (qwen3:8b — sequential, 70s cold-load)
     ///   5. PRIMARY model (gemma4:26b — sequential, 22s cold-load) ← memory pressure cliff
-    ///   6. PRIMARY keepalive task (long-lived; spawned only after PRIMARY is warm)
+    ///   6. PRIMARY keepalive/recovery task (long-lived)
     ///
     /// Steps 4 and 5 are sequential (not concurrent) to avoid USB-SSD read-bandwidth
     /// contention that historically pushed FAST's cold-load from ~70s to several
@@ -1252,7 +1351,7 @@ impl SharedDaemonState {
         // The pin is the structural fix the keepalive comment history asked for
         // ("the real fix is mlock-ing Ollama's weight pages") — done from outside
         // Ollama, so no upstream patch is required.
-        if self.primary_model_warm.load(Ordering::SeqCst) {
+        let run_keepalive = if self.primary_model_warm.load(Ordering::SeqCst) {
             let mode = cfg.residency.mode;
 
             // Pin (when the mode asks for it). The mlock faults + wires ~17 GB
@@ -1289,16 +1388,23 @@ impl SharedDaemonState {
                 keepalive_ping = run_keepalive,
                 "Residency policy resolved"
             );
-            if run_keepalive {
-                CoreOrchestrator::spawn_primary_keepalive_task(
-                    engine.clone(),
-                    cfg.models.primary.clone(),
-                    self.primary_model_warm.clone(),
-                    self.foreground_generation_count.clone(),
-                    self.primary_keepalive_in_flight.clone(),
-                    self.last_foreground_generation_completed_at.clone(),
-                );
-            }
+            run_keepalive
+        } else {
+            warn!(
+                model = %cfg.models.primary,
+                "PRIMARY startup probe did not complete — background recovery armed"
+            );
+            true
+        };
+        if run_keepalive {
+            CoreOrchestrator::spawn_primary_keepalive_task(
+                engine.clone(),
+                cfg.models.primary.clone(),
+                self.primary_model_warm.clone(),
+                self.foreground_generation_count.clone(),
+                self.primary_keepalive_in_flight.clone(),
+                self.last_foreground_generation_completed_at.clone(),
+            );
         }
 
         self.startup_warmup_complete.store(true, Ordering::SeqCst);
@@ -1601,6 +1707,10 @@ async fn warm_primary_model_inline(
     }
 }
 
+fn primary_keepalive_should_probe(warm: bool, startup_recovery_pending: bool) -> bool {
+    warm || startup_recovery_pending
+}
+
 // ── CoreOrchestrator ──────────────────────────────────────────────────────────
 
 /// Per-session coordinator. Constructed once per `Session()` RPC call.
@@ -1612,6 +1722,8 @@ pub struct CoreOrchestrator {
     /// Cached from DexterConfig at construction time — used in every handle_text_input
     /// to resolve `ModelId` → Ollama model tag via `ModelId::ollama_name(&model_config)`.
     model_config: ModelConfig,
+    /// State root used for turn-scoped daemon-owned diagnostics.
+    state_dir: PathBuf,
     session_mgr: SessionStateManager,
     turn_records: TurnRecordAggregator,
     ambient_store: AmbientEventStore,
@@ -1875,6 +1987,7 @@ impl CoreOrchestrator {
             personality,
             context,
             model_config: cfg.models.clone(),
+            state_dir: cfg.core.state_dir.clone(),
             residency_mode: cfg.residency.mode,
             session_mgr,
             turn_records: TurnRecordAggregator::new(&cfg.core.state_dir),
@@ -1997,10 +2110,12 @@ impl CoreOrchestrator {
     /// typical macOS LRU decay timescales. Cost: one tiny request every
     /// 180 s — negligible next to the 22 s cold-load it prevents.
     ///
-    /// **Flag-guarded:** the ping loop checks `primary_model_warm` on every
-    /// tick. HEAVY swap logic clears the flag when it unloads PRIMARY (see
-    /// the B5 handler); the ping task silently pauses until a rewarm sets it
-    /// true again. This keeps HEAVY's exclusive VRAM guarantee intact.
+    /// **Flag-guarded:** an incomplete startup probe gets recovery attempts
+    /// until one full response completes. After that first success, the loop
+    /// checks `primary_model_warm` on every tick. HEAVY swap logic clears the
+    /// flag when it unloads PRIMARY (see the B5 handler); the ping task silently
+    /// pauses until a rewarm sets it true again. This keeps HEAVY's exclusive
+    /// VRAM guarantee intact.
     ///
     /// **Why not `/api/show`:** it informs Ollama but doesn't touch the
     /// weight pages — the reason we picked this cadence is specifically to
@@ -2014,19 +2129,30 @@ impl CoreOrchestrator {
         last_foreground_generation_completed_at: Arc<StdMutex<Option<Instant>>>,
     ) {
         tokio::spawn(async move {
+            // A failed daemon-startup probe is different from the later false
+            // state used while HEAVY owns the model budget. Permit retries only
+            // until this task observes its first successful PRIMARY probe; after
+            // that, a false warm flag continues to pause for HEAVY rewarm.
+            let mut startup_recovery_pending = !warm_flag.load(Ordering::SeqCst);
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
                 PRIMARY_KEEPALIVE_PING_INTERVAL_SECS,
             ));
-            // First tick fires immediately; skip it so we don't ping the model
-            // we just finished warming up a moment ago.
-            ticker.tick().await;
+            if !startup_recovery_pending {
+                // First tick fires immediately; skip it when startup just
+                // warmed PRIMARY. A failed startup probe uses that immediate
+                // tick for recovery instead.
+                ticker.tick().await;
+            }
             loop {
                 ticker.tick().await;
 
-                if !warm_flag.load(Ordering::SeqCst) {
-                    // Probably HEAVY is resident. The pending_primary_rewarm
-                    // path will set warm_flag=true again when PRIMARY rewarms;
-                    // we'll resume pinging on the next tick.
+                if !primary_keepalive_should_probe(
+                    warm_flag.load(Ordering::SeqCst),
+                    startup_recovery_pending,
+                ) {
+                    // PRIMARY was warm once, so a false flag now means HEAVY
+                    // probably owns the model budget. Its rewarm path will set
+                    // the flag true; do not compete with that lifecycle.
                     continue;
                 }
                 let active_foreground = foreground_generation_count.load(Ordering::SeqCst);
@@ -2110,12 +2236,14 @@ impl CoreOrchestrator {
                         let mut final_prompt_eval_ms: Option<u64> = None;
                         let mut final_eval_ms: Option<u64> = None;
                         let mut final_eval_tokens: u64 = 0;
+                        let mut final_chunk_seen = false;
                         while let Some(chunk) = rx.recv().await {
                             if let Ok(c) = chunk {
                                 if first_chunk_ms.is_none() {
                                     first_chunk_ms = Some(elapsed_ms(started_at));
                                 }
                                 if c.done {
+                                    final_chunk_seen = true;
                                     final_ld_ms = c.load_duration_ms;
                                     final_prompt_eval_count = c.prompt_eval_count;
                                     final_prompt_eval_ms = c.prompt_eval_duration_ms;
@@ -2130,6 +2258,15 @@ impl CoreOrchestrator {
                             .saturating_add(final_prompt_eval_ms.unwrap_or(0))
                             .saturating_add(final_eval_ms.unwrap_or(0));
                         let unreported_ms = total_ms.saturating_sub(reported_ms);
+                        if startup_recovery_pending && final_chunk_seen {
+                            warm_flag.store(true, Ordering::SeqCst);
+                            startup_recovery_pending = false;
+                            info!(
+                                model = %model,
+                                total_ms,
+                                "PRIMARY recovered after incomplete startup probe"
+                            );
+                        }
                         match final_ld_ms {
                             Some(ms) if ms > 5_000 => warn!(
                                 model = %model,
@@ -4606,6 +4743,15 @@ impl CoreOrchestrator {
             }
         }
 
+        // Action receipts and approval provenance are daemon-owned evidence.
+        // Return the structured local diagnostic directly so a model cannot
+        // contradict the recorded approval source while paraphrasing it.
+        if is_deterministic_action_diagnostic_request(&content) {
+            return self
+                .dispatch_deterministic_action_diagnostic_report(content, trace_id)
+                .await;
+        }
+
         // Deterministic provenance audit.
         //
         // If the operator challenges an immediately preceding host-generated
@@ -5349,6 +5495,32 @@ impl CoreOrchestrator {
         // context snapshot injection.
         let mut messages =
             self.prepare_messages_for_inference_with_profile(&recall_entries, prompt_profile);
+        let mut turn_evidence = Vec::new();
+
+        if matches!(decision.category, Category::OperatorDiagnostic) {
+            match build_operator_action_diagnostic_evidence(&self.state_dir, &content) {
+                Ok(Some((diagnostic_message, evidence))) => {
+                    let insertion_idx = messages
+                        .iter()
+                        .take_while(|message| message.role == "system")
+                        .count();
+                    messages.insert(insertion_idx, diagnostic_message);
+                    turn_evidence.push(evidence);
+                    info!(
+                        session = %self.session_id,
+                        trace_id = %trace_id,
+                        "Daemon-owned action diagnostic evidence injected into operator turn"
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %e,
+                    "Action diagnostic evidence unavailable — continuing without it"
+                ),
+            }
+        }
 
         // 4c. [Phase 9] Inject Phase 9 retrieval context AFTER personality + context.
         //
@@ -5375,8 +5547,8 @@ impl CoreOrchestrator {
         // with no image. The vision model will respond based on text context alone — degraded
         // but not blocking. The operator asked "look at this"; getting a text-only answer is
         // better than returning an error.
-        let mut turn_evidence = Vec::new();
         if decision.model == ModelId::Vision {
+            let explicit_terminal_inspection = explicit_terminal_observation_request(&content);
             info!(session = %self.session_id, trace_id = %trace_id, "Vision query — capturing screen");
             // Phase 37.7: track whether an image actually lands on a real user
             // turn. If capture fails OR no target is found, demote the request
@@ -5396,10 +5568,15 @@ impl CoreOrchestrator {
                     .rev()
                     .find(|m| m.role == "user" && !is_tool_result_content(&m.content));
                 if let Some(last_user) = target {
+                    let evidence_detail = if explicit_terminal_inspection {
+                        "fresh main-display screenshot attached for explicit terminal inspection; passive terminal scrollback remains excluded"
+                    } else {
+                        "fresh main-display screenshot attached to Vision request"
+                    };
                     turn_evidence.push(
                         crate::context::turn_record::EvidenceRecord::new(
                             "screen_capture",
-                            "fresh main-display screenshot attached to Vision request",
+                            evidence_detail,
                         )
                         .with_payload_hash(&image_b64),
                     );
@@ -5418,6 +5595,20 @@ impl CoreOrchestrator {
                         "Vision query had no genuine user message to attach image to"
                     );
                 }
+            }
+
+            if image_attached && explicit_terminal_inspection {
+                let insertion_idx = messages
+                    .iter()
+                    .take_while(|message| message.role == "system")
+                    .count();
+                messages.insert(
+                    insertion_idx,
+                    crate::inference::engine::Message::system(
+                        "OPERATOR-AUTHORIZED TERMINAL INSPECTION: A fresh screenshot of the main display is attached for this turn. Use only terminal text visibly present in that image. Do not claim access to hidden scrollback, prior terminal history, or text outside the captured pixels. If no terminal content is visible, say so plainly. Passive terminal accessibility previews remain disabled."
+                            .to_string(),
+                    ),
+                );
             }
 
             // Demotion gate: if no image landed on a user turn, the Vision route
@@ -7949,6 +8140,74 @@ impl CoreOrchestrator {
             runtime.executable_path,
             runtime.identity,
         );
+
+        self.context.push_assistant(report.clone());
+        self.session_mgr.push_turn("assistant", &report);
+        self.finish_deterministic_answer_turn_record(&trace_id, &report);
+        self.send_text(&report, true, &trace_id).await?;
+        self.send_state(EntityState::Idle, &trace_id).await
+    }
+
+    async fn dispatch_deterministic_action_diagnostic_report(
+        &mut self,
+        content: String,
+        trace_id: String,
+    ) -> Result<(), OrchestratorError> {
+        self.context.push_user(content.clone());
+        self.session_mgr.push_turn("user", &content);
+        self.start_deterministic_answer_turn_record(
+            &content,
+            &trace_id,
+            "DeterministicActionDiagnostic",
+            "action_diagnostic",
+        );
+        self.send_state(EntityState::Thinking, &trace_id).await?;
+
+        let (report, evidence_detail) = match build_action_diagnostic(ActionDiagnosticInput {
+            state_dir: &self.state_dir,
+            limit: 3,
+            current_user_text: Some(content.clone()),
+            current_assistant_text: None,
+            health_warnings: Vec::new(),
+            only_if_clue: false,
+            ignore_action_receipts: false,
+        }) {
+            Ok(report) => {
+                let evidence_detail = format!(
+                    "receipts={}; has_diagnostic={}; cause={}",
+                    report.receipts.len(),
+                    report.has_diagnostic,
+                    report.cause
+                );
+                (report.markdown, evidence_detail)
+            }
+            Err(error) => {
+                warn!(
+                    session = %self.session_id,
+                    trace_id = %trace_id,
+                    error = %error,
+                    "Deterministic action diagnostic unavailable"
+                );
+                (
+                    format!(
+                        "### Action Diagnostic\n\nLocal action evidence is unavailable: {error}. I did not ask a language model to guess what happened."
+                    ),
+                    format!("diagnostic_error={error}"),
+                )
+            }
+        };
+
+        let evidence =
+            crate::context::turn_record::EvidenceRecord::new("action_diagnostic", evidence_detail)
+                .with_payload_hash(&report);
+        if let Err(error) = self.turn_records.attach_evidence(&trace_id, evidence) {
+            warn!(
+                session = %self.session_id,
+                trace_id = %trace_id,
+                error = %error,
+                "Deterministic action diagnostic evidence attachment failed"
+            );
+        }
 
         self.context.push_assistant(report.clone());
         self.session_mgr.push_turn("assistant", &report);
@@ -11370,7 +11629,31 @@ fn visual_observation_requires_capture(content: &str) -> bool {
         || lower.contains("open safari window")
         || lower.contains("current safari window")
         || lower.contains("frontmost window");
-    references_live_view && !is_command_query(content)
+    (references_live_view || explicit_terminal_observation_request(content))
+        && !is_command_query(content)
+}
+
+fn explicit_terminal_observation_request(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let references_terminal = lower.contains("my terminal")
+        || lower.contains("this terminal")
+        || lower.contains("current terminal")
+        || lower.contains("in the terminal")
+        || lower.contains("terminal window")
+        || lower.contains("this shell output")
+        || lower.contains("my shell output")
+        || lower.contains("this console output")
+        || lower.contains("my console output");
+    let asks_to_observe = lower.contains("look at")
+        || lower.contains("read ")
+        || lower.contains("explain")
+        || lower.contains("can you see")
+        || lower.contains("what do you see")
+        || lower.contains("what can you see")
+        || lower.contains("what does this")
+        || lower.contains("what's happening")
+        || lower.contains("what is happening");
+    references_terminal && asks_to_observe
 }
 
 fn is_required_read_only_ui_evidence_action(spec: &ActionSpec, original_content: &str) -> bool {
@@ -13576,6 +13859,96 @@ mod tests {
         Uuid::new_v4().to_string()
     }
 
+    #[tokio::test]
+    async fn operator_diagnostic_returns_denied_smoke_evidence_without_model_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let denied_smoke = serde_json::json!({
+            "timestamp": "2026-08-04T00:00:00Z",
+            "action_id": "diagnostic-live-regression",
+            "type": "shell",
+            "category": "destructive",
+            "spec_json": {
+                "args": ["rm", "-rf", "/tmp/dexter-hud-smoke-delete-me"],
+                "rationale": "deterministic HUD approval smoke"
+            },
+            "outcome": "rejected",
+            "exit_code": null,
+            "output_preview": null,
+            "error": "operator rejected the action",
+            "duration_ms": null,
+            "operator_approved": false
+        });
+        let newer_successes = [
+            serde_json::json!({
+                "timestamp": "2026-08-04T00:01:00Z",
+                "action_id": "newer-ui-type",
+                "type": "ui_type",
+                "category": "cautious",
+                "spec_json": {"app_name": "Fixture", "label": "Input"},
+                "outcome": "success",
+                "output_preview": "Done.",
+                "error": null
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-04T00:02:00Z",
+                "action_id": "newer-ui-pick",
+                "type": "ui_pick",
+                "category": "cautious",
+                "spec_json": {"app_name": "Fixture", "label": "Invoices"},
+                "outcome": "success",
+                "output_preview": "Done.",
+                "error": null
+            }),
+        ];
+        let audit_log = std::iter::once(denied_smoke)
+            .chain(newer_successes)
+            .map(|entry| entry.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            tmp.path().join(crate::constants::AUDIT_LOG_FILENAME),
+            format!("{audit_log}\n"),
+        )
+        .unwrap();
+
+        let (mut orch, _rx) = make_orchestrator(tmp.path());
+        let trace_id = new_trace();
+        orch.handle_text_input(
+            "Why did make why show an rm -rf denial when that action was supposed to be denied, and why didn't Dexter alert me to approve it?".to_string(),
+            trace_id.clone(),
+            false,
+        )
+        .await
+        .expect("deterministic action diagnostic response");
+
+        let path = orch.turn_records.record_path_for_trace(&trace_id);
+        let record: crate::context::turn_record::ContextTurnRecord =
+            serde_json::from_slice(&std::fs::read(path).expect("read turn record"))
+                .expect("parse turn record");
+        assert_eq!(
+            record.route_category.as_deref(),
+            Some("DeterministicActionDiagnostic")
+        );
+        assert_eq!(record.model.as_deref(), Some("action_diagnostic"));
+        let generation = record
+            .generation
+            .as_ref()
+            .expect("diagnostic generation record");
+        let output = &generation.output_preview;
+        assert!(output.contains("Denied before execution."));
+        assert_eq!(generation.total_ms, 0);
+        assert!(record
+            .evidence
+            .iter()
+            .any(|evidence| evidence.source == "action_diagnostic"
+                && evidence
+                    .detail
+                    .contains("HUD smoke harness automatically denied")
+                && evidence
+                    .detail
+                    .contains("without showing the normal interactive approval alert")));
+    }
+
     #[test]
     fn warmup_timing_unreported_ms_saturates_after_reported_fields() {
         let timing = WarmupTiming {
@@ -13597,6 +13970,13 @@ mod tests {
             ..WarmupTiming::default()
         };
         assert_eq!(over_reported.unreported_ms(), 0);
+    }
+
+    #[test]
+    fn primary_keepalive_retries_only_initial_failed_warmup() {
+        assert!(primary_keepalive_should_probe(false, true));
+        assert!(primary_keepalive_should_probe(true, false));
+        assert!(!primary_keepalive_should_probe(false, false));
     }
 
     #[test]
@@ -14824,6 +15204,26 @@ mod tests {
         assert!(!visual_observation_requires_capture(
             "Describe how Safari windows work."
         ));
+        for prompt in [
+            "Look at my terminal and explain the output.",
+            "What does this terminal output mean?",
+            "Can you see the error in my terminal?",
+            "Look at what's happening in my terminal.",
+        ] {
+            assert!(
+                visual_observation_requires_capture(prompt),
+                "explicit terminal inspection should require a fresh capture: {prompt}"
+            );
+        }
+        for prompt in [
+            "Explain how terminal output buffering works.",
+            "What command should I run to inspect the terminal logs?",
+        ] {
+            assert!(
+                !visual_observation_requires_capture(prompt),
+                "conceptual or command questions must not capture the screen: {prompt}"
+            );
+        }
     }
 
     #[test]

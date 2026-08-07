@@ -462,7 +462,11 @@ private enum DexterProcessControl {
     private static let repoPath = "/Users/jason/Developer/Dex"
 
     static func terminateRustCore() {
-        run("/bin/bash", ["\(repoPath)/scripts/stop-dexter.sh", "--core-only", "--quiet"])
+        run(
+            "/bin/bash",
+            ["\(repoPath)/scripts/stop-dexter.sh", "--core-only", "--quiet"],
+            waitUntilExit: true
+        )
     }
 
     static func openRestartTerminal() {
@@ -518,12 +522,25 @@ private enum DexterProcessControl {
         """
     }
 
-    private static func run(_ executable: String, _ arguments: [String]) {
+    private static func run(
+        _ executable: String,
+        _ arguments: [String],
+        waitUntilExit: Bool = false
+    ) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         do {
             try process.run()
+            if waitUntilExit {
+                process.waitUntilExit()
+                if process.terminationStatus != 0 {
+                    print(
+                        "[DexterProcessControl] \(executable) exited "
+                            + "\(process.terminationStatus)"
+                    )
+                }
+            }
         } catch {
             print("[DexterProcessControl] failed to run \(executable): \(error)")
         }

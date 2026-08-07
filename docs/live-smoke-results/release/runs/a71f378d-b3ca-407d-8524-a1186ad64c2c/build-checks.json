@@ -1,0 +1,136 @@
+{
+  "artifact_error": null,
+  "artifacts": {
+    "dexter_cli": {
+      "executable": true,
+      "path": "src/rust-core/target/release/dexter-cli",
+      "sha256": "ab837ef27a78add6ed3eb6712d144924896baa2718f00d348bc630e0846d352f",
+      "size_bytes": 7488704
+    },
+    "rust_core": {
+      "executable": true,
+      "path": "src/rust-core/target/release/dexter-core",
+      "sha256": "1729a8c1712ecaa584aec6e939d7449baa61e1c3bf0b99fe0004de0a058d7df5",
+      "size_bytes": 16211872
+    },
+    "swift_product": {
+      "executable": true,
+      "path": "src/swift/.build/out/Products/Release/Dexter",
+      "sha256": "64441431093039cf82ad2f25a697ed3c7dc8fe0f937ec712e9edf44695b10396",
+      "size_bytes": 35679496
+    }
+  },
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-q",
+        "--bin",
+        "dexter-core"
+      ],
+      "check_id": "rust_unit",
+      "diagnostic_summary": "\nrunning 928 tests\n....................................................................................... 87/928\n....................................................................................... 174/928\n....................................................................................... 261/928\n........................................................................ii...ii.....i.. 348/928\n....................................................................................... 435/928\n............................i.......................................................... 522/928\n....................................................................................... 609/928\n....................................................................................... 696/928\n....................................................................................... 783/928\n....................................................................................... 870/928\n......i...................................................\ntest result: ok. 921 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.33s\n",
+      "duration_ms": 3750,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T22:25:41.872791+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/a71f378d-b3ca-407d-8524-a1186ad64c2c/build-logs/rust_unit.log",
+      "log_sha256": "86236002110ca1c366e7757b4fbf2e567b8f96ea64b28cf789818e9d2d7f4c26",
+      "result": "PASS",
+      "started_at": "2026-08-05T22:25:38.122062+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release"
+      ],
+      "check_id": "rust_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.26s",
+      "duration_ms": 311,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T22:25:42.183954+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/a71f378d-b3ca-407d-8524-a1186ad64c2c/build-logs/rust_release.log",
+      "log_sha256": "403998d7813def59ff54ef8942a37a928b6a42f3aea6f4660bbd1cdb0d4ebac8",
+      "result": "PASS",
+      "started_at": "2026-08-05T22:25:41.873070+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--bin",
+        "dexter-cli"
+      ],
+      "check_id": "rust_cli_release",
+      "diagnostic_summary": "    Finished `release` profile [optimized] target(s) in 0.09s",
+      "duration_ms": 137,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T22:25:42.321316+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/a71f378d-b3ca-407d-8524-a1186ad64c2c/build-logs/rust_cli_release.log",
+      "log_sha256": "765f1396d07f30f3a451cd3f9d9cad4e83c92c8e0aecf955ffc09061a6cf1e02",
+      "result": "PASS",
+      "started_at": "2026-08-05T22:25:42.184240+00:00",
+      "working_directory": "src/rust-core"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      "check_id": "python_workers",
+      "diagnostic_summary": "============================= test session starts ==============================\nplatform darwin -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/jason/Developer/Dex/src/python-workers\nconfigfile: pyproject.toml\ntestpaths: tests\nplugins: anyio-4.12.1, asyncio-1.3.0\nasyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function\ncollected 20 items\n\ntests/test_browser_worker.py .....                                       [ 25%]\ntests/test_protocol.py ......                                            [ 55%]\ntests/test_stt_worker.py .....                                           [ 80%]\ntests/test_tts_worker.py ....                                            [100%]\n\n============================== 20 passed in 4.92s ==============================",
+      "duration_ms": 6060,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T22:25:48.381946+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/a71f378d-b3ca-407d-8524-a1186ad64c2c/build-logs/python_workers.log",
+      "log_sha256": "1a84e3bce7f6d95c382c31b955c78f8415279d1bad8a7be89578850bbabc3e73",
+      "result": "PASS",
+      "started_at": "2026-08-05T22:25:42.321508+00:00",
+      "working_directory": "src/python-workers"
+    },
+    {
+      "argv": [
+        "make",
+        "proto-check"
+      ],
+      "check_id": "proto_consistency",
+      "diagnostic_summary": "==> Generating Swift proto bindings in a temporary directory\n==> Checked-in Swift proto bindings match\n==> Compiling the Rust core against the current proto\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s\n==> Proto check passed",
+      "duration_ms": 384,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T22:25:48.766604+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/a71f378d-b3ca-407d-8524-a1186ad64c2c/build-logs/proto_consistency.log",
+      "log_sha256": "9b23c87877fb5ff7cd4b942db63d8c8faefe513a1861dec8365644abfe170401",
+      "result": "PASS",
+      "started_at": "2026-08-05T22:25:48.382139+00:00",
+      "working_directory": "."
+    },
+    {
+      "argv": [
+        "swift",
+        "build",
+        "-c",
+        "release"
+      ],
+      "check_id": "swift_release",
+      "diagnostic_summary": "2058 |             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_TranscriptChunk>(),\n2059 |             options: options,\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Bridge/generated/dexter.grpc.swift:2058:40: warning: 'ProtobufDeserializer' is deprecated: See https://forums.swift.org/t/80177 [#DeprecatedDeclaration]\n2056 |             request: request,\n2057 |             serializer: GRPCProtobuf.ProtobufSerializer<Dexter_V1_AudioChunk>(),\n2058 |             deserializer: GRPCProtobuf.ProtobufDeserializer<Dexter_V1_TranscriptChunk>(),\n     |                                        `- warning: 'ProtobufDeserializer' is deprecated: See https://forums.swift.org/t/80177 [#DeprecatedDeclaration]\n2059 |             options: options,\n2060 |             onResponse: handleResponse\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Voice/VoiceCapture.swift:350:13: warning: capture of 'activeSession' with non-Sendable type 'AVCaptureSession' in a '@Sendable' closure [#SendableClosureCaptures]\n348 |         guard let activeSession else { return }\n349 |         sessionQueue.async {\n350 |             activeSession.stopRunning()\n    |             `- warning: capture of 'activeSession' with non-Sendable type 'AVCaptureSession' in a '@Sendable' closure [#SendableClosureCaptures]\n351 |             print(\"[VoiceCapture] Session stopped \u2014 microphone released\")\n352 |         }\n\n/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVCaptureSession.h:137:12: note: class 'AVCaptureSession' does not conform to the 'Sendable' protocol\n 135 |  */\n 136 | API_AVAILABLE(macos(10.7), ios(4.0), macCatalyst(14.0), tvos(17.0), visionos(1.0)) API_UNAVAILABLE(watchos)\n 137 | @interface AVCaptureSession : NSObject\n     |            `- note: class 'AVCaptureSession' does not conform to the 'Sendable' protocol\n 138 | {\n 139 | @private\n\n/Users/jason/Developer/Dex/src/swift/Sources/Dexter/Voice/VoiceCapture.swift:1:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'AVFoundation' as warnings [#AddPreconcurrencyImport]\n  1 | import AVFoundation\n    | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'AVFoundation' as warnings [#AddPreconcurrencyImport]\n  2 | \n  3 | /// Captures microphone audio via AVCaptureSession, applies energy-threshold VAD,\n\n[#AddPreconcurrencyImport]: <https://docs.swift.org/compiler/documentation/diagnostics/add-preconcurrency-import>\n[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>\n[#ImplicitStrongCapture]: <https://docs.swift.org/compiler/documentation/diagnostics/implicit-strong-capture>\n[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>\n[315\u2009/\u2009316] Dexter-product\n[316\u2009/\u2009316] Dexter-product\nBuild complete! (46.01 sec)",
+      "duration_ms": 51788,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T22:26:40.555384+00:00",
+      "log_path": "docs/live-smoke-results/release/runs/a71f378d-b3ca-407d-8524-a1186ad64c2c/build-logs/swift_release.log",
+      "log_sha256": "c98195b861990ab8d9de4a8a9d35d39987beaa41627f240da953d69f008a4909",
+      "result": "PASS",
+      "started_at": "2026-08-05T22:25:48.766786+00:00",
+      "working_directory": "src/swift"
+    }
+  ],
+  "finished_at": "2026-08-05T22:26:40.582538+00:00",
+  "release_run_id": "a71f378d-b3ca-407d-8524-a1186ad64c2c",
+  "result": "PASS",
+  "schema_version": 1,
+  "started_at": "2026-08-05T22:25:38.121962+00:00"
+}

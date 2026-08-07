@@ -1,0 +1,506 @@
+{
+  "duration_ms": 1024000,
+  "failed": 0,
+  "finished_at": "2026-08-05T15:43:44-0700",
+  "generated_at": "2026-08-05T22:43:44.708623+00:00",
+  "mode": "continue-on-failure",
+  "passed": 35,
+  "release_run_id": "a71f378d-b3ca-407d-8524-a1186ad64c2c",
+  "result": "PASS",
+  "root": "/Users/jason/Developer/Dex",
+  "schema_version": 1,
+  "started_at": "2026-08-05T15:26:40-0700",
+  "stop_reason": "completed",
+  "targets": [
+    {
+      "argv": [
+        "make",
+        "live-smoke-dock-launcher"
+      ],
+      "duration_ms": 1000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:26:41-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-dock-launcher.log",
+      "log_sha256": "97e2ccd4205279daae59c39c0e7e40334cba949839571cfc57f564ddaf880c13",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:26:40-0700",
+      "target": "live-smoke-dock-launcher"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-process-control"
+      ],
+      "duration_ms": 5000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:26:46-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-process-control.log",
+      "log_sha256": "03c15fb4f94fc5988cbff9ef72e648282f23df98f890213251ff0817b5db6aba",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:26:41-0700",
+      "target": "live-smoke-process-control"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-stop-report"
+      ],
+      "duration_ms": 3000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:26:49-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-stop-report.log",
+      "log_sha256": "8be6e3f17ad40af14ba6ea6c35a834dae0af5483be7008a66e83d07e61a1579a",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:26:46-0700",
+      "target": "live-smoke-stop-report"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-run-loop-lifecycle"
+      ],
+      "duration_ms": 38000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:27:27-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-run-loop-lifecycle.log",
+      "log_sha256": "6d1bd816a0554587681f6884bb402ff52639508102137a8dc04cdbea157ae181",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:26:49-0700",
+      "target": "live-smoke-run-loop-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-stale-swift-stop"
+      ],
+      "duration_ms": 16000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:27:43-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-stale-swift-stop.log",
+      "log_sha256": "a253b25cb63aa744d92619cb574e4e64d804cfb81e422cd94e08b7f9776c5a7d",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:27:27-0700",
+      "target": "live-smoke-stale-swift-stop"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-lifecycle"
+      ],
+      "duration_ms": 75000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:28:58-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-lifecycle.log",
+      "log_sha256": "409bf19f0aa285d887ce716a73c278b759a07fe912b560ef7876d50ae3883b56",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:27:43-0700",
+      "target": "live-smoke-hud-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-placement"
+      ],
+      "duration_ms": 41000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:29:39-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-placement.log",
+      "log_sha256": "2d90e334cd607daebc59ab8b5d1df56d8d967d0d0b2cca0582879c493dd0d6f4",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:28:58-0700",
+      "target": "live-smoke-hud-placement"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-placement-command"
+      ],
+      "duration_ms": 33000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:30:12-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-placement-command.log",
+      "log_sha256": "c84becb51cd1c42a5beecfb10ddac5c810fa9850e11fc865e527011bd6281f27",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:29:39-0700",
+      "target": "live-smoke-placement-command"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-residency-proof"
+      ],
+      "duration_ms": 1000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:30:13-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-residency-proof.log",
+      "log_sha256": "ba9726f4f4bb0116b2bbef2e1e918f03b821c58d80171e620d794ba1f6e9bf9d",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:30:12-0700",
+      "target": "live-smoke-residency-proof"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-startup-readiness"
+      ],
+      "duration_ms": 28000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:30:41-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-startup-readiness.log",
+      "log_sha256": "50e7eea4016042ce30b82566385d6e69e04c0ed027c10b3d6e13cd784d7702e0",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:30:13-0700",
+      "target": "live-smoke-startup-readiness"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-local-answers"
+      ],
+      "duration_ms": 37000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:31:18-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-local-answers.log",
+      "log_sha256": "37463926600bb563a1fc940ab8d80eb6348ef8c398da591acd7421fb581802b2",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:30:41-0700",
+      "target": "live-smoke-local-answers"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-operator-status"
+      ],
+      "duration_ms": 29000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:31:47-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-operator-status.log",
+      "log_sha256": "485afd46e9bf78bbca68f32914abe0ad948c490e8feaf1727be2e648ff75f986",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:31:18-0700",
+      "target": "live-smoke-operator-status"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-health"
+      ],
+      "duration_ms": 57000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:32:44-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-health.log",
+      "log_sha256": "2afb5157a9cd36af3c736bd84e917e39ebb9b252e10c8386298afbec60558bc9",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:31:47-0700",
+      "target": "live-smoke-hud-health"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-unavailable-health"
+      ],
+      "duration_ms": 27000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:33:11-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-unavailable-health.log",
+      "log_sha256": "7bc060bfc4c58a5c713cfeb574a5cb8785eb54a21a3c759b969b5e174b2a2ddd",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:32:44-0700",
+      "target": "live-smoke-hud-unavailable-health"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-external-failures"
+      ],
+      "duration_ms": 40000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:33:51-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-external-failures.log",
+      "log_sha256": "30111ca2cc0b0c13f7f1f2bfa7d2cd3c85a979de8eb41c39746f818fe25b1767",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:33:11-0700",
+      "target": "live-smoke-external-failures"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-diagnostic"
+      ],
+      "duration_ms": 20000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:34:11-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-action-diagnostic.log",
+      "log_sha256": "70665823969f75b6df1c9ff29bad61f79751c39337e4b3b0b7e5fcce62424858",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:33:51-0700",
+      "target": "live-smoke-action-diagnostic"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-context-turn-records"
+      ],
+      "duration_ms": 27000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:34:38-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-context-turn-records.log",
+      "log_sha256": "8005312dc08de0ba8986ed934d429485696093defe068631def5dcd4b0a1e679",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:34:11-0700",
+      "target": "live-smoke-context-turn-records"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-shortcut-action"
+      ],
+      "duration_ms": 41000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:35:19-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-shortcut-action.log",
+      "log_sha256": "ed2e304f307cd64cca74888c8fee632b1c8877fd50dcb032a23a2a98724034f5",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:34:38-0700",
+      "target": "live-smoke-shortcut-action"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-window-focus"
+      ],
+      "duration_ms": 33000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:35:52-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-window-focus.log",
+      "log_sha256": "4f3d29c972e035f9085000ec574f48e68dffcf6a0274206e103b719719fda1c9",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:35:19-0700",
+      "target": "live-smoke-window-focus"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-window-inspect"
+      ],
+      "duration_ms": 18000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:36:10-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-window-inspect.log",
+      "log_sha256": "6165dcd169ab1035437567a3571bab3b88d856a17065903bb6f9cc71427654de",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:35:52-0700",
+      "target": "live-smoke-window-inspect"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-snapshot"
+      ],
+      "duration_ms": 17000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:36:27-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-snapshot.log",
+      "log_sha256": "115532e76a20de2ec2a0f642ae2788ede2d737f23da8a32808a643fb7fc4f0af",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:36:10-0700",
+      "target": "live-smoke-ui-snapshot"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-click"
+      ],
+      "duration_ms": 24000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:36:51-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-click.log",
+      "log_sha256": "8a8fa774e49056c8bb546a810bdd3e0717630f08bd3158629caed766f1fc5dcd",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:36:27-0700",
+      "target": "live-smoke-ui-click"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-type"
+      ],
+      "duration_ms": 20000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:37:11-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-type.log",
+      "log_sha256": "769488ec24b3d352c6f348e64bb7c9ba92f56f36c6ff2627b18470e1f32d60ac",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:36:51-0700",
+      "target": "live-smoke-ui-type"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-select"
+      ],
+      "duration_ms": 29000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:37:40-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-select.log",
+      "log_sha256": "754fd71fa11ca529214e20423b3c1c1d9c337c7dd07673220d6f4390a1e79472",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:37:11-0700",
+      "target": "live-smoke-ui-select"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-toggle"
+      ],
+      "duration_ms": 30000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:38:10-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-toggle.log",
+      "log_sha256": "45e0bccba3201c10d9b32c8376b61aa3a2948199c1364e0c3b1cc2869ccec21e",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:37:40-0700",
+      "target": "live-smoke-ui-toggle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-pick"
+      ],
+      "duration_ms": 28000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:38:38-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-pick.log",
+      "log_sha256": "6101ce2f8e8dfd6813addf3e5bf284134da3f53b3cc3e95db6761a265b2c0013",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:38:10-0700",
+      "target": "live-smoke-ui-pick"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-ui-failure-diagnostic"
+      ],
+      "duration_ms": 27000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:39:05-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-ui-failure-diagnostic.log",
+      "log_sha256": "0825435956a832972203026fd97e810bf519ac52d4a57ae839eb8916475e0357",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:38:38-0700",
+      "target": "live-smoke-ui-failure-diagnostic"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-matrix"
+      ],
+      "duration_ms": 44000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:39:49-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-action-matrix.log",
+      "log_sha256": "e41be8951ebe22001899a7e0ce5efb85f3954de731f63c37420496a4518ed770",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:39:05-0700",
+      "target": "live-smoke-action-matrix"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-browser-recovery"
+      ],
+      "duration_ms": 22000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:40:11-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-browser-recovery.log",
+      "log_sha256": "5c5043c8d35423423d9608fa99b3065c4f1d2c38c97201261db66265022a7f0d",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:39:49-0700",
+      "target": "live-smoke-browser-recovery"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-receipts"
+      ],
+      "duration_ms": 17000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:40:28-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-action-receipts.log",
+      "log_sha256": "13a636807dee9eee47827aa2e7ca38f7d922516940bed89275a854f95ef81b86",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:40:11-0700",
+      "target": "live-smoke-action-receipts"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-approval-lifecycle"
+      ],
+      "duration_ms": 21000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:40:49-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-approval-lifecycle.log",
+      "log_sha256": "c9a45c63ea2500e9eb214f1b2bed57b3f4648419b20979838381af2501dd1407",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:40:28-0700",
+      "target": "live-smoke-approval-lifecycle"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-action-surfaces"
+      ],
+      "duration_ms": 49000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:41:38-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-action-surfaces.log",
+      "log_sha256": "fef8da79670558061fa5439d56d4c3f3294dd45037b3787893fe7fa431a1ee2e",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:40:49-0700",
+      "target": "live-smoke-hud-action-surfaces"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-ui-failure"
+      ],
+      "duration_ms": 58000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:42:36-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-ui-failure.log",
+      "log_sha256": "fa59cd48e81db4222b96280aaf810b7118062328aa02fbc4453487a1b3d90576",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:41:38-0700",
+      "target": "live-smoke-hud-ui-failure"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-hud-approval"
+      ],
+      "duration_ms": 35000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:43:11-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-hud-approval.log",
+      "log_sha256": "887505fa7ac1683ead7a969079d743fb3eb33f0ad2effd0da213e71c4f4d21b0",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:42:36-0700",
+      "target": "live-smoke-hud-approval"
+    },
+    {
+      "argv": [
+        "make",
+        "live-smoke-action-cancel"
+      ],
+      "duration_ms": 33000,
+      "exit_status": 0,
+      "finished_at": "2026-08-05T15:43:44-0700",
+      "log_path": "docs/live-smoke-results/logs/20260805_152640/live-smoke-action-cancel.log",
+      "log_sha256": "953827e0ab3f91387aa909510df7cbd8e294169db9d8b47e922d2afeeb1e5992",
+      "result": "PASS",
+      "started_at": "2026-08-05T15:43:11-0700",
+      "target": "live-smoke-action-cancel"
+    }
+  ]
+}
