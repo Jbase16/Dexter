@@ -222,6 +222,11 @@ private func audioPlaybackCompletePayload(traceID: String?) -> String {
     return payload
 }
 
+enum DexterNewSessionResult: Sendable {
+    case ready
+    case failed(String)
+}
+
 actor DexterClient {
 
     private static let socketPath = "/tmp/dexter.sock"
@@ -279,6 +284,7 @@ actor DexterClient {
     /// `sendTypedInput` to construct a `ClientEvent` with the correct session ID
     /// without coupling the public API to `runSession`'s local scope.
     private var currentSessionID: String? = nil
+    private var readySessionID: String? = nil
 
     /// Shared mute flag — readable from the @Sendable gRPC onResponse closure.
     /// Actor writes it; gRPC closure reads it. See TTSGate for safety rationale.
@@ -376,6 +382,7 @@ actor DexterClient {
             // to the local scope. Cleared in the defer block below alongside
             // eventContinuation so the two are always in sync.
             self.currentSessionID = sessionID
+            self.readySessionID = nil
 
             // Start AVAudioEngine for TTS playback. Idempotent — engine.isRunning
             // guard in start() makes repeated calls on reconnect a no-op.
@@ -421,6 +428,7 @@ actor DexterClient {
                 continuation.finish()
                 self.eventContinuation = nil
                 self.currentSessionID  = nil
+                self.readySessionID = nil
                 self.proactiveHealthProbeTask?.cancel()
                 self.proactiveHealthProbeTask = nil
                 self.proactiveAmbientInboxTask?.cancel()
@@ -606,6 +614,9 @@ actor DexterClient {
                     case .entityState(let change):
                         let state = EntityState(from: change.state)
                         print("[DexterClient] onResponse ← entityState: \(state)")
+                        if state == .idle {
+                            await self?.markSessionReady(sessionID)
+                        }
 
                         // Round 3 / behavioral fix: flush queued TTS audio when the
                         // entity transitions to IDLE or LISTENING. Without this,
@@ -1123,10 +1134,16 @@ actor DexterClient {
             return Self.restartHUDReport(for: target, response: response)
         } catch {
             return DexterHealthHUDReport(
-                markdown: Self.unavailableHealthMarkdown(
-                    reason: "\(target.displayName) restart failed before a post-restart health snapshot was available.\n\n\(error)"
-                ),
-                restartTargets: []
+                markdown: """
+                ### \(target.buttonTitle)
+
+                Status: failed
+
+                \(target.displayName) restart failed before a post-restart health snapshot was available.
+
+                \(error)
+                """,
+                restartTargets: [target]
             )
         }
     }
@@ -1301,13 +1318,25 @@ actor DexterClient {
         print("[DexterClient] TTS \(muted ? "muted" : "unmuted")")
     }
 
+    /// Record the first daemon IDLE transition for the currently active session.
+    private func markSessionReady(_ sessionID: String) {
+        guard currentSessionID == sessionID, readySessionID != sessionID else { return }
+        readySessionID = sessionID
+        print("[DexterClient] Session ready id=\(sessionID)")
+    }
+
     /// Close the active gRPC session stream so the existing reconnect loop opens
     /// a fresh session with a new session ID and empty live conversation context.
     ///
     /// This deliberately does not restart the Rust core, workers, or Ollama models.
     /// It is the operator-facing "new conversation" control, not a recovery action.
-    func startNewSession() {
+    func startNewSessionAndWait(timeout: Duration = .seconds(10)) async -> DexterNewSessionResult {
         print("[DexterClient] New session requested")
+        guard let previousSessionID = currentSessionID,
+              let continuation = eventContinuation else {
+            return .failed("No active Dexter session was available to replace.")
+        }
+
         audioPlayer.stop()
         proactiveHealthProbeTask?.cancel()
         proactiveHealthProbeTask = nil
@@ -1316,10 +1345,27 @@ actor DexterClient {
         currentResponseText = ""
         actionReceiptRevision = nil
 
-        let continuation = eventContinuation
         eventContinuation = nil
         currentSessionID = nil
-        continuation?.finish()
+        readySessionID = nil
+        continuation.finish()
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if Task.isCancelled {
+                return .failed("The new-session request was cancelled.")
+            }
+            if let sessionID = currentSessionID,
+               sessionID != previousSessionID,
+               readySessionID == sessionID {
+                print("[DexterClient] New session ready id=\(sessionID)")
+                return .ready
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+
+        return .failed("Dexter did not report the fresh session ready within 10 seconds.")
     }
 
     /// Send typed text from the HUD input field into the inference pipeline.
@@ -1508,6 +1554,7 @@ extension DexterClient {
         response: Dexter_V1_RestartComponentResponse
     ) -> DexterHealthHUDReport {
         let outcome = response.success ? "restarted" : "restart failed"
+        let terminalStatus = response.success ? "ready" : "failed"
         let message = response.message.trimmingCharacters(in: .whitespacesAndNewlines)
         let notice = message.isEmpty
             ? "\(target.displayName) \(outcome)."
@@ -1516,9 +1563,9 @@ extension DexterClient {
         guard response.hasHealth else {
             return DexterHealthHUDReport(
                 markdown: """
-                ### Dexter Health
+                ### \(target.buttonTitle)
 
-                Status: unknown
+                Status: \(response.success ? "unverified" : terminalStatus)
 
                 \(notice)
 
@@ -1528,13 +1575,25 @@ extension DexterClient {
             )
         }
 
+        let healthStatus = cleanStatus(response.health.status)
         let report = healthHUDReport(for: response.health, notice: notice)
-        guard response.success else {
-            return report
+        var restartTargets = operatorRestartTargets(for: response.health)
+        if !response.success, !restartTargets.contains(target) {
+            restartTargets.append(target)
         }
         return DexterHealthHUDReport(
-            markdown: report.markdown,
-            restartTargets: operatorRestartTargets(for: response.health)
+            markdown: """
+            ### \(target.buttonTitle)
+
+            Status: \(terminalStatus)
+
+            \(notice)
+
+            Post-restart Dexter health: \(healthStatus)
+
+            \(report.markdown)
+            """,
+            restartTargets: restartTargets
         )
     }
 

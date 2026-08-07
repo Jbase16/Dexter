@@ -307,9 +307,18 @@ run_new_session_assertions() {
         return 1
     }
 
+    wait_for_count "[HUDSmoke] showNewSessionReady" 1 15 || {
+        say "$FAIL" "$name - New Session loading surface did not resolve to ready"
+        tail -160 "$SWIFT_LOG" || true
+        return 1
+    }
+
     assert_log_contains "$name" "[HUDSmoke] enabled" || ok=1
     assert_log_contains "$name" "[HUDSmoke] newSessionRequest" || ok=1
     assert_log_contains "$name" "[DexterClient] New session requested" || ok=1
+    assert_log_contains "$name" "[DexterClient] New session ready" || ok=1
+    assert_log_contains "$name" "[HUDSmoke] showNewSessionReady" || ok=1
+    assert_log_absent "$name" "[HUDSmoke] showNewSessionFailed" || ok=1
     assert_log_count_at_least "$name" "[DexterClient] Ping OK" 2 || ok=1
     assert_log_absent "$name" "Fatal error" || ok=1
 

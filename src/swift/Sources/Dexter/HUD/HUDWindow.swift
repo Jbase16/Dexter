@@ -131,6 +131,10 @@ private final class HUDIconButton: NSButton {
     }
 }
 
+private final class HUDFirstClickButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 // MARK: - HUDWindow
 
 /// Floating conversation HUD — displays Dexter's streaming response text
@@ -346,9 +350,9 @@ final class HUDWindow: NSPanel {
             height: C.inputHeight
         ))
         healthActionsView = NSStackView(frame: healthActionsRect)
-        restartSTTButton = NSButton(frame: .zero)
-        restartTTSButton = NSButton(frame: .zero)
-        restartBrowserButton = NSButton(frame: .zero)
+        restartSTTButton = HUDFirstClickButton(frame: .zero)
+        restartTTSButton = HUDFirstClickButton(frame: .zero)
+        restartBrowserButton = HUDFirstClickButton(frame: .zero)
         historyView  = HUDHistoryView(frame: historyRect)
         healthButton = HUDIconButton(frame: healthRect)
         actionHistoryButton = HUDIconButton(frame: actionHistoryRect)
@@ -740,6 +744,28 @@ final class HUDWindow: NSPanel {
         """, restartTargets: [])
     }
 
+    func showNewSessionReady() {
+        HUDSmokeLog.log("showNewSessionReady")
+        showUtilityMarkdown("""
+        ### Dexter Session
+
+        Fresh session ready.
+        """, restartTargets: [])
+    }
+
+    func showNewSessionFailed(_ reason: String) {
+        HUDSmokeLog.log("showNewSessionFailed reason=\(reason)")
+        showUtilityMarkdown("""
+        ### Dexter Session
+
+        Fresh session failed.
+
+        \(reason)
+
+        Try New Session again. If it still fails, open Status to check daemon health.
+        """, restartTargets: [])
+    }
+
     func showDexterRestarting() {
         HUDSmokeLog.log("showDexterRestarting")
         showUtilityMarkdown("""
@@ -759,11 +785,19 @@ final class HUDWindow: NSPanel {
     }
 
     func showHealthRestarting(_ target: DexterWorkerRestartTarget) {
+        HUDSmokeLog.log("showHealthRestarting target=\(target.smokeName)")
         showUtilityMarkdown("""
-        ### Dexter Health
+        ### \(target.buttonTitle)
 
-        Restarting \(target.displayName)...
+        Status: restarting
+
+        Restart requested. Waiting for the daemon to report \(target.displayName) ready or failed.
         """, restartTargets: [])
+    }
+
+    func showHealthRestartResult(_ report: DexterHealthHUDReport, target: DexterWorkerRestartTarget) {
+        HUDSmokeLog.log("showHealthRestartResult target=\(target.smokeName)")
+        showUtilityMarkdown(report.markdown, restartTargets: report.restartTargets)
     }
 
     func performHealthRequestForSmoke() {
@@ -808,8 +842,19 @@ final class HUDWindow: NSPanel {
     }
 
     func performHealthRestartForSmoke(_ target: DexterWorkerRestartTarget) {
-        HUDSmokeLog.log("restartRequest target=\(target.smokeName)")
-        requestHealthRestart(target)
+        let button: NSButton
+        switch target {
+        case .stt:
+            button = restartSTTButton
+        case .tts:
+            button = restartTTSButton
+        case .browser:
+            button = restartBrowserButton
+        }
+        HUDSmokeLog.log(
+            "restartButton target=\(target.smokeName) acceptsFirstMouse=\(button.acceptsFirstMouse(for: nil))"
+        )
+        button.performClick(nil)
     }
 
     @objc private func restartSTTWorker() {
@@ -825,6 +870,7 @@ final class HUDWindow: NSPanel {
     }
 
     private func requestHealthRestart(_ target: DexterWorkerRestartTarget) {
+        HUDSmokeLog.log("restartRequest target=\(target.smokeName)")
         cancelDismiss()
         onHealthRestartRequest?(target)
     }

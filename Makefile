@@ -569,7 +569,7 @@ live-smoke-hud: ensure-core-not-running require-active-gui-session
 ## live-smoke-hud-new-session: verify the Swift HUD can start a fresh daemon session
 live-smoke-hud-new-session: ensure-core-not-running require-active-gui-session
 	cd $(RUST_CORE_DIR) && cargo build --release --bin dexter-core
-	DEXTER_HUD_SMOKE_NEW_SESSION=1 DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=8 bash scripts/live-hud-smoke.sh --start-core
+	DEXTER_HUD_SMOKE_NEW_SESSION=1 DEXTER_HUD_SMOKE_EXIT_AFTER_SECS=15 bash scripts/live-hud-smoke.sh --start-core
 
 ## live-smoke-hud-lifecycle: run actual Swift HUD restart/quit lifecycle regression
 live-smoke-hud-lifecycle: ensure-core-not-running require-active-gui-session

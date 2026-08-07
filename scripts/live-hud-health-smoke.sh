@@ -280,8 +280,12 @@ run_assertions() {
     assert_contains "$name" "$SWIFT_LOG" "Evidence: Succeeded:" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "$HUD_STATUS_TOKEN" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showUtilityMarkdown" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] restartButton target=$RESTART_COMPONENT acceptsFirstMouse=true" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] restartRequest target=$RESTART_COMPONENT" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showHealthRestarting target=$RESTART_COMPONENT" || ok=1
     assert_contains "$name" "$SWIFT_LOG" "[DexterClient] Restart RPC OK target=$RESTART_COMPONENT success=true" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "[HUDSmoke] showHealthRestartResult target=$RESTART_COMPONENT" || ok=1
+    assert_contains "$name" "$SWIFT_LOG" "### Restart Browser  Status: ready" || ok=1
     assert_contains "$name" "$CORE_LOG" "Health snapshot requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Action history requested" || ok=1
     assert_contains "$name" "$CORE_LOG" "Ambient history requested" || ok=1

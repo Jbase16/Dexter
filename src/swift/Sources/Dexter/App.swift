@@ -106,11 +106,17 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                 Task { [weak c, weak window] in
                     let report = await c?.restartWorkerAndFetchHealthReport(target)
                         ?? DexterHealthHUDReport(
-                            markdown: DexterClient.unavailableHealthMarkdown(reason: "Dexter client is not ready."),
+                            markdown: """
+                            ### \(target.buttonTitle)
+
+                            Status: failed
+
+                            Dexter client is not ready.
+                            """,
                             restartTargets: [target]
                         )
                     await MainActor.run {
-                        window?.hud.showHealthReport(report)
+                        window?.hud.showHealthRestartResult(report, target: target)
                     }
                 }
             }
@@ -121,9 +127,8 @@ final class DexterApp: NSObject, NSApplicationDelegate {
                 self?.beginDexterRestart(from: window)
             }
 
-            window.hud.onDexterNewSessionRequest = { [weak c, weak window] in
-                window?.hud.showNewSessionStarting()
-                Task { await c?.startNewSession() }
+            window.hud.onDexterNewSessionRequest = { [weak self, weak c, weak window] in
+                self?.beginNewSession(using: c, from: window)
             }
 
             window.hud.onDexterQuitRequest = { [weak self, weak window] in
@@ -329,8 +334,23 @@ final class DexterApp: NSObject, NSApplicationDelegate {
     }
 
     @MainActor @objc private func newSession(_ sender: Any?) {
-        floatingWindow?.hud.showNewSessionStarting()
-        Task { await client?.startNewSession() }
+        beginNewSession(using: client, from: floatingWindow)
+    }
+
+    @MainActor private func beginNewSession(using client: DexterClient?, from window: FloatingWindow?) {
+        guard let client, let window else { return }
+        window.hud.showNewSessionStarting()
+        Task { [weak window] in
+            let result = await client.startNewSessionAndWait()
+            await MainActor.run {
+                switch result {
+                case .ready:
+                    window?.hud.showNewSessionReady()
+                case .failed(let reason):
+                    window?.hud.showNewSessionFailed(reason)
+                }
+            }
+        }
     }
 
     @MainActor @objc private func showDexterStatus(_ sender: Any?) {
@@ -398,8 +418,7 @@ final class DexterApp: NSObject, NSApplicationDelegate {
         case "quit":
             beginDexterQuit(from: window)
         case "new_session", "new-session", "newsession", "session":
-            window.hud.showNewSessionStarting()
-            Task { await client?.startNewSession() }
+            beginNewSession(using: client, from: window)
         default:
             window.hud.performLifecycleConfirmationForSmoke(action)
         }
