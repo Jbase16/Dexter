@@ -2734,6 +2734,7 @@ pub async fn execute_shortcut(
 /// - The worker returns {"success": false, "error": "..."}
 pub async fn execute_browser(
     coordinator: &BrowserCoordinator,
+    action_id: &str,
     action: &BrowserActionKind,
     _timeout_secs: u64, // timeout is enforced inside coordinator.execute()
 ) -> ExecutionResult {
@@ -2757,6 +2758,7 @@ pub async fn execute_browser(
             }
         }
         Ok(json_str) => {
+            coordinator.observe_work_order_shadow_result(action_id, &json_str);
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Err(e) => ExecutionResult {
                     success: false,
@@ -3476,7 +3478,13 @@ mod tests {
             url: "https://example.com".to_string(),
         };
 
-        let result = execute_browser(&coordinator, &action, ACTION_DEFAULT_TIMEOUT_SECS).await;
+        let result = execute_browser(
+            &coordinator,
+            "test-browser-unavailable",
+            &action,
+            ACTION_DEFAULT_TIMEOUT_SECS,
+        )
+        .await;
 
         assert!(!result.success);
         assert!(result
@@ -3498,7 +3506,13 @@ mod tests {
             selector: Some("body".to_string()),
         };
 
-        let result = execute_browser(&coordinator, &action, ACTION_DEFAULT_TIMEOUT_SECS).await;
+        let result = execute_browser(
+            &coordinator,
+            "test-browser-diagnostic",
+            &action,
+            ACTION_DEFAULT_TIMEOUT_SECS,
+        )
+        .await;
 
         assert!(!result.success);
         assert!(result

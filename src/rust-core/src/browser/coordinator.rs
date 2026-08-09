@@ -9,7 +9,7 @@
 /// I/O borrows stdin/stdout across await.
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc, Mutex as StdMutex,
+    Arc, Mutex as StdMutex, OnceLock,
 };
 
 use tracing::{error, info, warn};
@@ -37,6 +37,7 @@ pub struct BrowserCoordinator {
     restart_count: Arc<AtomicU32>,
     last_failure: Arc<StdMutex<Option<BrowserDiagnostic>>>,
     current_page_url: Arc<StdMutex<Option<String>>>,
+    work_order_shadow: Arc<OnceLock<crate::work_order::shadow::ShadowTracker>>,
 }
 
 impl BrowserCoordinator {
@@ -49,6 +50,44 @@ impl BrowserCoordinator {
             restart_count: Arc::new(AtomicU32::new(0)),
             last_failure: Arc::new(StdMutex::new(None)),
             current_page_url: Arc::new(StdMutex::new(None)),
+            work_order_shadow: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn attach_work_order_shadow(
+        &self,
+        tracker: crate::work_order::shadow::ShadowTracker,
+    ) {
+        if self.work_order_shadow.set(tracker).is_err() {
+            warn!("Browser shadow tracker was already attached; keeping the original tracker");
+        }
+    }
+
+    /// Observe the original structured worker payload before executor code
+    /// flattens it into generic action output. This never waits on shadow work.
+    pub(crate) fn observe_work_order_shadow_result(&self, action_id: &str, payload: &str) {
+        let Some(tracker) = self.work_order_shadow.get() else {
+            return;
+        };
+        match crate::work_order::evidence::from_browser_result(
+            action_id,
+            payload,
+            chrono::Utc::now(),
+        ) {
+            Ok(evidence) => {
+                for evidence in evidence {
+                    tracker.observe(crate::work_order::shadow::ShadowEvent::EvidenceObserved {
+                        session_id: "browser-worker".to_string(),
+                        source_turn_id: None,
+                        evidence,
+                    });
+                }
+            }
+            Err(error) => warn!(
+                error = %error,
+                action_id = %action_id,
+                "Browser result could not be adapted for shadow evidence; production execution is unaffected"
+            ),
         }
     }
 

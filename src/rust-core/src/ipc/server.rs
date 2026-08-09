@@ -723,6 +723,7 @@ impl CoreService {
         let mut shared = crate::orchestrator::SharedDaemonState::new_degraded();
         shared.stt_ready = stt_ready.clone();
         shared.stt_prewarm_complete = stt_prewarm_complete.clone();
+        shared.enable_work_order_shadow(&cfg.core.state_dir);
         let shared_for_warmup = shared.clone();
         let cfg_for_warmup = cfg.clone();
         let stt_ready_for_summary = stt_ready.clone();
@@ -832,6 +833,8 @@ impl CoreService {
         if !should_record {
             return;
         }
+
+        self.shared.record_shadow_health(health);
 
         let severity = match status {
             "ready" => AmbientSeverity::Info,
@@ -1348,6 +1351,10 @@ impl DexterService for CoreService {
             // _signal_done is dropped when this async block exits on any path:
             // normal loop exit, orchestrator construction failure, or panic.
             let _signal_done = reader_done_tx;
+            shared_clone.record_shadow_session_lifecycle(
+                &session_trace,
+                crate::work_order::evidence::SessionLifecycleState::Starting,
+            );
 
             // Phase 24: bounded channel for background action results.
             // Capacity 8: at most a few concurrent actions in flight at once.
@@ -1382,6 +1389,10 @@ impl DexterService for CoreService {
                         session = %session_trace,
                         error   = %e,
                         "CoreOrchestrator construction failed — closing session"
+                    );
+                    shared_clone.record_shadow_session_lifecycle(
+                        &session_trace,
+                        crate::work_order::evidence::SessionLifecycleState::Failed,
                     );
                     return; // _signal_done dropped → oneshot fires → hold-open exits → tx dropped
                 }
@@ -1463,6 +1474,11 @@ impl DexterService for CoreService {
                 };
                 let _ = tx_reader_clone.send(Ok(idle_event)).await;
             }
+
+            shared_clone.record_shadow_session_lifecycle(
+                &session_trace,
+                crate::work_order::evidence::SessionLifecycleState::Ready,
+            );
 
             // Periodic health-check timer for the TTS worker (Phase 13).
             // Interleaved with inbound message reads via tokio::select! so the timer
@@ -1589,6 +1605,10 @@ impl DexterService for CoreService {
 
             // Persist session state before releasing _signal_done.
             // This ensures the state file is written before the stream closes.
+            shared_clone.record_shadow_session_lifecycle(
+                &session_trace,
+                crate::work_order::evidence::SessionLifecycleState::Ended,
+            );
             orchestrator.shutdown().await;
             // _signal_done dropped here → oneshot fires → hold-open exits → tx dropped
         });

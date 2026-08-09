@@ -1144,6 +1144,7 @@ pub struct SharedDaemonState {
     pub primary_keepalive_in_flight: Arc<AtomicBool>,
     pub last_foreground_generation_completed_at: Arc<StdMutex<Option<Instant>>>,
     pub operator_context_snapshot: Arc<StdMutex<Option<ContextSnapshot>>>,
+    work_order_shadow: Option<crate::work_order::shadow::ShadowTracker>,
     /// Cross-process weight-residency pinner. Wires PRIMARY's GGUF page-cache
     /// pages resident so macOS cannot reclaim them — replacing the reactive
     /// keepalive ping (see `system::residency` + `PRIMARY_KEEPALIVE_PING_INTERVAL_SECS`).
@@ -1174,8 +1175,88 @@ impl SharedDaemonState {
             primary_keepalive_in_flight: Arc::new(AtomicBool::new(false)),
             last_foreground_generation_completed_at: Arc::new(StdMutex::new(None)),
             operator_context_snapshot: Arc::new(StdMutex::new(None)),
+            work_order_shadow: None,
             residency: crate::system::residency::ResidencyManager::from_env(),
         }
+    }
+
+    pub fn enable_work_order_shadow(&mut self, state_dir: &Path) {
+        let tracker = crate::work_order::shadow::ShadowTracker::spawn(state_dir);
+        self.browser.attach_work_order_shadow(tracker.clone());
+        self.work_order_shadow = Some(tracker);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn flush_work_order_shadow_for_test(&self) {
+        if let Some(tracker) = &self.work_order_shadow {
+            tracker.flush_for_test().await;
+        }
+    }
+
+    fn record_shadow_evidence(
+        &self,
+        session_id: &str,
+        source_turn_id: Option<&str>,
+        evidence: Result<
+            crate::work_order::types::EvidenceRef,
+            crate::work_order::evidence::EvidenceAdapterError,
+        >,
+    ) {
+        let Some(tracker) = &self.work_order_shadow else {
+            return;
+        };
+        match evidence {
+            Ok(evidence) => {
+                tracker.observe(crate::work_order::shadow::ShadowEvent::EvidenceObserved {
+                    session_id: session_id.to_string(),
+                    source_turn_id: source_turn_id.map(str::to_string),
+                    evidence,
+                })
+            }
+            Err(error) => warn!(
+                error = %error,
+                "Work-order shadow evidence adaptation failed; production execution is unaffected"
+            ),
+        }
+    }
+
+    pub fn record_shadow_action_receipt(
+        &self,
+        session_id: &str,
+        action_id: &str,
+        action_type: &str,
+        outcome: &str,
+    ) {
+        self.record_shadow_evidence(
+            session_id,
+            None,
+            crate::work_order::evidence::from_action_receipt(
+                action_id,
+                action_type,
+                outcome,
+                chrono::Utc::now(),
+            ),
+        );
+    }
+
+    pub fn record_shadow_health(&self, health: &crate::ipc::proto::HealthResponse) {
+        self.record_shadow_evidence(
+            "daemon-health",
+            None,
+            crate::work_order::evidence::from_health_snapshot(health, chrono::Utc::now()),
+        );
+    }
+
+    pub fn record_shadow_session_lifecycle(
+        &self,
+        session_id: &str,
+        state: crate::work_order::evidence::SessionLifecycleState,
+    ) {
+        self.record_shadow_evidence(
+            session_id,
+            None,
+            crate::work_order::evidence::from_session_event(session_id, state, chrono::Utc::now()),
+        );
     }
 
     fn begin_foreground_generation(&self) -> ForegroundGenerationGuard {
@@ -1204,7 +1285,7 @@ impl SharedDaemonState {
         }
     }
 
-    pub fn record_operator_context(&self, snapshot: &ContextSnapshot) {
+    pub fn record_operator_context(&self, session_id: &str, snapshot: &ContextSnapshot) {
         match self.operator_context_snapshot.lock() {
             Ok(mut guard) => {
                 *guard = Some(snapshot.clone());
@@ -1216,6 +1297,11 @@ impl SharedDaemonState {
                 );
             }
         }
+        self.record_shadow_evidence(
+            session_id,
+            None,
+            crate::work_order::evidence::from_context_snapshot(snapshot),
+        );
     }
 
     pub fn operator_context_markdown(&self) -> String {
@@ -4193,7 +4279,7 @@ impl CoreOrchestrator {
         self.context_observer
             .update_shell_command(command.clone(), cwd.clone(), exit_code);
         self.shared
-            .record_operator_context(self.context_observer.snapshot());
+            .record_operator_context(&self.session_id, self.context_observer.snapshot());
         info!(
             session   = %self.session_id,
             command   = %command,
@@ -5982,8 +6068,10 @@ impl CoreOrchestrator {
             Ok(SystemEventType::AppFocused) => {
                 let changed = self.context_observer.update_from_app_focused(&sys.payload);
                 if changed {
-                    self.shared
-                        .record_operator_context(self.context_observer.snapshot());
+                    self.shared.record_operator_context(
+                        &self.session_id,
+                        self.context_observer.snapshot(),
+                    );
                     info!(
                         session = %self.session_id,
                         app     = ?self.context_observer.snapshot().app_name,
@@ -6037,8 +6125,10 @@ impl CoreOrchestrator {
             }
             Ok(SystemEventType::ScreenLocked) => {
                 if self.context_observer.set_screen_locked(true) {
-                    self.shared
-                        .record_operator_context(self.context_observer.snapshot());
+                    self.shared.record_operator_context(
+                        &self.session_id,
+                        self.context_observer.snapshot(),
+                    );
                 }
                 info!(session = %self.session_id, "Screen locked — context observation paused");
             }
@@ -6047,8 +6137,10 @@ impl CoreOrchestrator {
                     .context_observer
                     .update_from_element_changed(&sys.payload);
                 if changed {
-                    self.shared
-                        .record_operator_context(self.context_observer.snapshot());
+                    self.shared.record_operator_context(
+                        &self.session_id,
+                        self.context_observer.snapshot(),
+                    );
                     info!(
                         session = %self.session_id,
                         element = ?self.context_observer.snapshot().focused_element,
@@ -6064,8 +6156,10 @@ impl CoreOrchestrator {
             }
             Ok(SystemEventType::ScreenUnlocked) => {
                 if self.context_observer.set_screen_locked(false) {
-                    self.shared
-                        .record_operator_context(self.context_observer.snapshot());
+                    self.shared.record_operator_context(
+                        &self.session_id,
+                        self.context_observer.snapshot(),
+                    );
                 }
                 info!(session = %self.session_id, "Screen unlocked — context observation resumed");
             }
@@ -6076,8 +6170,10 @@ impl CoreOrchestrator {
                     .context_observer
                     .update_from_clipboard_changed(&sys.payload);
                 if changed {
-                    self.shared
-                        .record_operator_context(self.context_observer.snapshot());
+                    self.shared.record_operator_context(
+                        &self.session_id,
+                        self.context_observer.snapshot(),
+                    );
                     info!(
                         session    = %self.session_id,
                         char_count = self.context_observer.snapshot()
@@ -9459,11 +9555,18 @@ impl CoreOrchestrator {
             .await
             .display()
             .to_string();
+        let description = action_status_subject(description);
+        self.shared.record_shadow_action_receipt(
+            &self.session_id,
+            action_id,
+            action_type,
+            outcome_label,
+        );
         let receipt = ActionReceipt {
             action_id: action_id.to_string(),
             action_type: action_type.to_string(),
             category: category.to_string(),
-            description: action_status_subject(description),
+            description,
             outcome: outcome_label.to_string(),
             summary,
             audit_log_path,

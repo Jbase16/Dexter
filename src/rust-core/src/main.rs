@@ -21,6 +21,7 @@ mod retrieval;
 mod session;
 mod system;
 mod voice;
+mod work_order;
 
 use std::sync::Arc;
 

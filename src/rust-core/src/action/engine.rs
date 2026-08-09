@@ -1024,8 +1024,13 @@ impl ActionEngine {
                 .await
             }
             ActionSpec::Browser { action, .. } => {
-                executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
-                    .await
+                executor::execute_browser(
+                    &self.browser,
+                    action_id,
+                    action,
+                    BROWSER_WORKER_RESULT_TIMEOUT_SECS,
+                )
+                .await
             }
             ActionSpec::Shortcut {
                 name,
@@ -1896,8 +1901,13 @@ impl ExecutorHandle {
                 .await
             }
             ActionSpec::Browser { action, .. } => {
-                executor::execute_browser(&self.browser, action, BROWSER_WORKER_RESULT_TIMEOUT_SECS)
-                    .await
+                executor::execute_browser(
+                    &self.browser,
+                    action_id,
+                    action,
+                    BROWSER_WORKER_RESULT_TIMEOUT_SECS,
+                )
+                .await
             }
             ActionSpec::Shortcut {
                 name,
